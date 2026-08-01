@@ -1,5 +1,5 @@
-# Uniagent
-
+# Uniagent(WIP)
+WARNING: PROJECT IS NOT FULLY COMPLETE OR READY FOR INSTALL
 An AI agent framework in Python. It gives an LLM tools to read and write files, run terminal commands, search the web, send emails, manage scheduled jobs, and more. You can use it from a browser on any device on your network, or from the terminal.
 
 ![Uniagent UI](images/uniagent_ui.png)
