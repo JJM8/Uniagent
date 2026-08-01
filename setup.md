@@ -4,29 +4,42 @@ How to get Uniagent running on a fresh machine.
 
 ## Windows 10 / 11 (one line)
 
-Open PowerShell (any folder) and paste:
+Open Command Prompt or PowerShell (any folder) and paste:
 
-```powershell
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/JJM8/Uniagent/main/install.ps1 | iex"
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/JJM8/Uniagent/main/install.ps1 | iex"
 ```
 
-The installer:
+That is the whole install — **no administrator rights needed**. The installer:
 
-1. installs **git** and **Python 3.12** via winget if they're missing
+1. installs **git** and **Python 3.12** if they're missing. It uses winget where
+   that's available; on a machine without it, git comes from the portable
+   [MinGit](https://github.com/git-for-windows/git/releases) build (unpacked into
+   `%LOCALAPPDATA%\Uniagent\tools`) and Python from python.org's per-user
+   installer. Neither path raises a UAC prompt.
 2. clones Uniagent into `%USERPROFILE%\Uniagent` (or `$env:UNIAGENT_HOME`)
 3. makes a `.venv` and installs the dependencies
 4. writes `.env` from the example if you don't have one yet
 5. puts a `uniagentcli` command on your PATH (new terminal needed)
 6. installs a **scheduled task** so the server and cron watcher start at every
    logon, and starts them immediately
-7. opens `https://localhost:8764` and prints the first-run password (it's also
-   in `%USERPROFILE%\Uniagent\logs\server.out.log`)
+7. waits (up to 90s) for the server to answer on port 8764, then prints the
+   password and opens `https://localhost:8764`. The password is read from
+   `.env`, where the server writes the one it generates on first run — so
+   `findstr UNIAGENT_PASSWORD "%USERPROFILE%\Uniagent\.env"` gets it back at any
+   time.
+
+If a step can't finish, the installer stops there and tells you what to install
+by hand. Re-running it afterwards is safe: an existing checkout is pulled rather
+than re-cloned, and an existing `.env` is left alone.
 
 Afterwards: `update.ps1` pulls new code and restarts the server;
 `install-autostart.ps1 -Remove` stops it starting at logon. `schtasks /End /TN
-Uniagent` stops it right now. The first time the server listens, Windows asks
-to allow it through the firewall — click **Allow** (or run the installer as
-admin to have the rule added for you).
+Uniagent` stops it right now. To remove it completely, run
+`install-autostart.ps1 -Remove` and delete `%USERPROFILE%\Uniagent` (plus
+`%LOCALAPPDATA%\Uniagent` if the installer put MinGit there). The first time the
+server listens, Windows asks to allow it through the firewall — click **Allow**
+(or run the installer as admin to have the rule added for you).
 
 Notes specific to Windows:
 

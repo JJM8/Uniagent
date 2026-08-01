@@ -1,5 +1,6 @@
 # Uniagent command-line interface (Windows launcher).
-# Installed to <repo>\bin\uniagent.cmd by install.ps1 and put on PATH.
+# Installed to <repo>\bin\uniagentcli.cmd by install.ps1 and put on PATH, so the
+# command is spelled the same here as it is on Linux (scripts\uniagentcli).
 # Usage:
 #   uniagentcli                  -> the CLI (live keyboard mode is Unix-only for
 #                                   now; Windows prints how to use it)

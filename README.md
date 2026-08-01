@@ -107,15 +107,17 @@ Uniagent/
 
 ## Getting started
 
-**Windows 10/11** — one line, from PowerShell:
+**Windows 10/11** — one line, pasted into Command Prompt or PowerShell:
 
-```powershell
-powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/JJM8/Uniagent/main/install.ps1 | iex"
+```
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/JJM8/Uniagent/main/install.ps1 | iex"
 ```
 
 It installs git and Python if needed, clones the repo, installs dependencies,
 puts `uniagentcli` on your PATH, registers the server + cron watcher to start
-at every logon, and opens the web UI. Full walkthrough in `setup.md`.
+at every logon, waits for the server to answer, and opens the web UI with the
+password on screen. No administrator rights required. Full walkthrough in
+`setup.md`.
 
 **Linux/macOS:**
 
