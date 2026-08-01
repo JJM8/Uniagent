@@ -1,0 +1,21 @@
+<!-- The Uniagent mark: the sigma in a rounded square that the app header has
+     drawn since the start, as a real file rather than a &Sigma; character in a
+     styled div.
+
+     The sigma is a stroked path, not <text>. A <text> element renders in
+     whatever font the viewer happens to have, so the same file would come out
+     differently on a phone, in a favicon and in a README - which is the one
+     thing a logo must never do.
+
+     The colour is written out rather than left as currentColor. A standalone
+     file has no inherited colour to take, and outside a browser - an image
+     viewer, a README render, anything converting it to a PNG - currentColor
+     resolves to nothing and the whole mark comes out invisible. login.html and
+     index.html inline these same shapes with stroke="currentColor" instead, so
+     the copy that lives inside a page still follows the light/dark theme. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32"
+     fill="none" stroke="#3fb950">
+  <rect x="1.6" y="1.6" width="28.8" height="28.8" rx="7" stroke-width="2.4"/>
+  <path d="M21 9.8 H11 L17 16 L11 22.2 H21"
+        stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

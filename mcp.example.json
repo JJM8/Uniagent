@@ -1,0 +1,52 @@
+{
+  "_comment": [
+    "MCP servers Uniagent may use. Reached by the model through the `mcp` tool,",
+    "never directly - see scripts/mcp_client.py.",
+    "",
+    "A server is declared one of two ways.",
+    "",
+    "1. A PROGRAM Uniagent starts and talks to over its stdin/stdout:",
+    "     \"command\"  the program to run. Required for this form.",
+    "     \"args\"     its arguments, as a list.",
+    "     \"env\"      extra environment variables, as an object.",
+    "     \"cwd\"      working directory to start it in.",
+    "",
+    "2. A SERVER ALREADY LISTENING ON A PORT, which Uniagent connects to:",
+    "     \"url\"       where it is, e.g. \"http://localhost:3001/mcp\".",
+    "                Required for this form. Uniagent does not start it -",
+    "                whatever is on that port has to be running already.",
+    "     \"transport\" OPTIONAL, \"http\" or \"sse\". Leave it out and both are",
+    "                tried, HTTP first: that is the current standard, SSE is",
+    "                the older one many servers still only speak. So a bare",
+    "                url is usually enough on its own.",
+    "     \"headers\"   OPTIONAL, sent with every request. This is where an",
+    "                auth token goes, e.g. {\"Authorization\": \"Bearer ...\"}.",
+    "",
+    "Either form also takes:",
+    "     \"enabled\"  set false to switch a server off without deleting it.",
+    "     \"tools\"    OPTIONAL allowlist of tool names. Leave it out and every",
+    "                tool the server offers is available. Worth setting on a",
+    "                big server: the `mcp` tool's listing has to fit in the",
+    "                model's context when it asks what's there.",
+    "",
+    "Two examples, both switched off - delete \"enabled\" to turn one on:"
+  ],
+  "servers": {
+    "example-on-a-port": {
+      "enabled": false,
+      "url": "http://localhost:3001/mcp"
+    },
+    "example-program": {
+      "enabled": false,
+      "command": "npx",
+      "args": [
+        "-y",
+        "@some/mcp-server"
+      ],
+      "tools": [
+        "the_two",
+        "you_actually_use"
+      ]
+    }
+  }
+}

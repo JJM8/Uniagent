@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<!-- The only page an unauthenticated visitor is ever served. It carries no
+     information about the machine behind it on purpose: no chat list, no model
+     names, no hostname - a stranger who finds the port learns that something
+     wants a password and nothing else.
+
+     Self-contained, and it can't ask the server which theme is set (that route
+     needs a session), so it follows the browser's own light/dark preference and
+     defaults to dark, which is what settings.json ships with. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Uniagent</title>
+<!-- web/uniagent-icon.png, inlined as a data URI at 96px. The file itself can't
+     be linked here: serving it would mean a second route open to anyone who
+     finds the port, and a browser asks for the favicon without the session
+     cookie anyway, so a linked one would come back 401 and show nothing. -->
+<link rel="icon" href="data:image/png;base64,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">
+<!-- The same three lines index.html has. Geomini is on Google Fonts, so it
+     loads on a phone that hasn't got it installed - and loading it the same way
+     here is what stops the typeface changing under you at the moment you log
+     in. If there's no internet both pages fall back to sans-serif together. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geomini:wght@200..800&display=swap" rel="stylesheet">
+<style>
+  /* Same palette as index.html, kept in step by hand: the accent is three
+     loose hue/saturation/lightness numbers, and every accent tone the page
+     needs is re-lit from them in the block below. */
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #21262d;
+    --text: #c9d1d9;
+    --dim: #8b949e;
+    --accent-h: 128.4;
+    --accent-s: 49.2%;
+    --accent-l: 48.6%;
+    --accent-lift: 10%;
+    --on-accent: #0d1117;
+    --red-h: 3;
+    --red-s: 93%;
+    --red-l: 63%;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ffffff;
+      --panel: #f6f8fa;
+      --border: #d0d7de;
+      --text: #1f2328;
+      --dim: #656d76;
+      --accent-h: 137.2;
+      --accent-s: 66%;
+      --accent-l: 30%;
+      --accent-lift: -10%;
+      --on-accent: #ffffff;
+      --red-h: 356;
+      --red-s: 72%;
+      --red-l: 47%;
+    }
+  }
+  :root {
+    --accent:     hsl(var(--accent-h) var(--accent-s) var(--accent-l));
+    --accent-pop: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l) + var(--accent-lift)));
+    --red:        hsl(var(--red-h) var(--red-s) var(--red-l));
+    /* web/uniagent-icon.png at 96px, the same blob as the favicon above. It
+       has to be inlined here: serving the file would mean a second route open
+       to anyone who finds the port. */
+    --logo: url("data:image/png;base64,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");
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    /* The same stack index.html uses, so the two pages don't visibly change
+       typeface as you go from the password box into the app. Geomini is a
+       locally installed font rather than a bundled webfont, so on a device that
+       hasn't got it BOTH pages fall back to sans-serif together - which is the
+       point: they match either way. */
+    font-family: "Geomini", sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  form {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 28px;
+    width: 100%;
+    max-width: 340px;
+  }
+  /* The app header's mark and wordmark, same sizes, so the login page reads as
+     the same product rather than a gate in front of one. */
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+  /* Fixed logo - it carries its own tile and green, so it does not follow the
+     light/dark preference the rest of this page does. */
+  .brand .logo { width: 28px; height: 28px; flex-shrink: 0;
+                 background: var(--logo) center / contain no-repeat; }
+  .brand h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.5px; }
+  p.sub { color: var(--dim); font-size: 12px; margin-bottom: 20px; }
+  input {
+    width: 100%;
+    font: inherit;   /* matches the app, where every control inherits the body font */
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font: inherit;
+    padding: 10px 12px;
+  }
+  input:focus { outline: none; border-color: var(--accent-pop); }
+  input::placeholder { color: var(--dim); }
+  button {
+    width: 100%;
+    margin-top: 12px;
+    background: var(--accent);
+    border: none;
+    border-radius: 6px;
+    color: var(--on-accent);
+    font: inherit;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    padding: 10px;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  /* Height is held even when empty, so submitting a wrong password doesn't
+     make the form jump as the message appears. */
+  #msg { color: var(--red); font-size: 12px; margin-top: 12px; min-height: 18px; }
+</style>
+</head>
+<body>
+<form id="f" autocomplete="on">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <h1>UNIAGENT</h1>
+  </div>
+  <p class="sub">Enter your password to continue.</p>
+  <!-- The username field is hidden but present: without one, mobile browsers
+       and password managers will offer to remember the password but have
+       nothing to file it under, and most then don't offer at all. -->
+  <input type="text" name="username" value="uniagent" autocomplete="username"
+         hidden>
+  <input id="pw" type="password" name="password" autocomplete="current-password"
+         placeholder="password" autofocus>
+  <button id="go" type="submit">Unlock</button>
+  <div id="msg"></div>
+</form>
+<script>
+  const form = document.getElementById("f");
+  const pw = document.getElementById("pw");
+  const go = document.getElementById("go");
+  const msg = document.getElementById("msg");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!pw.value) return;
+    go.disabled = true;
+    msg.textContent = "";
+    try {
+      const r = await fetch("/login", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({password: pw.value}),
+      });
+      if (r.ok) {
+        // Where they were headed before the gate sent them here, if anywhere.
+        const next = new URLSearchParams(location.search).get("next");
+        location.replace(next && next.startsWith("/") ? next : "/");
+        return;
+      }
+      const data = await r.json().catch(() => ({}));
+      msg.textContent = data.error || "Wrong password.";
+    } catch (err) {
+      msg.textContent = "Could not reach the server.";
+    }
+    go.disabled = false;
+    pw.select();
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+[Unit]
+Description=Uniagent cron watcher - fires scheduled prompts from cron.json
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Unbuffered, so the watcher's notes and each job's output reach the journal live
+# instead of sitting in a block buffer until the process exits.
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/path/to/Documents/projects/Uniagent/scripts
+ExecStart=/usr/bin/python3 /path/to/Documents/projects/Uniagent/scripts/cron.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Agent Watch — Mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #050607;
+    --case: #101317;
+    --bezel: #1b2026;
+    --ink: #e8ecef;
+    --dim: #6b7580;
+    --cyan: #00e5ff;
+    --amber: #ffab2e;
+    --danger: #ff5d5d;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Inter", sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    min-height: 100%;
+    padding: 28px 16px 40px;
+    overflow-x: hidden;
+  }
+
+  .page-label {
+    font-family: "Space Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 22px;
+  }
+  .page-label span { color: var(--cyan); }
+
+  /* ---- the watch body ---- */
+  .watch {
+    position: relative;
+    width: min(78vw, 300px);
+    height: min(78vw, 300px);
+    border-radius: 50%;
+    background: radial-gradient(circle at 32% 28%, #1c2128, var(--case) 60%);
+    box-shadow:
+      0 0 0 10px var(--bezel),
+      0 0 0 12px #05070a,
+      0 20px 50px -10px rgba(0,0,0,0.8),
+      inset 0 0 30px rgba(0,0,0,0.6);
+  }
+  .watch::before {
+    /* crown */
+    content: "";
+    position: absolute;
+    right: -18px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 34px;
+    background: linear-gradient(180deg, #2a3038, #14171b);
+    border-radius: 4px;
+    box-shadow: 0 0 0 1px #05070a;
+  }
+  .lugs::before, .lugs::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    width: 60px;
+    height: 26px;
+    background: linear-gradient(180deg, #23272d, #14171b);
+    transform: translateX(-50%);
+    z-index: -1;
+  }
+  .lugs::before { top: -14px; border-radius: 10px 10px 0 0; }
+  .lugs::after { bottom: -14px; border-radius: 0 0 10px 10px; }
+
+  .face {
+    position: absolute;
+    inset: 14px;
+    border-radius: 50%;
+    background: #06080b;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  /* status ring — colour + animation communicate agent state */
+  .ring {
+    position: absolute;
+    inset: 6px;
+    border-radius: 50%;
+    border: 2px solid var(--dim);
+    opacity: 0.35;
+    transition: border-color .3s ease, opacity .3s ease;
+  }
+  .watch[data-state="listening"] .ring {
+    border-color: var(--cyan);
+    opacity: 1;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  .watch[data-state="reply"] .ring {
+    border-color: var(--amber);
+    opacity: 0.9;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(0,229,255,0.35); }
+    50% { box-shadow: 0 0 0 8px rgba(0,229,255,0); }
+  }
+
+  /* ---- idle face ---- */
+  .screen { display: none; width: 100%; height: 100%; align-items: center; justify-content: center; flex-direction: column; }
+  .screen.active { display: flex; }
+
+  .time {
+    font-family: "Space Mono", monospace;
+    font-size: 44px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .date {
+    font-family: "Space Mono", monospace;
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 0.1em;
+    margin-top: 4px;
+  }
+  .agent-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 16px;
+    font-family: "Space Mono", monospace;
+    font-size: 10px;
+    color: var(--cyan);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--cyan);
+    box-shadow: 0 0 8px var(--cyan);
+  }
+
+  /* ---- listening face ---- */
+  .wave {
+    display: flex;
+    align-items: flex-end;
+    gap: 4px;
+    height: 44px;
+  }
+  .wave i {
+    display: block;
+    width: 4px;
+    border-radius: 2px;
+    background: var(--cyan);
+    animation: bar 1s ease-in-out infinite;
+  }
+  .wave i:nth-child(1){height:14px;animation-delay:0s}
+  .wave i:nth-child(2){height:30px;animation-delay:.1s}
+  .wave i:nth-child(3){height:44px;animation-delay:.2s}
+  .wave i:nth-child(4){height:22px;animation-delay:.3s}
+  .wave i:nth-child(5){height:36px;animation-delay:.4s}
+  .wave i:nth-child(6){height:16px;animation-delay:.5s}
+  .wave i:nth-child(7){height:28px;animation-delay:.6s}
+  @keyframes bar {
+    0%, 100% { transform: scaleY(0.4); }
+    50% { transform: scaleY(1); }
+  }
+  .listening-label {
+    font-family: "Space Mono", monospace;
+    font-size: 12px;
+    color: var(--cyan);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-top: 14px;
+  }
+  .heard {
+    font-size: 11px;
+    color: var(--dim);
+    margin-top: 6px;
+    max-width: 150px;
+    text-align: center;
+  }
+
+  /* ---- reply face ---- */
+  .reply-icon {
+    font-family: "Space Mono", monospace;
+    font-size: 9px;
+    color: var(--amber);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .reply-text {
+    font-size: 15px;
+    line-height: 1.4;
+    text-align: center;
+    max-width: 168px;
+    font-weight: 500;
+  }
+  .reply-meta {
+    margin-top: 12px;
+    font-family: "Space Mono", monospace;
+    font-size: 9px;
+    color: var(--dim);
+    letter-spacing: 0.08em;
+  }
+
+  /* ---- control strip (demo only, not part of the watch) ---- */
+  .controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 30px;
+  }
+  .controls button {
+    font-family: "Space Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--dim);
+    background: var(--case);
+    border: 1px solid var(--bezel);
+    border-radius: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+  }
+  .controls button.on {
+    color: var(--bg);
+    background: var(--cyan);
+    border-color: var(--cyan);
+  }
+
+  .side-btn {
+    position: absolute;
+    right: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 6px;
+    height: 40px;
+    border-radius: 3px;
+    background: #2a3038;
+  }
+
+  .footnote {
+    margin-top: 26px;
+    font-family: "Space Mono", monospace;
+    font-size: 10px;
+    color: var(--dim);
+    text-align: center;
+    max-width: 260px;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+  <div class="page-label">agent watch <span>·</span> mockup</div>
+
+  <div class="watch lugs" data-state="idle" id="watch">
+    <div class="ring"></div>
+    <div class="face">
+
+      <div class="screen active" data-screen="idle">
+        <div class="time">09:41</div>
+        <div class="date">MON 20 JUL</div>
+        <div class="agent-row"><span class="dot"></span>agent idle</div>
+      </div>
+
+      <div class="screen" data-screen="listening">
+        <div class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="listening-label">listening</div>
+        <div class="heard">"remind me to&nbsp;&hellip;"</div>
+      </div>
+
+      <div class="screen" data-screen="reply">
+        <div class="reply-icon">agent</div>
+        <div class="reply-text">Reminder set for 6:00&nbsp;pm — pick up the parts.</div>
+        <div class="reply-meta">tap to dismiss</div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="on" data-state="idle">Idle</button>
+    <button data-state="listening">Listening</button>
+    <button data-state="reply">Reply</button>
+  </div>
+
+  <div class="footnote">Quick mockup — three states of a wrist-worn agent: idle face, voice capture, and a spoken-back reply. Not wired to anything real yet.</div>
+
+<script>
+  const watch = document.getElementById('watch');
+  const buttons = document.querySelectorAll('.controls button');
+  const screens = document.querySelectorAll('.screen');
+
+  function setState(state) {
+    watch.setAttribute('data-state', state);
+    screens.forEach(s => s.classList.toggle('active', s.dataset.screen === state));
+    buttons.forEach(b => b.classList.toggle('on', b.dataset.state === state));
+  }
+
+  buttons.forEach(b => b.addEventListener('click', () => setState(b.dataset.state)));
+
+  // gentle auto-cycle so it demos itself on a phone with no interaction
+  const order = ['idle', 'listening', 'reply'];
+  let i = 0;
+  setInterval(() => {
+    i = (i + 1) % order.length;
+    setState(order[i]);
+  }, 3200);
+</script>
+</body>
+</html>

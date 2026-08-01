@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Amazon Bedrock">
+  <g fill="none" stroke="#01A88D" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M32 6.5 53.5 18v23L32 52.5 10.5 41V18z"/>
+    <path d="M32 19.5 43.5 26v13L32 45.5 20.5 39V26z"/>
+  </g>
+  <circle cx="32" cy="32.5" r="4.2" fill="#01A88D"/>
+  <g fill="#01A88D">
+    <circle cx="32" cy="6.5" r="3.2"/>
+    <circle cx="53.5" cy="18" r="3.2"/>
+    <circle cx="53.5" cy="41" r="3.2"/>
+    <circle cx="32" cy="52.5" r="3.2"/>
+    <circle cx="10.5" cy="41" r="3.2"/>
+    <circle cx="10.5" cy="18" r="3.2"/>
+  </g>
+</svg>

@@ -1,0 +1,11 @@
+{
+  "_format": "One object per job in \"jobs\". Timing is two numbers: \"start\" (unix seconds - the moment of the first run) and \"interval\" (unix seconds between runs, omit or 0 to run once). Optional per job: provider, model, temperature, safety (true/false), safety_prompt (must contain {call}). Required: name, prompt, start. Full docs: README.md, or the cron tab in settings.",
+  "jobs": [
+    {
+      "name": "morning-brief",
+      "start": 1785567600,
+      "interval": 86400,
+      "prompt": "Every morning: check the news for anything worth knowing, and write me two short paragraphs on it. Nothing else."
+    }
+  ]
+}

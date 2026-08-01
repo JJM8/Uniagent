@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Uniwatch — your AI. on your wrist.</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geomini:wght@200..800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0e14;
+    --surface: #131820;
+    --card: #1a2230;
+    --border: #2a3344;
+    --green: #3fb950;
+    --amber: #c99a6b;
+    --text: #e1e6ed;
+    --dim: #8896a6;
+    --display: 'Geomini', sans-serif;
+    --body: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  * { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  html { font-size: 16px; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--body);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* ---- top bar ---- */
+  .top-bar {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 20px;
+    background: rgba(10, 14, 20, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--border);
+  }
+  .top-bar .sigma {
+    width: 26px; height: 26px;
+    border: 1.5px solid var(--green);
+    border-radius: 5px;
+    color: var(--green);
+    font-family: 'Geomini', sans-serif;
+    font-size: 17px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .top-bar .brand {
+    font-family: var(--display);
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 1.2px;
+    color: var(--text);
+  }
+  .top-bar .brand span { color: var(--green); }
+  .top-bar .tag {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 0.5px;
+  }
+
+  /* ---- hero ---- */
+  .hero {
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 100px 24px 60px;
+    text-align: center;
+    position: relative;
+    overflow: hidden;
+  }
+  /* subtle radial glow behind the watch */
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 500px; height: 500px;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(circle, rgba(63, 185, 80, 0.06) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  /* ---- CSS watch mockup ---- */
+  .watch-wrap {
+    position: relative;
+    width: 360px;
+    height: 280px;
+    margin-bottom: 32px;
+    animation: float 4s ease-in-out infinite;
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+  }
+
+  /* Watch band hints */
+  .band-top, .band-bottom {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 24px;
+    height: 36px;
+    background: linear-gradient(180deg, var(--card), var(--border));
+    border-radius: 4px;
+    opacity: 0.6;
+  }
+  .band-top { top: -10px; }
+  .band-bottom { bottom: -10px; }
+
+  /* Watch body */
+  .watch-body {
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(145deg, #1e2a3a, #141c2a);
+    border-radius: 28px;
+    border: 2px solid var(--border);
+    position: relative;
+    box-shadow:
+      0 20px 60px rgba(0,0,0,0.5),
+      inset 0 1px 0 rgba(255,255,255,0.04);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  /* Bezel ring */
+  .watch-body::after {
+    content: '';
+    position: absolute;
+    inset: 6px;
+    border-radius: 22px;
+    border: 1px solid rgba(255,255,255,0.04);
+    pointer-events: none;
+  }
+
+  /* Screen */
+  .screen {
+    width: 320px;
+    height: 240px;
+    border-radius: 16px;
+    background: #060a10;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    position: relative;
+    overflow: hidden;
+  }
+  .screen .sigma-big {
+    font-family: 'Geomini', sans-serif;
+    font-size: 48px;
+    font-weight: 700;
+    color: var(--green);
+    opacity: 0.9;
+    line-height: 1;
+  }
+  .screen .screen-sub {
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: var(--dim);
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  /* Voice waveform animation on screen */
+  .waveform {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    height: 20px;
+    margin-top: 6px;
+  }
+  .waveform span {
+    display: block;
+    width: 2px;
+    background: var(--green);
+    border-radius: 1px;
+    animation: wave 1.2s ease-in-out infinite;
+    opacity: 0.6;
+  }
+  .waveform span:nth-child(1) { height: 6px; animation-delay: 0s; }
+  .waveform span:nth-child(2) { height: 12px; animation-delay: 0.1s; }
+  .waveform span:nth-child(3) { height: 18px; animation-delay: 0.2s; }
+  .waveform span:nth-child(4) { height: 14px; animation-delay: 0.3s; }
+  .waveform span:nth-child(5) { height: 8px; animation-delay: 0.15s; }
+  .waveform span:nth-child(6) { height: 16px; animation-delay: 0.05s; }
+  .waveform span:nth-child(7) { height: 10px; animation-delay: 0.25s; }
+  .waveform span:nth-child(8) { height: 4px; animation-delay: 0.35s; }
+
+  @keyframes wave {
+    0%, 100% { transform: scaleY(0.5); opacity: 0.3; }
+    50% { transform: scaleY(1); opacity: 0.8; }
+  }
+
+  /* Hero text */
+  .hero h1 {
+    font-family: var(--display);
+    font-size: clamp(32px, 8vw, 52px);
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.5px;
+    color: var(--text);
+  }
+  .hero h1 .highlight {
+    color: var(--green);
+    position: relative;
+  }
+  .hero h1 .highlight::after {
+    content: '';
+    position: absolute;
+    bottom: -2px; left: 0; right: 0;
+    height: 3px;
+    background: var(--green);
+    border-radius: 2px;
+    opacity: 0.35;
+  }
+  .hero .sub {
+    margin-top: 12px;
+    font-size: clamp(15px, 3.5vw, 19px);
+    color: var(--dim);
+    max-width: 340px;
+    line-height: 1.5;
+    font-weight: 400;
+  }
+  .hero .badge-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 24px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .hero .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--dim);
+  }
+  .hero .badge .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    display: inline-block;
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* ---- section shared ---- */
+  section {
+    padding: 64px 24px;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+  .section-label {
+    font-family: var(--display);
+    font-size: 11px;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--green);
+    margin-bottom: 12px;
+    font-weight: 600;
+  }
+  section h2 {
+    font-family: var(--display);
+    font-size: clamp(24px, 6vw, 32px);
+    font-weight: 700;
+    line-height: 1.2;
+    margin-bottom: 16px;
+  }
+  section h2 + p {
+    color: var(--dim);
+    font-size: 15px;
+    line-height: 1.6;
+    margin-bottom: 28px;
+  }
+
+  /* ---- specs ---- */
+  .specs-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .spec-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 16px;
+  }
+  .spec-card .spec-icon {
+    font-size: 18px;
+    margin-bottom: 8px;
+    display: block;
+  }
+  .spec-card .spec-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--dim);
+    margin-bottom: 3px;
+  }
+  .spec-card .spec-value {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .spec-card .spec-note {
+    font-size: 12px;
+    color: var(--dim);
+    margin-top: 2px;
+  }
+
+  /* ---- features ---- */
+  .features {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .feature-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 22px 20px;
+    transition: border-color 0.25s;
+  }
+  .feature-card:hover {
+    border-color: var(--green);
+  }
+  .feature-card .feat-icon {
+    font-size: 24px;
+    margin-bottom: 10px;
+    display: block;
+  }
+  .feature-card h3 {
+    font-family: var(--display);
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--text);
+  }
+  .feature-card p {
+    font-size: 14px;
+    color: var(--dim);
+    line-height: 1.6;
+  }
+
+  /* ---- tech specs divider ---- */
+  .tech-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px 20px;
+    margin-top: 8px;
+  }
+  .tech-block .tech-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+  }
+  .tech-block .tech-item:last-child { border-bottom: none; }
+  .tech-block .tech-item .key {
+    color: var(--dim);
+    font-size: 13px;
+  }
+  .tech-block .tech-item .val {
+    color: var(--text);
+    font-weight: 500;
+    text-align: right;
+    font-size: 13px;
+  }
+
+  /* ---- CTA ---- */
+  .cta-section {
+    text-align: center;
+    padding: 80px 24px 100px;
+    position: relative;
+  }
+  .cta-section::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 50%;
+    transform: translateX(-50%);
+    width: 80%;
+    max-width: 400px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--green), transparent);
+    opacity: 0.3;
+  }
+  .cta-section h2 {
+    font-family: var(--display);
+    font-size: clamp(22px, 5vw, 30px);
+    font-weight: 700;
+    margin-bottom: 10px;
+  }
+  .cta-section p {
+    color: var(--dim);
+    font-size: 15px;
+    max-width: 380px;
+    margin: 0 auto 28px;
+    line-height: 1.6;
+  }
+  .cta-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--green);
+    color: #0a0e14;
+    font-family: var(--body);
+    font-size: 15px;
+    font-weight: 600;
+    padding: 14px 32px;
+    border: none;
+    border-radius: 30px;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-decoration: none;
+  }
+  .cta-btn:hover {
+    transform: scale(1.03);
+    box-shadow: 0 8px 30px rgba(63, 185, 80, 0.25);
+  }
+  .cta-btn:active {
+    transform: scale(0.98);
+  }
+  .cta-note {
+    margin-top: 14px;
+    font-size: 12px;
+    color: var(--dim);
+    opacity: 0.7;
+  }
+
+  /* ---- footer ---- */
+  footer {
+    text-align: center;
+    padding: 32px 24px;
+    border-top: 1px solid var(--border);
+  }
+  footer p {
+    font-size: 12px;
+    color: var(--dim);
+    opacity: 0.6;
+  }
+  footer .sigma-small {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px; height: 18px;
+    border: 1.2px solid var(--green);
+    border-radius: 4px;
+    color: var(--green);
+    font-family: 'Geomini', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    margin: 0 4px;
+    vertical-align: middle;
+  }
+  footer a {
+    color: var(--green);
+    text-decoration: none;
+  }
+  footer a:hover { text-decoration: underline; }
+
+  /* ---- responsive ---- */
+  @media (min-width: 600px) {
+    .hero { padding: 120px 40px 80px; }
+    .watch-wrap { width: 220px; height: 286px; }
+    .screen { width: 180px; height: 238px; }
+    section { padding: 80px 40px; }
+    .specs-grid { gap: 16px; }
+    .spec-card { padding: 22px 20px; }
+    .features { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .feature-card { padding: 26px 22px; }
+  }
+
+  @media (min-width: 900px) {
+    section { max-width: 720px; padding: 100px 40px; }
+    .specs-grid { grid-template-columns: 1fr 1fr 1fr; }
+    .features { grid-template-columns: 1fr 1fr 1fr; }
+  }
+
+  @media (max-width: 360px) {
+    .watch-wrap { width: 160px; height: 210px; }
+    .screen { width: 130px; height: 172px; border-radius: 12px; }
+    .screen .sigma-big { font-size: 36px; }
+    .watch-body { border-radius: 22px; }
+    .watch-body::after { inset: 4px; border-radius: 18px; }
+    .band-top, .band-bottom { height: 24px; width: 18px; }
+    .specs-grid { grid-template-columns: 1fr; }
+  }
+
+  /* reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    .watch-wrap { animation: none; }
+    .waveform span { animation: none; }
+    .hero .badge .dot { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- top bar -->
+<div class="top-bar">
+  <div class="sigma">Σ</div>
+  <div class="brand">UNI<span>WATCH</span></div>
+  <div class="tag">by Uniagent</div>
+</div>
+
+<!-- hero -->
+<section class="hero">
+  <div class="watch-wrap">
+    <div class="band-top"></div>
+    <div class="watch-body">
+      <div class="screen">
+        <div class="sigma-big">Σ</div>
+        <div class="waveform">
+          <span></span><span></span><span></span>
+          <span></span><span></span><span></span>
+          <span></span><span></span>
+        </div>
+        <div class="screen-sub">listening</div>
+      </div>
+    </div>
+    <div class="band-bottom"></div>
+  </div>
+
+  <h1>Your AI.<br><span class="highlight">On your wrist.</span></h1>
+  <p class="sub">A 3D-printed wearable that puts Uniagent on your wrist — voice in, answers out, no phone required.</p>
+
+  <div class="badge-row">
+    <span class="badge"><span class="dot"></span> voice-first</span>
+    <span class="badge">3D printed case</span>
+    <span class="badge">ESP32 powered</span>
+  </div>
+</section>
+
+<!-- Specs -->
+<section>
+  <div class="section-label">// hardware</div>
+  <h2>Built from real parts.</h2>
+  <p>Every component chosen for what it does, not what it costs. The Uniwatch is an open-hardware device you can build yourself.</p>
+
+  <div class="specs-grid">
+    <div class="spec-card">
+      <span class="spec-icon">🖥️</span>
+      <div class="spec-label">Display</div>
+      <div class="spec-value">2.4″ LCD</div>
+      <div class="spec-note">320 × 240, ILI9341</div>
+    </div>
+    <div class="spec-card">
+      <span class="spec-icon">🧠</span>
+      <div class="spec-label">Processor</div>
+      <div class="spec-value">ESP32-WROOM-32E</div>
+      <div class="spec-note">16 MB flash</div>
+    </div>
+    <div class="spec-card">
+      <span class="spec-icon">🎤</span>
+      <div class="spec-label">Microphone</div>
+      <div class="spec-value">Built-in</div>
+      <div class="spec-note">Voice input</div>
+    </div>
+    <div class="spec-card">
+      <span class="spec-icon">🔋</span>
+      <div class="spec-label">Power</div>
+      <div class="spec-value">Battery powered</div>
+      <div class="spec-note">Wearable-ready</div>
+    </div>
+    <div class="spec-card">
+      <span class="spec-icon">📡</span>
+      <div class="spec-label">Connectivity</div>
+      <div class="spec-value">Wi-Fi</div>
+      <div class="spec-note">Direct to Uniagent</div>
+    </div>
+    <div class="spec-card">
+      <span class="spec-icon">🔓</span>
+      <div class="spec-label">Open source</div>
+      <div class="spec-value">Fully open</div>
+      <div class="spec-note">Hardware + firmware</div>
+    </div>
+  </div>
+</section>
+
+<!-- Deep tech specs -->
+<section>
+  <div class="section-label">// bill of materials</div>
+  <h2>What's inside.</h2>
+  <p>No mystery silicon. Every part is off-the-shelf, documented, and replaceable.</p>
+
+  <div class="tech-block">
+    <div class="tech-item">
+      <span class="key">Microcontroller</span>
+      <span class="val">ESP32-WROOM-32E</span>
+    </div>
+    <div class="tech-item">
+      <span class="key">Flash memory</span>
+      <span class="val">16 MB</span>
+    </div>
+    <div class="tech-item">
+      <span class="key">Display driver</span>
+      <span class="val">ILI9341</span>
+    </div>
+    <div class="tech-item">
+      <span class="key">Resolution</span>
+      <span class="val">320 × 240 px</span>
+    </div>
+    <div class="tech-item">
+      <span class="key">Screen size</span>
+      <span class="val">2.4″ diagonal</span>
+    </div>
+    <div class="tech-item">
+      <span class="key">Case</span>
+      <span class="val">3D printed</span>
+    </div>
+    <div class="tech-item">
+      <span class="key">Audio</span>
+      <span class="val">Onboard microphone</span>
+    </div>
+    <div class="tech-item">
+      <span class="key">AI backend</span>
+      <span class="val">Uniagent</span>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section>
+  <div class="section-label">// why it matters</div>
+  <h2>Three things it does differently.</h2>
+
+  <div class="features">
+    <div class="feature-card">
+      <span class="feat-icon">🎙️</span>
+      <h3>Voice-first</h3>
+      <p>Speak and get answers. The watch talks directly to Uniagent — no phone, no app, just your voice and your AI.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feat-icon">🖨️</span>
+      <h3>3D printed case</h3>
+      <p>Custom shell, printed by you. Modify the design, choose your materials, make it yours. The STL files are open.</p>
+    </div>
+    <div class="feature-card">
+      <span class="feat-icon">⚡</span>
+      <h3>ESP32 powered</h3>
+      <p>Reliable, well-known silicon with Wi-Fi built in. 16 MB of flash gives plenty of room for the firmware and voice processing.</p>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<div class="cta-section">
+  <h2>Want to build one?</h2>
+  <p>The Uniwatch is an open project — schematics, firmware, and case files are all available. Build it yourself or follow along.</p>
+  <a class="cta-btn" href="https://github.com" target="_blank" rel="noopener">
+    View on GitHub →
+  </a>
+  <p class="cta-note">STL files, wiring diagrams, and firmware included.</p>
+</div>
+
+<!-- footer -->
+<footer>
+  <p>
+    <span class="sigma-small">Σ</span>
+    <span>Uniwatch is a project of <a href="/">Uniagent</a></span>
+  </p>
+</footer>
+
+</body>
+</html>

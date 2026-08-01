@@ -1,0 +1,74 @@
+# Secrets - never commit these
+.env
+
+# The https listener's self-signed certificate and its private key - made on
+# this machine, for this machine's own addresses (see server.py). No other
+# machine can use them, and the key is a secret.
+certs/
+
+__pycache__/
+*.pyc
+
+# --- Anything that is about THIS install rather than about Uniagent ---------
+# The rule: if a file fills up as you use the agent, or names your machine,
+# your accounts or the people in your life, it stays here. Each one below that
+# something else needs an example of ships as <name>.example.<ext> instead.
+
+# Conversation transcripts - personal, and they'd be permanent in history
+chats/
+
+# What the agent has learned about its user. Both halves: the always-loaded
+# facts file (context/2memory.md ships as a template, so only a filled-in one
+# is a problem - see below) and the per-topic files.
+memories/
+
+# Scheduled jobs - your prompts, your addresses, your routine. cron.example.json
+# is the documented one; this is yours.
+cron.json
+# The watcher's per-job last-run bookkeeping
+cron_state.json
+
+# MCP servers - paths into your other projects, and the place an auth token
+# would sit. mcp.example.json is the documented one.
+mcp.json
+
+# Live settings: which provider you chat on, your safety prompt, your accent
+# colour. Rewritten every time you touch the settings page, and every default
+# in it is in settings.py anyway.
+settings.json
+
+# Models proven to work on YOUR providers, keyed by your provider ids
+models_custom.json
+models_custom.json.backup
+
+# Working directories the agent writes into
+workspace/
+websites/
+documents/
+# Tools and skills copied in by the sidebar's pin button - regenerated on use
+pinned/
+# Output of background terminal jobs - disposable, and can get large
+background-terminal-output/
+
+# Editor config - personal per-machine settings
+.vscode/
+.claude/
+
+# Logs. model_io.log in particular is every prompt and reply, in full.
+*.log
+model_io.log
+nohup.out
+scripts/nohup.out
+
+# Scratch and third-party material that was never Uniagent's to publish
+unused/claude skills/
+unused/context copy/
+unused/skills/
+unused/memory.md
+
+# Personal notes
+TODO.md
+august-uniagent-todo.md
+
+# Dead code and old drafts kept around locally - not part of the project
+unused/
