@@ -45,7 +45,7 @@ import time
 import errno
 import select
 import signal
-import termios
+import _term as termios  # no-op stand-in on Windows; the real thing elsewhere
 import threading
 from pathlib import Path
 
@@ -1393,6 +1393,16 @@ def _save_history(history):
 # ------------------------------------------------------------------ entry
 
 def interactive():
+    if not termios.POSIX:
+        # Windows: raw-mode keyboard handling needs msvcrt work that isn't done
+        # yet. The rest of the CLI works - one-off turns, piped input - and the
+        # web UI is the primary interface anyway, so refuse this one mode with
+        # directions rather than hang on a console that can't deliver keypresses.
+        print(DIM + "  live-keyboard chat mode is not available on Windows yet." + RESET)
+        print("  Use  uniagentcli \"a question\"   for a single turn,")
+        print("       echo text | uniagentcli     for piped input,")
+        print("  or the web UI at https://localhost:8764")
+        return 1
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     app = App()

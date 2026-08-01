@@ -107,9 +107,22 @@ Uniagent/
 
 ## Getting started
 
+**Windows 10/11** — one line, from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/JJM8/Uniagent/main/install.ps1 | iex"
+```
+
+It installs git and Python if needed, clones the repo, installs dependencies,
+puts `uniagentcli` on your PATH, registers the server + cron watcher to start
+at every logon, and opens the web UI. Full walkthrough in `setup.md`.
+
+**Linux/macOS:**
+
 ```bash
 git clone https://github.com/JJM8/Uniagent.git
 cd Uniagent
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 cp .env.example .env
 # Add your API keys
 python3 scripts/server.py
@@ -154,7 +167,12 @@ Bare `/chats` and `/model` open a list you arrow through instead of printing one
 python3 scripts/cron.py
 ```
 
-Or run it as a systemd service (service files included in `scripts/`).
+Or run it as a systemd service (service files included in `scripts/`). On
+Windows the installer's scheduled task runs the server and the cron watcher
+together (see `scripts/run-server.ps1`). If you want Uniagent as a true
+Windows service that runs before anyone logs in, wrap `scripts/run-server.ps1`
+with NSSM (`nssm install Uniagent "powershell.exe" "-NoProfile -ExecutionPolicy
+Bypass -File C:\path\to\scripts\run-server.ps1"`) — needs an admin shell.
 
 ## Requirements
 

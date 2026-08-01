@@ -1,0 +1,9 @@
+# Optional - the local hold-to-talk microphone (desktop voice input).
+# Everything else works without these; the web page records audio in the
+# browser and never touches PyAudio. Install with:
+#   pip install -r requirements-voice.txt
+# PyAudio ships Windows wheels on PyPI since 0.2.13, so this installs cleanly
+# on Windows 10. If it ever fails there, fall back to: pipwin install pyaudio
+
+pyaudio>=0.2.13
+pynput>=1.7.6

@@ -9,6 +9,12 @@ certs/
 __pycache__/
 *.pyc
 
+# Python virtualenv - created by install.ps1 on Windows (and handy on Linux)
+.venv/
+
+# The 'uniagentcli' shim copied here by install.ps1 - regenerated on install
+bin/
+
 # --- Anything that is about THIS install rather than about Uniagent ---------
 # The rule: if a file fills up as you use the agent, or names your machine,
 # your accounts or the people in your life, it stays here. Each one below that

@@ -27,7 +27,14 @@ import threading
 import wave
 from pathlib import Path
 
-import pyaudio
+try:
+    import pyaudio
+except ImportError:
+    # No audio lib = no local microphone path, but NOT a broken install: the
+    # web page records in the browser and never needs PyAudio, and the server
+    # has to start without it. _pa() reports the gap when someone actually
+    # holds the key, so the note lands at the moment it matters.
+    pyaudio = None
 import requests
 
 import provider
@@ -119,6 +126,11 @@ def _pa():
     """The PyAudio instance, opened on first use - starting it is slow and
     noisy, so we don't do it until someone actually holds the key."""
     global _audio
+    if pyaudio is None:
+        raise RuntimeError(
+            "the 'pyaudio' package is not installed - run "
+            "pip install pyaudio (or pip install -r requirements-voice.txt) "
+            "to enable the local hold-to-talk mic")
     if _audio is None:
         with _quiet():  # enumerating every device is what triggers the spam
             _audio = pyaudio.PyAudio()

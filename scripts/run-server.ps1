@@ -1,0 +1,81 @@
+# Supervises the Uniagent server and cron watcher on Windows.
+#
+# Started by the "Uniagent" scheduled task at logon (see install-autostart.ps1),
+# and the equivalent of Restart=always in the Linux systemd units: if either
+# process dies, it is started again. Gives up on a process that crashes within
+# seconds of starting over and over (a port conflict, say) rather than spinning
+# forever.
+#
+# Stop with:  schtasks /End /TN Uniagent   (kills the whole process tree)
+#
+# Logs go to <repo>\logs\server.out.log / server.err.log / cron.*.log.
+
+$ErrorActionPreference = "Continue"
+
+$root       = Split-Path -Parent $PSScriptRoot            # scripts\.. -> repo root
+$scriptsDir = Join-Path $root "scripts"
+$logDir     = Join-Path $root "logs"
+$py         = Join-Path $root ".venv\Scripts\python.exe"
+if (-not (Test-Path $py)) { $py = "python" }              # fall back to PATH
+
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+Set-Location $scriptsDir                                   # same as systemd WorkingDirectory
+
+$server = @{ name = "server"; args = "server.py";  proc = $null; start = $null; quick = 0 }
+$cron   = @{ name = "cron";   args = "cron.py";    proc = $null; start = $null; quick = 0 }
+$MAX_QUICK_CRASHES = 15
+$MIN_UPTIME_SECS   = 15
+
+function Start-One($job) {
+    $out = Join-Path $logDir ($job.name + ".out.log")
+    $err = Join-Path $logDir ($job.name + ".err.log")
+    # -WindowStyle is Windows-only; harmless to include there, excluded elsewhere
+    # so the same script is testable (and runnable) on PowerShell Core.
+    $sp = @{
+        FilePath               = $py
+        ArgumentList           = $job.args
+        WorkingDirectory       = $scriptsDir
+        RedirectStandardOutput = $out
+        RedirectStandardError  = $err
+        PassThru               = $true
+    }
+    if ($env:OS -eq "Windows_NT") { $sp.WindowStyle = "Hidden" }
+    $job.proc = Start-Process @sp
+    $job.start = Get-Date
+    Write-Host ("[{0}] {1} started (pid {2})" -f (Get-Date -Format HH:mm:ss), $job.name, $job.proc.Id)
+}
+
+function Check-One($job) {
+    if ($job.proc -eq $null) { return }
+    $job.proc.Refresh()
+    if (-not $job.proc.HasExited) { return }
+
+    $uptime = ((Get-Date) - $job.start).TotalSeconds
+    if ($uptime -lt $MIN_UPTIME_SECS) {
+        $job.quick++
+        Write-Host ("[{0}] {1} died after {2:N0}s (crash {3}/{4})" -f `
+            (Get-Date -Format HH:mm:ss), $job.name, $uptime, $job.quick, $MAX_QUICK_CRASHES)
+        if ($job.quick -ge $MAX_QUICK_CRASHES) {
+            $msg = ("[{0}] {1} keeps dying at startup - giving up on it. " +
+                "Check {2}\{1}.err.log and fix the cause, then restart the task.")
+            Write-Host ($msg -f (Get-Date -Format HH:mm:ss), $job.name, $logDir)
+            $job.proc = $null
+            return
+        }
+    } else {
+        $job.quick = 0   # it lived a while - whatever killed it was a one-off
+        Write-Host ("[{0}] {1} exited (code {2}) - restarting" -f `
+            (Get-Date -Format HH:mm:ss), $job.name, $job.proc.ExitCode)
+    }
+    Start-One $job
+}
+
+Write-Host "Uniagent supervisor running - server on https://localhost:8764"
+Start-One $server
+Start-One $cron
+
+while ($true) {
+    Start-Sleep -Seconds 5
+    Check-One $server
+    Check-One $cron
+}

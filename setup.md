@@ -1,8 +1,48 @@
 # Setup
 
-How to get Uniagent running on a fresh Linux machine.
+How to get Uniagent running on a fresh machine.
 
-## Prerequisites
+## Windows 10 / 11 (one line)
+
+Open PowerShell (any folder) and paste:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/JJM8/Uniagent/main/install.ps1 | iex"
+```
+
+The installer:
+
+1. installs **git** and **Python 3.12** via winget if they're missing
+2. clones Uniagent into `%USERPROFILE%\Uniagent` (or `$env:UNIAGENT_HOME`)
+3. makes a `.venv` and installs the dependencies
+4. writes `.env` from the example if you don't have one yet
+5. puts a `uniagentcli` command on your PATH (new terminal needed)
+6. installs a **scheduled task** so the server and cron watcher start at every
+   logon, and starts them immediately
+7. opens `https://localhost:8764` and prints the first-run password (it's also
+   in `%USERPROFILE%\Uniagent\logs\server.out.log`)
+
+Afterwards: `update.ps1` pulls new code and restarts the server;
+`install-autostart.ps1 -Remove` stops it starting at logon. `schtasks /End /TN
+Uniagent` stops it right now. The first time the server listens, Windows asks
+to allow it through the firewall — click **Allow** (or run the installer as
+admin to have the rule added for you).
+
+Notes specific to Windows:
+
+- The **web UI is fully supported**. The terminal CLI's live-keyboard chat
+  mode is Unix-only for now; on Windows use `uniagentcli "a question"` for
+  one-shot turns or `echo text | uniagentcli` for piped input.
+- Voice: the **browser hold-to-talk works out of the box** (it records in the
+  page). The local desktop hold-to-talk key needs `requirements-voice.txt`
+  (pyaudio/pynput) — the installer tries, and the app runs fine without it.
+- "Always on before anyone logs in" (a true Windows service) needs admin
+  rights — see the README's NSSM note. The scheduled task covers the normal
+  case: it comes up at every logon and restarts if the server crashes.
+
+## Linux
+
+### Prerequisites
 
 ```bash
 sudo apt update
@@ -12,15 +52,16 @@ sudo apt install python3 python3-pip git -y
 ## Clone and install
 
 ```bash
-git clone https://github.com/your-username/uniagent.git
-cd uniagent
-pip install -r requirements.txt
+git clone https://github.com/JJM8/Uniagent.git
+cd Uniagent
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-If there is no requirements.txt yet, the core dependencies are:
+Voice extras (the local hold-to-talk key) are optional:
 
 ```bash
-pip install requests pynput pyaudio
+.venv/bin/pip install -r requirements-voice.txt   # pyaudio, pynput
 ```
 
 ## Configure API keys

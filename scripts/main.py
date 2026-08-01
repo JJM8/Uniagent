@@ -7,7 +7,7 @@ import json
 import re
 import shutil
 import sys
-import termios
+import _term as termios  # no-op stand-in on Windows; the real thing elsewhere
 import threading
 from datetime import date, datetime
 import uuid

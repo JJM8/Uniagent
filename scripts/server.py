@@ -33,6 +33,7 @@ _serve_https() for why the app is https-only.
 
 import datetime
 import hashlib
+import ipaddress
 import json
 import os
 import queue
@@ -2109,8 +2110,14 @@ def _make_cert():
     it's missing: a router handing this machine a new DHCP lease leaves the old
     cert naming an IP nobody can reach any more, and a browser then refuses the
     address you actually typed. The names are kept beside the cert because
-    reading them back out of it means parsing openssl's text output, and this
-    is the only thing that writes either file.
+    reading them back out of it means parsing a certificate, and this is the
+    only thing that writes either file.
+
+    The certificate is made in-process with the `cryptography` package rather
+    than by shelling out to openssl, so an install needs nothing but its own
+    pip packages - which is what makes the server run on Windows, where no
+    openssl binary exists. It also keeps the SAN list on this machine's side of
+    the fence, where the same code can compare it without parsing anything.
     """
     names = _cert_names()
     want = ",".join(names)
@@ -2123,21 +2130,53 @@ def _make_cert():
         print("network address changed - making a new certificate")
     CERTS.mkdir(parents=True, exist_ok=True)
     try:
-        r = subprocess.run(
-            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256",
-             "-days", str(CERT_DAYS), "-nodes",
-             "-keyout", str(KEY_FILE), "-out", str(CERT_FILE),
-             "-subj", "/CN=uniagent",
-             "-addext", "subjectAltName=" + want],
-            capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as e:
-        print("could not run openssl (" + type(e).__name__ + ")")
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        print("certificate generation needs the 'cryptography' package -"
+              " install it with: pip install cryptography")
         return False
-    if r.returncode != 0:
-        print("openssl failed: " + r.stderr.strip()[:200])
+    try:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        san = []
+        for part in names:
+            kind, _, value = part.partition(":")
+            if kind == "DNS":
+                san.append(x509.DNSName(value))
+            elif kind == "IP":
+                try:
+                    san.append(x509.IPAddress(ipaddress.ip_address(value)))
+                except ValueError:
+                    continue  # a LAN address that's gone - skip, don't fail
+        who = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "uniagent")])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cert = (x509.CertificateBuilder()
+                .subject_name(who)
+                .issuer_name(who)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                # A day of back-dating on the start so a client whose clock is
+                # slightly ahead doesn't reject a brand-new cert.
+                .not_valid_before(now - datetime.timedelta(days=1))
+                .not_valid_after(now + datetime.timedelta(days=CERT_DAYS))
+                .add_extension(x509.SubjectAlternativeName(san), critical=False)
+                .sign(key, hashes.SHA256()))
+        KEY_FILE.write_bytes(key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption()))
+        CERT_FILE.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    except Exception as e:
+        print("certificate generation failed - "
+              + type(e).__name__ + ": " + str(e))
         return False
     # The key is as good as a password for this origin - keep it to this user.
-    KEY_FILE.chmod(0o600)
+    try:
+        KEY_FILE.chmod(0o600)
+    except OSError:
+        pass  # Windows has no real chmod; the file sits in the user's profile
     NAMES_FILE.write_text(want + "\n")
     print("made a self-signed certificate in " + str(CERTS))
     print("  covering: " + want)
@@ -2286,8 +2325,9 @@ def serve():
     httpd = _https_server()
     if httpd is None:
         print("\nCannot start: no working https certificate, and the app is"
-              " https-only.\nCheck that openssl is installed and that port "
-              + str(HTTPS_PORT) + " is free.")
+              " https-only.\nInstall the 'cryptography' package (pip install"
+              " cryptography)\nand check that port " + str(HTTPS_PORT)
+              + " is free.")
         sys.exit(1)
     ip = lan_ip() or "localhost"
     print("Uniagent: https://" + ip + ":" + str(HTTPS_PORT))
