@@ -1363,7 +1363,7 @@ WIRES = {
     "bedrock": _bedrock,
     "claude-subscription": _claude_subscription,
     # Byte for byte the openai wire. It exists as a separate name only so that
-    # providerRequestTemplate.json has somewhere to say "this one is a server
+    # provider_Request_Template.json has somewhere to say "this one is a server
     # address and nothing else" - a local model server takes no key, and a key
     # box on its form is a box that can only be filled in wrongly. Same
     # function, so nothing about the request differs.
@@ -1419,7 +1419,7 @@ UNKNOWN_ICON = "/icons/unknown.svg"
 # A wire that authenticates some OTHER way needs different boxes, and needs to
 # say so somewhere the settings page can read: Bedrock signs with AWS
 # credentials and has no URL or key at all, claude-subscription drives a CLI
-# and needs to be told where that CLI is. providerRequestTemplate.json is that
+# and needs to be told where that CLI is. provider_Request_Template.json is that
 # somewhere - which fields, what each is called, what it means, and crucially
 # the ENVIRONMENT VARIABLE NAME each one corresponds to.
 #
@@ -1429,13 +1429,13 @@ UNKNOWN_ICON = "/icons/unknown.svg"
 # falls back to reading out of the real environment when a provider leaves the
 # box empty. So a machine with ~/.aws set up keeps working untouched, and a
 # provider that fills the boxes in gets its own credentials instead.
-TEMPLATE_FILE = Path(__file__).parent.parent / "providerRequestTemplate.json"
+TEMPLATE_FILE = Path(__file__).parent.parent / "provider_Request_Template.json"
 
 _templates_cache = (None, None)     # (mtime, data)
 
 
 def templates():
-    """{wire: template} out of providerRequestTemplate.json.
+    """{wire: template} out of provider_Request_Template.json.
 
     Re-read whenever the file changes, cached otherwise: this is asked for on
     every settings page load and on every Bedrock call, and it is a file that
@@ -1514,6 +1514,26 @@ def wants_key(wire):
     """Whether this wire's form has an API key box. Templates say key: false
     for the wires that don't authenticate with one; everything else does."""
     return template_for(wire).get("key", True) is not False
+
+
+def base_url_label(wire):
+    """What this wire calls its base-URL box, or None when it hasn't got one.
+
+    The counterpart of wants_key. A template says base_url: false for the wires
+    that authenticate without a URL at all (bedrock signs with the AWS
+    credentials on the machine, claude-subscription drives a CLI that owns its
+    own login), or names the box when "base URL" would be the wrong words for
+    it - a local model server's is a plain server address."""
+    value = template_for(wire).get("base_url", True)
+    if value is False:
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else "base URL"
+
+
+def wire_label(wire):
+    """The human name for a wire - "Amazon Bedrock" rather than "bedrock" -
+    falling back to the wire's own name when no template names it."""
+    return str(template_for(wire).get("label") or wire)
 
 
 def wants_base_url(wire):
@@ -1925,7 +1945,7 @@ def resolved_setup(p):
 
 
 # The wire functions that take a `setup` argument - the ones with a form in
-# providerRequestTemplate.json to fill it from. Kept as an explicit set rather
+# provider_Request_Template.json to fill it from. Kept as an explicit set rather
 # than read off the template file, because it describes these functions'
 # SIGNATURES: a wire listed here that doesn't accept setup= would raise on
 # every call, and that is a code fact, not a configuration one.
@@ -2667,6 +2687,22 @@ def env_names():
         has_value = bool(value.strip().strip("\"'"))
         found[name] = found.get(name, False) or has_value
     return [{"name": name, "set": is_set} for name, is_set in found.items()]
+
+
+def port(name, default):
+    """A port number out of .env, or `default` when it isn't set or isn't a
+    usable one. The ports are settable because 8763/8764 are only defaults:
+    another program may already hold them, and a machine may simply want
+    Uniagent somewhere else.
+
+    Anything unparseable falls back to the default rather than raising. A typo
+    in .env should not stop the server from coming up at all - it should come
+    up somewhere predictable and say where."""
+    try:
+        value = int(str(_env_value(name)).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if 1 <= value <= 65535 else default
 
 
 def set_env(name, value):

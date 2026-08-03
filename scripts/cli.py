@@ -1401,7 +1401,8 @@ def interactive():
         print(DIM + "  live-keyboard chat mode is not available on Windows yet." + RESET)
         print("  Use  uniagentcli \"a question\"   for a single turn,")
         print("       echo text | uniagentcli     for piped input,")
-        print("  or the web UI at https://localhost:8764")
+        print("  or the web UI at https://localhost:"
+              + str(provider.port("UNIAGENT_HTTPS_PORT", 8764)))
         return 1
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)

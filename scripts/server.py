@@ -72,7 +72,7 @@ import _discovery as _tool_discovery
 import _email
 
 HOST = "0.0.0.0"
-PORT = 8763
+PORT = provider.port("UNIAGENT_PORT", 8763)
 
 # Where the app actually lives. PORT above serves nothing but a redirect here
 # (see _serve_redirect), because a password and a session cookie crossing the
@@ -88,7 +88,7 @@ PORT = 8763
 # that click-through. Android's WebView does NOT - it refuses a self-signed cert
 # outright - so the Capacitor app can't reach this without being rebuilt to
 # trust the cert.
-HTTPS_PORT = 8764
+HTTPS_PORT = provider.port("UNIAGENT_HTTPS_PORT", 8764)
 CERTS = Path(__file__).parent.parent / "certs"
 CERT_FILE = CERTS / "uniagent.crt"
 KEY_FILE = CERTS / "uniagent.key"
@@ -1129,7 +1129,7 @@ def _providers():
                        for w in provider.WIRES},
         "bundled_icons": [{"path": p, "url": _icon_url(p)} for p in _bundled_icons()],
         # What each wire's setup form asks for, out of
-        # providerRequestTemplate.json. A wire missing from here uses the
+        # provider_Request_Template.json. A wire missing from here uses the
         # default form - a base URL and an API key - which is most of them.
         "templates": {w: {"label": provider.template_for(w).get("label", ""),
                           "help": provider.template_for(w).get("help", ""),
