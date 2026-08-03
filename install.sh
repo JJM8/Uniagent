@@ -282,7 +282,11 @@ step "Waiting for the server to come up..."
 password=""
 up=0
 for _ in $(seq 1 45); do
-    if [ "$up" -eq 0 ] && : <"/dev/tcp/127.0.0.1/$HTTPS_PORT" 2>/dev/null; then
+    # stderr is silenced BEFORE the /dev/tcp redirect, not after: bash applies
+    # redirections left to right, so with "2>/dev/null" written last the failed
+    # connect has already printed "connect: Connection refused" to a still-open
+    # stderr. Which it did, on every probe before the server was listening.
+    if [ "$up" -eq 0 ] && : 2>/dev/null <"/dev/tcp/127.0.0.1/$HTTPS_PORT"; then
         up=1
     fi
     if [ -z "$password" ]; then
