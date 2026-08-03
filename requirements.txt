@@ -8,5 +8,13 @@
 #                   `openssl` binary, which Windows does not ship with; doing
 #                   it in Python removed that whole dependency.
 
+#
+# pywinpty      - Windows only. The binding for ConPTY, the Windows
+#                 pseudo-console, which is what gives the terminal tool a real
+#                 terminal there - the same thing pty gives it on Linux. The
+#                 marker means pip skips it entirely on Linux and macOS, where
+#                 pty is in the standard library.
+
 requests>=2.31
 cryptography>=41.0
+pywinpty>=2.0 ; sys_platform == "win32"

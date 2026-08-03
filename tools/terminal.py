@@ -10,21 +10,35 @@ write back into a command that is still sitting there waiting.
 chat_id comes from tool_processor, never from the model. Without one there is
 no chat to own a terminal, so we fall back to the old behaviour: a throwaway
 subprocess.run, exactly as this tool worked before.
+
+WINDOWS: the same idea, with the same class interface, over PowerShell instead
+of bash. Windows has real pseudo-terminals too (ConPTY), they are just not in
+Python's standard library - pywinpty is the binding. pty/termios/fcntl are
+POSIX-only and are imported only where they exist: at module level they raised
+ModuleNotFoundError on Windows, which made tool_processor list this whole tool
+as BROKEN, so the agent had no shell at all there.
 """
 
 import atexit
-import fcntl
 import os
-import pty
 import re
-import select
 import shlex
-import struct
 import subprocess
-import termios
+import threading
 import time
 import uuid
 from pathlib import Path
+
+WINDOWS = os.name == "nt"
+
+if WINDOWS:
+    import shutil
+else:
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
 
 NAME = "terminal"
 DESCRIPTION = ("Really run any shell command on the user's computer - read or change files, "
@@ -123,6 +137,43 @@ MAX_OUTPUT = 8000  # characters handed back; the middle of a flood is dropped
 # A file never fills up, so the job runs at full speed and the output keeps.
 BG_DIR = Path(__file__).parent.parent / "background-terminal-output"
 
+# The instructions above are written for bash. On Windows the shell is
+# PowerShell, and a model told to use bash syntax writes commands that fail -
+# so the handful of shell-specific sentences are swapped out. Only these lines
+# differ; everything else about the tool behaves the same on both. This runs
+# BEFORE <BGDIR> is filled in, so the patterns can still match on it.
+if WINDOWS:
+    for _bash, _ps in [
+        ('`cd` once and every command after it runs from there; `export`, '
+         '`source venv/bin/activate` and shell variables all stick too.',
+         '`cd` once and every command after it runs from there; `$env:VAR`, '
+         '`.\\.venv\\Scripts\\Activate.ps1` and variables all stick too.'),
+        ('LAUNCHING APPS AND WINDOWS - put "&" on the end of `command`, e.g. '
+         '"gnome-terminal &". This is real bash, so "&" backgrounds it and hands '
+         'the terminal straight back.',
+         'LAUNCHING APPS AND WINDOWS - use Start-Process, e.g. "Start-Process '
+         'notepad". This is real PowerShell, and Start-Process hands the terminal '
+         'straight back instead of waiting for the app to close.'),
+        ('ANYTHING THAT KEEPS PRINTING - use `background` instead of "&":',
+         'ANYTHING THAT KEEPS PRINTING - use `background` instead of Start-Process:'),
+        ('Do NOT put those in the normal terminal, with or without "&":',
+         'Do NOT put those in the normal terminal:'),
+        ('a plain `command` like "tail -n 50 <that file>". Stop it with `kill <pid>`.',
+         'a plain `command` like "Get-Content -Tail 50 <that file>". Stop it with '
+         '`Stop-Process -Id <pid>`.'),
+        ('every background job this conversation started is in one place, newest '
+         'first: "ls -t <BGDIR>/*/".',
+         'every background job this conversation started is in one place, newest '
+         'first: "Get-ChildItem <BGDIR> | Sort-Object LastWriteTime -Descending".'),
+        ('grep, pkill, diff and test all return 1 to mean "nothing matched"',
+         'Select-String and findstr return 1 to mean "nothing matched"'),
+        ('run "sudo apt update", see "[sudo] password for the user:" and STILL '
+         'RUNNING, then call again with `input` set to the password the user gave you.',
+         'run something that stops to ask a question, see STILL RUNNING, then call '
+         'again with `input` set to the answer.'),
+    ]:
+        INSTRUCTIONS = INSTRUCTIONS.replace(_bash, _ps)
+
 # Spelled out in full in the instructions: a relative path breaks the moment
 # the model has cd'd somewhere else, which it will have.
 INSTRUCTIONS = INSTRUCTIONS.replace("<BGDIR>", str(BG_DIR))
@@ -133,7 +184,7 @@ INSTRUCTIONS = INSTRUCTIONS.replace("<BGDIR>", str(BG_DIR))
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r(?!\n)")
 
 
-class _Terminal:
+class _PosixTerminal:
     """One bash, kept open, talked to through a pty."""
 
     def __init__(self):
@@ -312,6 +363,192 @@ class _Terminal:
         self.read_until(self.mark, time.monotonic() + 5)
 
 
+def _ps_quote(text):
+    """One PowerShell single-quoted string. PowerShell escapes a quote inside
+    single quotes by doubling it, and does nothing else in there - no backslash
+    escapes, no variable expansion - which is exactly what we want for a path
+    or a command we are passing through untouched."""
+    return "'" + str(text).replace("'", "''") + "'"
+
+
+class _WindowsTerminal:
+    """One PowerShell, kept open, talked to through a ConPTY.
+
+    The same shape as _PosixTerminal - write/read_until/drain/alive/close - so
+    everything below this point treats the two identically. The differences are
+    all forced by the platform:
+
+    - ConPTY instead of pty. Windows has had real pseudo-consoles since Windows
+      10 1809; pywinpty is the binding, since Python's stdlib has none.
+    - A reader thread instead of select(). On Windows select() only accepts
+      sockets, never pipes or console handles, and pywinpty's read() blocks. So
+      one daemon thread reads forever into a buffer and read_until watches the
+      buffer, which gives the same "wait with a deadline" behaviour.
+    - The `prompt` function instead of PROMPT_COMMAND. It is PowerShell's
+      equivalent hook - it runs before each prompt is shown - so the marker
+      comes from the shell itself rather than from a line we write after the
+      command, for the same reason spelled out in _PosixTerminal: a command
+      sitting on Read-Host would eat that line as its own input.
+    """
+
+    def __init__(self):
+        try:
+            import winpty
+        except ImportError as e:  # pragma: no cover - Windows-only path
+            raise RuntimeError(
+                "The terminal needs pywinpty on Windows (it is the binding for "
+                "ConPTY, the Windows pseudo-console). Install it with:  "
+                "pip install pywinpty"
+            ) from e
+
+        self.mark = "__UNI_" + uuid.uuid4().hex + "__"
+
+        # PowerShell 7 if it is there, else the 5.1 that ships with Windows.
+        shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
+        self.shell = shell
+
+        env = dict(os.environ)
+        env["TERM"] = "dumb"
+
+        # -NoLogo: no banner to swallow. -NoProfile for the same reason bash
+        # gets --norc/--noprofile: the user's profile is sourced deliberately
+        # below, after the marker is in place, so nothing it prints or sets can
+        # break the very first result.
+        self.proc = winpty.PtyProcess.spawn(
+            [shell, "-NoLogo", "-NoProfile"],
+            dimensions=(50, 200),   # same wide window as the pty gets
+            env=env,
+        )
+
+        self._buf = ""
+        self._lock = threading.Lock()
+        self._echo = ""
+        self.busy = False
+        self.jobs = 0
+        self.used = time.monotonic()
+
+        self._reader = threading.Thread(target=self._pump, daemon=True)
+        self._reader.start()
+
+        # Swallow the startup banner/prompt, then take the shell over.
+        self.read_until(None, time.monotonic() + 3)
+        self._setup()
+
+    # --- the bits that differ from POSIX ---------------------------------
+
+    def _pump(self):
+        """Read forever into the buffer. A thread, because pywinpty's read()
+        blocks and there is no select() on Windows to wait on instead."""
+        while True:
+            try:
+                data = self.proc.read(65536)
+            except Exception:
+                return          # EOFError when the console closes, and friends
+            if data:
+                with self._lock:
+                    self._buf += data
+            elif not self.proc.isalive():
+                return
+            else:
+                time.sleep(0.01)  # alive but quiet - don't spin the CPU
+
+    def _setup(self):
+        """Put the marker in place and make PowerShell behave like a pipe.
+
+        Remove-Module PSReadLine is the counterpart of bash's --noediting: left
+        loaded it redraws and colours the line as it is 'typed', which lands in
+        the output as gibberish. ProgressPreference kills the progress bars that
+        would otherwise repaint over everything.
+
+        $? has to be read before anything else in the prompt function, because
+        every statement resets it. $LASTEXITCODE is the exit code of the last
+        native .exe and is null until one has run, so the two are combined: a
+        cmdlet that failed has $? false and no exit code, which is a 1.
+        """
+        prompt = (
+            "function prompt { $o=$?; $c=$LASTEXITCODE; "
+            "if ($null -eq $c) { $c = 0 }; "
+            "if (-not $o -and $c -eq 0) { $c = 1 }; "
+            '"`n' + self.mark + '$c`n" }'
+        )
+        self.write("Remove-Module PSReadLine -ErrorAction SilentlyContinue; "
+                   "$ProgressPreference='SilentlyContinue'; " + prompt + "\n")
+        self.read_until(self.mark, time.monotonic() + 5)
+
+        # Now the user's own profile, the way _source_user_env does on POSIX,
+        # then the prompt again in case the profile replaced it.
+        self.write("if (Test-Path $PROFILE) { . $PROFILE }; " + prompt + "\n")
+        self.read_until(self.mark, time.monotonic() + 10)
+
+    # --- the shared interface --------------------------------------------
+
+    def alive(self):
+        return self.proc.isalive()
+
+    def write(self, text):
+        # Remembered so read_until can drop the copy ConPTY echoes back. A real
+        # console echoes what is typed at it and, unlike a pty, there is no
+        # ECHO flag to turn off - so it comes off the output instead.
+        self._echo = text.strip()
+        self.proc.write(text)
+
+    def _take(self):
+        with self._lock:
+            out, self._buf = self._buf, ""
+        return out
+
+    def read_until(self, marker, deadline):
+        """Everything printed up to `marker`, or up to the deadline. Same
+        contract as _PosixTerminal.read_until, including the (text, done) pair
+        where done False means it is still running."""
+        out = ""
+        while True:
+            out += self._take()
+            if marker and marker in out:
+                return self._unecho(out), True
+            if not self.alive():
+                return self._unecho(out), True
+            if time.monotonic() >= deadline:
+                return self._unecho(out), False
+            time.sleep(0.02)
+
+    def drain(self):
+        """Whatever has piled up since we last looked, without waiting."""
+        return self._unecho(self._take())
+
+    def _unecho(self, text):
+        """Drop the echoed copy of the command from the front of the output.
+        Best effort and deliberately conservative: only the first line, only
+        when it matches exactly, so output that merely resembles the command is
+        left alone."""
+        if not self._echo:
+            return text
+        first = self._echo.split("\n", 1)[0]
+        stripped = text.lstrip("\r\n")
+        if first and stripped.startswith(first):
+            return stripped[len(first):].lstrip("\r\n")
+        return text
+
+    def close(self):
+        # taskkill /T is the tree kill: PowerShell's own children go with it,
+        # which is what pkill -s does for the session on POSIX. Without /T a
+        # background job outlives the shell that started it.
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)],
+                           capture_output=True, timeout=5)
+        except Exception:
+            pass
+        try:
+            self.proc.terminate(force=True)
+        except Exception:
+            pass
+
+
+# The switch. Everything below calls _Terminal() and neither knows nor cares
+# which one it got - the two classes expose the same handful of methods.
+_Terminal = _WindowsTerminal if WINDOWS else _PosixTerminal
+
+
 def _reap():
     """Close terminals nobody has used in a while, and any whose bash has died."""
     now = time.monotonic()
@@ -416,7 +653,9 @@ def _oneshot(command, timeout):
     print("\n[terminal] wants to run:")
     print("    " + command)
 
-    if command.strip().endswith("&"):
+    # POSIX only: on Windows "&" is cmd's command separator, not backgrounding,
+    # so stripping it off would change what the command means.
+    if not WINDOWS and command.strip().endswith("&"):
         # The trailing "&" comes off and Popen does the backgrounding instead.
         # Left on, the SHELL backgrounds the job and exits 0 straight away, so
         # the process we are holding is the shell rather than the command - and
@@ -536,18 +775,32 @@ def run(command=None, chat_id=None, timeout=None, input=None, reset=False,
         # not a separate shell: its output goes to the file from the moment it
         # starts, so it never writes here at all.
         log = _log_path(chat_id, command, term)
-        term.write(command.rstrip("\n") + " > '" + str(log) + "' 2>&1 &\n")
+        if WINDOWS:
+            # Start-Process hands back a real pid, and "*>" sends every stream
+            # to the one file so nothing reaches this terminal. -WorkingDirectory
+            # is not optional: Set-Location moves PowerShell's idea of where it
+            # is but NOT the process's, so without this the job would start in
+            # whatever directory the shell was launched in.
+            inner = command.rstrip("\n") + " *> " + _ps_quote(log)
+            term.write("(Start-Process -FilePath " + _ps_quote(term.shell)
+                       + " -ArgumentList '-NoProfile','-Command'," + _ps_quote(inner)
+                       + " -WorkingDirectory $PWD.Path -NoNewWindow -PassThru).Id\n")
+        else:
+            term.write(command.rstrip("\n") + " > '" + str(log) + "' 2>&1 &\n")
         raw, done = term.read_until(term.mark, deadline)
         term.busy = not done
-        # bash announces a background job as "[1] 12345" - the pid is how the
-        # model stops it again.
+        # bash announces a background job as "[1] 12345", PowerShell prints the
+        # bare id - either way the pid is the last thing on the line, and it is
+        # how the model stops it again.
         started = _clean(raw, term.mark)
         pid = started.split()[-1] if started else "?"
+        read_cmd = ("Get-Content -Tail 50 " if WINDOWS else "tail -n 50 ") + str(log)
+        stop_cmd = ("Stop-Process -Id " if WINDOWS else "kill ") + pid
         return ("Started in the background, pid " + pid + ".\n"
                 "Its output is going to: " + str(log) + "\n"
-                "Read it by calling terminal again with \"command\": \"tail -n 50 "
-                + str(log) + "\" - it keeps running while you do other things, "
-                "and nothing of it will appear here. Stop it with kill " + pid + ".")
+                "Read it by calling terminal again with \"command\": \"" + read_cmd
+                + "\" - it keeps running while you do other things, "
+                "and nothing of it will appear here. Stop it with " + stop_cmd + ".")
 
     term.write(command.rstrip("\n") + "\n")
     return _finish(term, *term.read_until(term.mark, deadline))
