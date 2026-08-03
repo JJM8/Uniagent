@@ -33,6 +33,7 @@ import threading
 from pathlib import Path
 
 import provider as provider_module
+import turnctx
 
 NAME = "subagent"
 DESCRIPTION = ("Hand a task to a named background subagent - a separate agent with its "
@@ -274,6 +275,15 @@ def _work(host, name, path, prompt, provider_name, model, temperature, origin):
     # it), so recomputing the tag here would give the wrong chat.
     tag = threading.current_thread().name
     history = path.read_text() if path.exists() else ""
+    # Published under the same tag /stop names, so stopping a subagent breaks
+    # open whatever it is blocked in - a model still writing, a long tool -
+    # rather than waiting for it to reach a check of its own. Unlike the chat's
+    # turn this is NOT abandoned: a subagent owns no chat anybody is waiting on,
+    # and its whole value when stopped is the report it makes on the way out,
+    # so it unwinds through the path below exactly as it always did - just now
+    # in about as long as it takes to close a socket.
+    ctx = turnctx.publish(turnctx.TurnContext(tag, kind="subagent"))
+    turnctx.bind(ctx)
     try:
         # on_save mirrors the history to the file as it grows, so a subagent can
         # be watched live. on_text swallows the stream - the default would print
@@ -287,19 +297,30 @@ def _work(host, name, path, prompt, provider_name, model, temperature, origin):
                            should_stop=lambda: host.stop_requested(tag),
                            chat_id=tag)
         if host.stop_requested(tag):
-            # Stopping halts the work, it does not throw it away - the chat
-            # still gets what the subagent managed, just flagged as incomplete.
-            note = ("Subagent " + name + " was STOPPED part-way through. What it "
-                    "had written so far:\n" + _answer(host, history))
+            note = _stopped_note(host, name, history)
         else:
             note = "Subagent " + name + " finished. Report:\n" + _answer(host, history)
+    except turnctx.Stopped:
+        # /stop broke it out of whatever it was blocked in, which lands here
+        # rather than as a return. The transcript is on disk either way -
+        # on_save mirrors it as it grows - so the report is built from that.
+        note = _stopped_note(host, name, path.read_text() if path.exists() else "")
     except Exception as e:
         note = ("Subagent " + name + " CRASHED - " + type(e).__name__ + ": "
                 + str(e) + ". Its transcript so far is in " + str(path))
     finally:
         # Always clear, or a stopped name could never be reused in this chat.
         host.clear_stop(tag)
+        turnctx.unpublish(ctx)
+        turnctx.unbind()
     _report(host, note, origin)
+
+
+def _stopped_note(host, name, history):
+    """Stopping halts the work, it does not throw it away - the chat still gets
+    what the subagent managed, just flagged as incomplete."""
+    return ("Subagent " + name + " was STOPPED part-way through. What it "
+            "had written so far:\n" + _answer(host, history))
 
 
 def run(name=None, prompt=None, provider=None, model=None, temperature=None,

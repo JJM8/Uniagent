@@ -18,6 +18,7 @@ import os
 import pty
 import re
 import select
+import shlex
 import struct
 import subprocess
 import termios
@@ -165,11 +166,14 @@ class _Terminal:
         # venv/bin/activate` prepends "(venv) " to it, and conda and plenty of
         # prompt themes rewrite it outright. That silently mangles the marker
         # and every result afterwards is the PREVIOUS command's output. Nothing
-        # in normal use touches PROMPT_COMMAND.
+        # in normal use touches PROMPT_COMMAND - but a user's .bashrc is
+        # exactly the kind of thing that might, which is why we re-assert it
+        # after sourcing their files in _source_user_env below.
         #
         # Random per terminal so a command that PRINTS the marker (a grep over
         # this very file, say) can't be mistaken for the marker itself.
         self.mark = "__UNI_" + uuid.uuid4().hex + "__"
+        prompt_cmd = 'printf "\\n%s%s\\n" "' + self.mark + '" "$?"; PS1=""'
 
         env = dict(os.environ)
         env["TERM"] = "dumb"  # ask politely for no colour codes
@@ -177,16 +181,20 @@ class _Terminal:
         # or conda sets it whenever it is activated, and that prefix would then
         # be printed after our marker and read as the head of the NEXT
         # command's output ("(venv) hello" instead of "hello").
-        env["PROMPT_COMMAND"] = 'printf "\\n%s%s\\n" "' + self.mark + '" "$?"; PS1=""'
+        env["PROMPT_COMMAND"] = prompt_cmd
         env["PS1"] = ""
         env["PS2"] = ""       # continuation lines add nothing to read
 
         # -i so bash prints that prompt at all. --noediting turns off readline,
         # which would otherwise echo back and redraw everything we type.
-        # --norc/--noprofile so the user's own prompt, aliases and colours don't
-        # end up in the output we have to parse. start_new_session puts bash in
-        # its own session, so a Ctrl-C in the real terminal running the agent
-        # doesn't also kill every chat's shell.
+        # --norc/--noprofile keep the user's startup files OUT of the initial
+        # prompt: they are sourced deliberately, and under control, as the
+        # first command (see _source_user_env) rather than at bash startup.
+        # That way anything they print is swallowed with the startup output,
+        # and anything they set that would break the marker is undone
+        # immediately afterwards. start_new_session puts bash in its own
+        # session, so a Ctrl-C in the real terminal running the agent doesn't
+        # also kill every chat's shell.
         self.proc = subprocess.Popen(
             ["bash", "--norc", "--noprofile", "--noediting", "-i"],
             stdin=slave, stdout=slave, stderr=slave,
@@ -203,6 +211,16 @@ class _Terminal:
         # Swallow the prompt bash prints the moment it starts, so it isn't read
         # as the first command's result.
         self.read_until(self.mark, time.monotonic() + 5)
+
+        # Behave like the user's own terminal: bring in ~/.profile and
+        # ~/.bashrc so PATH, aliases and exports are the ones the user actually
+        # lives with (this is what puts ~/.local/bin - edagent, hfetch - on
+        # PATH). Done as a command rather than at bash startup so we control
+        # it: the files' stdout lands in the swallow above, stderr is silenced,
+        # stdin is /dev/null so a stray `read` can't hang the shell, and the
+        # marker machinery is re-asserted afterwards in case either file
+        # touched PROMPT_COMMAND or PS1.
+        self._source_user_env(prompt_cmd)
 
     def alive(self):
         return self.proc.poll() is None
@@ -274,6 +292,24 @@ class _Terminal:
             if not chunk:
                 return out
             out += chunk.decode("utf-8", "replace")
+
+    def _source_user_env(self, prompt_cmd):
+        """Bring the user's own shell environment into this terminal.
+
+        Runs as the first command, once, when the terminal opens: source
+        ~/.profile then ~/.bashrc, then put the marker machinery back the way
+        it was in case either file set PROMPT_COMMAND or PS1. stdin comes from
+        /dev/null so a stray `read` in one of the files can't leave the shell
+        sitting there; stderr is silenced so warnings don't pollute the first
+        command's output; anything they print to stdout is swallowed by the
+        read that follows this write."""
+        bootstrap = (
+            "[ -f ~/.profile ] && source ~/.profile </dev/null 2>/dev/null; "
+            "[ -f ~/.bashrc ] && source ~/.bashrc </dev/null 2>/dev/null; "
+            "PROMPT_COMMAND=" + shlex.quote(prompt_cmd) + "; PS1=''; PS2=''; true"
+        )
+        self.write(bootstrap + "\n")
+        self.read_until(self.mark, time.monotonic() + 5)
 
 
 def _reap():

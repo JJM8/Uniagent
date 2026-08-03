@@ -60,6 +60,17 @@ background-terminal-output/
 .vscode/
 .claude/
 
+# The scratch Firefox profile the browser tools drive. THIS MUST NEVER BE
+# COMMITTED: a Firefox profile holds logins.json and key4.db (saved passwords
+# and the key that decrypts them), cookies.sqlite (live session tokens - anyone
+# with the file is signed in as you) and places.sqlite (your whole browsing
+# history). The rest of the folder is debug dumps from working on those tools.
+firefox_bg/
+
+# One-off experiments and their output - scratch, and the captures inside are
+# whatever page happened to be open at the time.
+experiments/
+
 # Logs. model_io.log in particular is every prompt and reply, in full.
 *.log
 model_io.log
@@ -75,6 +86,18 @@ unused/memory.md
 # Personal notes
 TODO.md
 august-uniagent-todo.md
+
+# Side projects and agent output that happen to live in this folder but are not
+# Uniagent. The images are scraped off the web - someone else's copyright, not
+# ours to republish.
+stickfight/
+sky-strike.html
+images/*/
+!images/screenshots/
+scripts/esp32-upload.json
+scripts/esp32-upload.json.eeda.json
+# Which file the edagent CLI last had open - per-machine state
+scripts/.edagent
 
 # Dead code and old drafts kept around locally - not part of the project
 unused/

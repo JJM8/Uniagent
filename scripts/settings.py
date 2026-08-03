@@ -48,6 +48,14 @@ MODEL_PAIRS = {
 # a decimal point).
 TEMPERATURE_RANGE = (0, 2)
 
+# Settings that are a list of strings rather than a single value - the safety
+# tab's two lists and the marketplace's repositories. Each is drawn by the
+# page's one list widget, and each is checked element by element in _valid(),
+# because the generic
+# `isinstance(value, type(DEFAULTS[key]))` match would take a list of anything
+# at all, dicts and nulls included, and hand it to code that expects text.
+LIST_KEYS = ("safety_whitelist", "safety_blacklist", "market_repos")
+
 DEFAULTS = {
     # The main agent's provider + model.
     "provider": "deepseek",
@@ -87,6 +95,49 @@ If the danger rating is 3 or below, reply with exactly {true} followed by the ra
 Otherwise reply with the rating and a brief reason why it could be unsafe, and do NOT write {true} anywhere in it.
 
 Format: DANGER: [0-10] - [explanation]""",
+    # Tools that skip the check entirely and just run. Matched against the
+    # PARSED tool name, whole and case-insensitively - not a substring of the
+    # call - so trusting "screenshot_tool" trusts that tool and not a command
+    # that merely mentions it. Checked before the blacklist below.
+    "safety_whitelist": ["screenshot_tool"],
+    # Phrases that block a call outright, without asking the model. Matched
+    # anywhere in the call text (tool name AND arguments, lower-cased), which
+    # is the point: what these catch is usually a path in an ARGUMENT - the
+    # agent editing its own code - rather than the tool itself.
+    #
+    # Empty by default. The obvious ones to add are this project's own files:
+    # main.py, tool_processor.py, tool_validation.py, provider.py, settings.py,
+    # command_processor.py. Left to the user because a blacklist that ships on
+    # blocks work the user never asked to have blocked.
+    "safety_blacklist": [],
+    # Which GitHub repositories the tools tab's marketplace browses, as
+    # "owner/repo" or "owner/repo/sub/folder" when the tools or skills sit
+    # somewhere other than the top level. Read live each time the marketplace
+    # is opened (cached a few minutes - see market.py), so adding one here
+    # shows its contents without a restart.
+    "market_repos": ["anthropics/skills"],
+    # The instruction /compact sends as the last user turn, after the whole
+    # conversation - see compaction.py, which reads it through _prompt().
+    # No placeholders: the history is the messages ahead of it, not text
+    # pasted into it, so what's written here reaches the model verbatim.
+    #
+    # Blank is a real value and means "the prompt below", which is how the
+    # compaction tab's empty box restores the shipped default.
+    "compaction_prompt": """That is the whole conversation so far, and it has grown
+too long to keep sending in full.
+
+Rewrite it as a much shorter version that keeps everything still needed to carry
+on: what the user asked for, decisions made and the reasons for them, facts
+established, files and paths touched, what tools were run and whatever they
+returned that still matters, and anything left outstanding or half-finished.
+Drop chit-chat, repetition, and tool output that no longer matters. Keep exact
+names, paths, numbers and quoted text where they matter - a summary that loses
+those is no use to the agent reading it.
+
+Do not start any line with "User:", "Uniagent:" or "Tool result:" - generation
+is cut off at those markers, so a summary written that way would lose
+everything after its first line. Reply with the compacted conversation and
+nothing else.""",
     # UI only.
     "theme": "dark",
     # The one colour the whole page is built out of - every button outline,
@@ -140,6 +191,15 @@ def _valid(key, value):
         # Not in PROVIDER_KEYS: unlike the four settings there, this one is
         # allowed to name nobody, and "" is how it says so.
         return isinstance(value, str) and (not value or value in provider.available())
+    if key in LIST_KEYS:
+        # A list of strings, and nothing else - one bad element refuses the
+        # whole list rather than being dropped quietly, since a safety list
+        # that saved as "most of what you typed" is worse than one that
+        # visibly didn't save. Blank and odd-cased entries ARE allowed
+        # through: tool_validation.py strips, lower-cases and skips empties
+        # when it matches, so neither can turn into a rule that fires on
+        # everything.
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
     if key == "temperature":
         return (isinstance(value, (int, float)) and not isinstance(value, bool)
                 and TEMPERATURE_RANGE[0] <= value <= TEMPERATURE_RANGE[1])

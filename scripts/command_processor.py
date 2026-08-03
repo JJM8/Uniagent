@@ -238,20 +238,27 @@ def _compact(arg, chat):
 
 
 def _stop(arg, chat):
-    """Cut a turn short. Bare, it stops THIS chat's own turn; given a subagent
-    name, it stops just that subagent and leaves the chat alone. The two are
-    deliberately separate keys - a subagent is off doing its own long job, and
-    stopping the conversation you're in should not kill it (nor the reverse).
+    """End a turn. Bare, it ends THIS chat's own turn; given a subagent name, it
+    stops just that subagent and leaves the chat alone. The two are deliberately
+    separate keys - a subagent is off doing its own long job, and stopping the
+    conversation you're in should not kill it (nor the reverse).
 
-    For the chat's own turn, two things can be holding it: the tool loop (asked
-    to stop, it gives up at its next safe point) or a safety check parked on a
-    y/n - so deny that too, or the turn sits there having been told to stop but
-    never getting the chance to notice."""
+    The chat's own turn is over by the time this returns: main.request_stop()
+    breaks open whatever the turn was blocked in, writes the stopped transcript
+    itself, hands the chat on and tells the front-end - all on THIS thread,
+    which is not the one that was busy. The worker is abandoned rather than
+    waited for, so how long it takes to notice is nobody's problem: it can no
+    longer write anything or reach any screen. That is why this says "stopped"
+    outright now, where it used to promise the turn would end shortly.
+
+    A safety check parked on a y/n is denied too. It is a wait on a human
+    rather than on a machine, so nothing about it gets broken open - it has to
+    be answered, and moving on IS the answer."""
     stem = chat.id
 
-    # A compaction holds the chat's lock, so the check below would see a busy
-    # chat and report a turn stopped that was never running. It is one request
-    # to the model with no safe point to give up at, so say so instead.
+    # A compaction holds the chat's turn slot, so the check below would see a
+    # busy chat and report a turn stopped that was never running. It is one
+    # request to the model with no safe point to give up at, so say so instead.
     if not arg and compaction.is_compacting(stem):
         return "that chat is being compacted - that can't be stopped part-way."
 
@@ -261,17 +268,18 @@ def _stop(arg, chat):
             return ("no subagent called " + arg + " is running in this chat. "
                     "(/stop on its own stops the chat's own turn.)")
         main.request_stop(tag)
-        return "stopping subagent " + arg + " - it will end at its next safe point."
+        return ("stopping subagent " + arg + " - it reports back with whatever "
+                "it had written.")
 
-    if not chat.lock.locked():
+    if not chat.slot.held():
         return "nothing is running in this chat."
-    main.request_stop(stem)
+    # Before the stop, not after: a turn parked on the approval gate is waiting
+    # on an answer, and until it gets one it never reaches the point where being
+    # cancelled means anything.
     deny_pending(stem)
-    # Seal the page's streaming bubble NOW, before the worker notices - so the
-    # answer stops on screen the instant /stop lands, not a chunk later.
-    if main.on_stop:
-        main.on_stop(stem)
-    return "stopped - the turn ends here."
+    if not main.request_stop(stem):
+        return "nothing is running in this chat."
+    return "stopped - the turn ended here."
 
 
 def _model(arg, chat):

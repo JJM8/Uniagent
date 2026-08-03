@@ -36,12 +36,14 @@ import threading
 
 import main
 import provider
+import settings
 import tool_processor
+import turnctx
 
 # Chats being compacted right now, by id. A compaction holds the chat's own
-# lock for its whole length, so main.busy_chats() already counts it as busy and
-# a message sent meanwhile queues behind it - but "main agent working" is the
-# wrong thing to say about it: nothing is streaming back, there is just a wait.
+# turn slot for its whole length, so main.busy_chats() already counts it as busy
+# and a message sent meanwhile queues behind it - but "main agent working" is
+# the wrong thing to say about it: nothing is streaming back, there is just a wait.
 # The page asks here which of the two is happening, so it can say "main agent
 # compacting" instead. See server._status().
 _running = set()
@@ -65,24 +67,21 @@ ARCHIVE = main.CHATS / "chat_archive"
 HEADER = ("[compacted history - the conversation up to here, summarised to "
           "save context. The full transcript is in chats/chat_archive/.]\n\n")
 
-# The instruction, sent as the last user turn after the whole conversation.
-# There is no {history} placeholder any more: the history is the messages
-# ahead of this one, not text pasted into it.
-COMPACTION_PROMPT = """That is the whole conversation so far, and it has grown
-too long to keep sending in full.
+def _prompt():
+    """The instruction to send as the last user turn after the whole
+    conversation - what the settings page's compaction tab edits.
 
-Rewrite it as a much shorter version that keeps everything still needed to carry
-on: what the user asked for, decisions made and the reasons for them, facts
-established, files and paths touched, what tools were run and whatever they
-returned that still matters, and anything left outstanding or half-finished.
-Drop chit-chat, repetition, and tool output that no longer matters. Keep exact
-names, paths, numbers and quoted text where they matter - a summary that loses
-those is no use to the agent reading it.
+    There is no {history} placeholder: the history is the messages ahead of
+    this one, not text pasted into it, so the setting reaches the model
+    verbatim. Read per compaction rather than held in a module constant, so an
+    edit on the settings page applies to the very next /compact without a
+    restart - the same way every other setting works.
 
-Do not start any line with "User:", "Uniagent:" or "Tool result:" - generation
-is cut off at those markers, so a summary written that way would lose
-everything after its first line. Reply with the compacted conversation and
-nothing else."""
+    A blank setting falls back to the shipped default, which is what makes
+    emptying the box on that tab a "restore the default" rather than a way to
+    send the model a conversation and no instruction at all."""
+    return ((settings.get("compaction_prompt") or "").strip()
+            or settings.DEFAULTS["compaction_prompt"])
 
 
 def _turns(history):
@@ -140,21 +139,28 @@ def compact(agent, prompt=None):
     """Compact `agent`'s history in place, returning what to tell the user.
 
     Blocking: whoever ran /compact is waiting on the answer. `prompt` overrides
-    COMPACTION_PROMPT for this one call.
+    the saved compaction prompt (see _prompt()) for this one call.
 
-    The chat's own lock is HELD for the whole compaction, the same lock a turn
+    The chat's turn slot is HELD for the whole compaction, the same slot a turn
     takes - so a message sent meanwhile waits for the new history instead of
     running against the old one and writing it straight back over the top. It is
     taken without blocking, though: a chat already mid-turn is told so rather
     than leaving whoever typed /compact waiting out a turn that could run for
     minutes.
 
+    The context it holds the slot with is marked "compaction", which is what
+    stops /stop from abandoning it: this is one request to the model with no
+    safe point to give up at and no half-written transcript to rescue, so it is
+    the one thing in here that genuinely has to be waited out (see
+    main.request_stop and command_processor._stop).
+
     Nothing is written until the model has actually answered - if the request
     fails, or comes back empty, the chat is left exactly as it was. The archive
     copy is taken first regardless, which is the point of it.
     """
-    if not agent.lock.acquire(blocking=False):
-        # Two different reasons the lock is held, and only one of them can be
+    ctx = turnctx.TurnContext(agent.id, kind="compaction")
+    if not agent.slot.acquire(ctx, blocking=False):
+        # Two different reasons the chat is busy, and only one of them can be
         # answered with "/stop it" - a compaction has no safe point to stop at.
         if is_compacting(agent.id):
             return "that chat is already being compacted - give it a moment."
@@ -168,7 +174,7 @@ def compact(agent, prompt=None):
             return "nothing to compact - this chat is empty."
 
         where = archive(agent)
-        summary = _ask(agent, turns, prompt or COMPACTION_PROMPT)
+        summary = _ask(agent, turns, prompt or _prompt())
         if not summary:
             return ("nothing to compact with - the model returned an empty reply, "
                     "so the chat is untouched. (Archived a copy at "
@@ -189,4 +195,4 @@ def compact(agent, prompt=None):
     finally:
         with _running_lock:
             _running.discard(agent.id)
-        agent.lock.release()
+        agent.slot.release(ctx)

@@ -1,14 +1,17 @@
 """Loads the tools, spots a tool call in the model's reply, and runs it."""
 
+import ast
 import importlib
 import inspect
 import json
 import pkgutil
 import re
+import shutil
 import sys
 from pathlib import Path
 
 import provider
+import turnctx
 
 TOOLS_DIR = Path(__file__).parent.parent / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
@@ -21,6 +24,25 @@ sys.path.insert(0, str(TOOLS_DIR))
 # folder is deliberately never added to sys.path the way tool_dirs() adds
 # tools/ and its subfolders.
 SKILLS_DIR = Path(__file__).parent.parent / "skills"
+
+# Where a switched-off tool or skill is kept. Disabling MOVES the file here,
+# which is the whole mechanism: load_tools() and find_skills() below scan
+# tools/ and skills/, so something that isn't in either is not imported, not
+# in the prompt, not in the schema the provider is sent, and not findable by
+# process() - there is no "enabled" flag anywhere to be read, honoured in one
+# place and forgotten in another.
+#
+# Outside tools/ and skills/, deliberately: tool_dirs() walks every folder
+# under tools/ and find_skills() rglobs skills/, so a "disabled" folder inside
+# either would be scanned like any other subfolder and nothing would actually
+# turn off.
+#
+# NOT unused/ - that folder is the user's own scratch space for dev leftovers,
+# and a UI that moved files in and out of it would trample things it did not
+# put there.
+DISABLED_DIR = Path(__file__).parent.parent / "disabled"
+DISABLED_TOOLS = DISABLED_DIR / "tools"
+DISABLED_SKILLS = DISABLED_DIR / "skills"
 
 TOOLS = []
 BROKEN = []      # tools that wouldn't load, so a bad one can't stop the agent
@@ -39,9 +61,13 @@ REQUIRED = ("NAME", "DESCRIPTION", "INSTRUCTIONS", "run")
 _FRONT = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
 
-def _read_skill(path):
+def _read_skill(path, root=None):
     """One Claude-format SKILL.md as a tool-shaped dict, or None if the file
     isn't one (no front matter, or no description).
+
+    `root` is the folder its "path" is reported relative to, skills/ by
+    default - the tools tab passes disabled/skills/ so a switched-off skill
+    can be read the same way without pretending it lives somewhere it doesn't.
 
     A skill is knowledge, not code: there's nothing to run, so reading it IS
     using it - which is what read_skill already says. It gets listed like any
@@ -74,7 +100,7 @@ def _read_skill(path):
         # Called instead of read: hand back the same body rather than erroring.
         "run": lambda _body=body, **_kw: _body,
         "skill": True,
-        "path": path.relative_to(SKILLS_DIR).as_posix(),
+        "path": path.relative_to(root or SKILLS_DIR).as_posix(),
     }
 
 
@@ -169,6 +195,206 @@ def load_tools():
     # Published only now that both lists are complete.
     TOOLS = tools
     BROKEN = broken
+
+
+def source_meta(text):
+    """A tool's NAME and DESCRIPTION read out of its source WITHOUT importing it.
+
+    Parsed, never executed. A disabled tool is code the user switched off, and
+    importing one just to find out what to call it in a list would run its
+    module body - top-level side effects, imports of packages that may not be
+    installed, and all - which is exactly what switching it off was meant to
+    stop. It is also what lets a BROKEN tool still be listed by its real name:
+    a file that raises on import has no module to ask, but its source still
+    says what it meant to be called.
+
+    A tool whose NAME is built rather than written as a literal simply has no
+    name here, and inventory() falls back to the filename.
+
+    Takes the SOURCE, not a path, so the marketplace can read the same two
+    fields out of a file it has downloaded but not yet written anywhere."""
+    meta = {}
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return meta
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Name) or target.id not in ("NAME", "DESCRIPTION"):
+                continue
+            try:
+                value = ast.literal_eval(node.value)
+            except Exception:
+                continue  # computed, not a literal - nothing to read
+            if isinstance(value, str):
+                meta[target.id.lower()] = value
+    return meta
+
+
+def _tool_files(root):
+    """Every .py under `root` that is a tool rather than a helper - the same
+    files the loaders would consider: no __pycache__, no _-prefixed helpers
+    like _discovery.py, no __init__.py."""
+    if not root.is_dir():
+        return []
+    out = []
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts or path.name.startswith("_"):
+            continue
+        out.append(path)
+    return out
+
+
+def _broken_reasons():
+    """{file stem: why it wouldn't load} from the last load_tools(), so the
+    inventory can mark a tool that is present but not running."""
+    reasons = {}
+    for note in BROKEN:
+        name, _, why = note.partition(" - ")
+        reasons[name.removesuffix(".py")] = why or "would not load"
+    return reasons
+
+
+def inventory():
+    """Every tool and skill on disk, switched on or off, as one flat list of
+    {kind, name, description, enabled, path, broken} - what the settings
+    page's tools tab draws.
+
+    `path` locates the item inside its own root (tools/ or disabled/tools/ for
+    a tool, skills/ or disabled/skills/ for a skill), which is what
+    set_enabled() takes back to move it. Which root a path is relative to is
+    decided by `enabled`, so the two never need to be told apart by string.
+
+    load_tools() is run first so a broken tool is reported as broken here even
+    on a server that has not taken a turn yet - it is the same scan every turn
+    does anyway."""
+    load_tools()
+    reasons = _broken_reasons()
+    items = []
+
+    for enabled, root in ((True, TOOLS_DIR), (False, DISABLED_TOOLS)):
+        for path in _tool_files(root):
+            try:
+                meta = source_meta(path.read_text())
+            except OSError:
+                meta = {}
+            stem = path.stem
+            items.append({
+                "kind": "tool",
+                "name": meta.get("name") or stem,
+                "description": meta.get("description", ""),
+                "enabled": enabled,
+                "path": path.relative_to(root).as_posix(),
+                # Only a live tool can be broken: the disabled ones are never
+                # imported, so "it would fail" is not something we know.
+                "broken": reasons.get(stem, "") if enabled else "",
+            })
+
+    for enabled, root in ((True, SKILLS_DIR), (False, DISABLED_SKILLS)):
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("SKILL.md")):
+            if "__pycache__" in path.parts:
+                continue
+            skill = _read_skill(path, root)
+            if not skill:
+                continue
+            items.append({
+                "kind": "skill",
+                "name": skill["name"],
+                "description": skill["description"],
+                "enabled": enabled,
+                "path": skill["path"],
+                "broken": "",
+            })
+
+    items.sort(key=lambda i: (i["name"].lower(), i["kind"]))
+    return items
+
+
+def _roots(kind, enabled):
+    """(where it is now, where it goes) for something of `kind` currently
+    `enabled`. One place decides the four combinations, so a move and the
+    listing that offered it can't disagree about which folder is which."""
+    if kind == "skill":
+        live, off = SKILLS_DIR, DISABLED_SKILLS
+    else:
+        live, off = TOOLS_DIR, DISABLED_TOOLS
+    return (live, off) if enabled else (off, live)
+
+
+def _inside(root, rel):
+    """`root`/`rel` resolved, or None if that isn't actually inside `root`.
+    The path comes off an HTTP request, so "../../.env" has to be refused
+    rather than trusted to be one of the names we just listed."""
+    if not rel or rel.startswith("/") or "\x00" in rel:
+        return None
+    path = (root / rel).resolve()
+    root = root.resolve()
+    return path if root in path.parents else None
+
+
+def set_enabled(kind, rel, enable):
+    """Switch one tool or skill on or off by MOVING it, and say what happened:
+    (True, note) or (False, why not).
+
+    `rel` is the item's path inside the root it is in NOW - so the caller
+    passes what inventory() gave it, and `enable` says which way it is going.
+
+    A skill moves as a whole folder, not as its SKILL.md alone: a skill bundle
+    is a folder of reference files and templates that its instructions point
+    at, and leaving those behind would half-disable it - the body would come
+    back with every link inside it broken.
+
+    Nothing is overwritten. A name already present in the destination stops
+    the move and says so, rather than quietly replacing a file the user may
+    have edited since."""
+    src_root, dst_root = _roots(kind, not enable)
+    src = _inside(src_root, rel)
+    if src is None or not src.exists():
+        return False, "no such " + kind + " - it may already have been moved."
+
+    if kind == "skill":
+        # The bundle is the folder holding SKILL.md. A SKILL.md sitting loose
+        # at the root of skills/ has no folder of its own, and moving its
+        # parent would move every other skill with it.
+        src = src.parent
+        if src == src_root.resolve():
+            return False, ("that skill sits loose in " + src_root.name
+                           + "/ rather than in a folder of its own, so there "
+                             "is nothing to move without taking the whole "
+                             "folder. Put it in its own folder first.")
+        rel = src.relative_to(src_root.resolve()).as_posix()
+
+    dst = dst_root / rel
+    if dst.exists():
+        return False, ("there is already a " + kind + " called " + dst.name
+                       + " in " + dst_root.parent.name + "/" + dst_root.name
+                       + " - move or delete that one first.")
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+    except OSError as e:
+        return False, "could not move it: " + str(e)
+
+    # The .pyc left behind in tools/__pycache__ is harmless - the loaders list
+    # .py files, not compiled ones - but a re-enabled tool that came back
+    # changed would be imported from the stale cache, so it goes with the file.
+    if kind == "tool":
+        cache = src.parent / "__pycache__"
+        if cache.is_dir():
+            for stale in cache.glob(src.stem + ".*.pyc"):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+
+    # So TOOLS/BROKEN reflect the move immediately rather than at the next turn.
+    load_tools()
+    return True, (("enabled " if enable else "disabled ") + kind + " "
+                  + Path(rel).stem)
 
 
 def _tools_text():
@@ -430,7 +656,14 @@ def process(call, chat_id=None):
     chat_id is the conversation the call came from, and is handed to any tool
     whose run() declares it - that's how the terminal keeps one open shell per
     chat instead of one for everybody. Tools that don't ask for it never see
-    it, so nothing else needed changing."""
+    it, so nothing else needed changing.
+
+    A stopped turn never starts a tool. Once one HAS started it is left to
+    finish on its own - a command already running cannot be un-run, and killing
+    a shared per-chat shell part-way would break the next turn that uses it -
+    but its result is discarded, because the context it would be reported
+    through is already dead (see turnctx.guard)."""
+    turnctx.check()
     t = _find(call["tool"])
     if t is None:
         # Might be one the agent just wrote, so re-read the folder and retry.
@@ -453,5 +686,10 @@ def process(call, chat_id=None):
         pass  # can't read the signature - just call it the plain way
     try:
         return t["run"](**args)
+    except turnctx.Stopped:
+        # A tool that noticed the stop itself. That is the turn ending, not the
+        # tool failing, so it must not be caught below and handed back to the
+        # model as an error message about work nobody is waiting for.
+        raise
     except Exception as e:
         return "ERROR running " + call["tool"] + ": " + type(e).__name__ + ": " + str(e)

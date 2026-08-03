@@ -52,11 +52,13 @@ import auth
 import command_processor
 import compaction
 import main
+import market
 import provider
 import provider_refs
 import settings
 import tokens
 import tool_processor
+import turnctx
 import voice_input
 # Not "from tools import _discovery": tools/ was never on sys.path as a
 # package (there's no tools/__init__.py) - it's tool_processor's own import
@@ -425,11 +427,7 @@ def _run_turn(text, kind="user", target=None):
     route = c.route
 
     def stream_chunk(chunk):
-        # Drop anything that arrives after this chat was stopped: the worker
-        # only gives up cooperatively a chunk or two later, and none of that
-        # tail should reach the page - the bubble has already been sealed.
-        if not main.stop_requested(stem):
-            _broadcast({"type": "chunk", "text": chunk, "chat": route})
+        _broadcast({"type": "chunk", "text": chunk, "chat": route})
 
     def worker():
         try:
@@ -448,6 +446,8 @@ def _run_turn(text, kind="user", target=None):
                                                         "chat": route}),
                       approve=_approve)
         except Exception as e:
+            if turnctx.cancelled():
+                return  # stopped mid-flight; the finally below stays quiet too
             # The provider's own message is the part worth reading (which
             # model id or parameter it rejected, an auth failure...). Without
             # this the exception died with the worker thread and the page saw
@@ -464,6 +464,16 @@ def _run_turn(text, kind="user", target=None):
             main.append_error(c, msg)
             _broadcast({"type": "error", "chat": route, "text": msg})
         finally:
+            # Nothing from a turn that /stop abandoned. That turn was already
+            # announced as over the moment it was stopped (see
+            # _on_stop_callback), and the chat has very likely started a NEW
+            # turn since - the queued message that went out on the back of it.
+            # A second "done" arriving here would tell the page that turn had
+            # finished too, wiping a live reply off the screen until its own
+            # done landed. Whenever this thread finally unwinds, it does so
+            # silently.
+            if turnctx.cancelled():
+                return
             # Always tell the page the turn is over, even if the provider blew
             # up - otherwise the input would look stuck mid-reply forever.
             _broadcast({"type": "done", "chat": route})
@@ -951,8 +961,14 @@ def _settings():
     providers actually usable right now (a working key/credentials), and every
     model known for each - the hardcoded floor, plus anything /model has
     tested and remembered, plus the provider's own live catalogue (cached a
-    few minutes; a provider that can't be asked just shows its floor)."""
+    few minutes; a provider that can't be asked just shows its floor).
+
+    "defaults" is the shipped value of every setting, so a box the user has
+    overwritten can still show what it started as - the compaction tab draws
+    the default prompt as its empty box's placeholder, which is the only
+    honest way to say "clear this and you get that back"."""
     return {"values": settings.load(),
+            "defaults": settings.DEFAULTS,
             "providers": provider.available(),
             "models": provider.known_models()}
 
@@ -1425,6 +1441,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(_context()), "application/json")
         elif self.path == "/tools":
             self._send(json.dumps(_tools()), "application/json")
+        elif self.path == "/inventory":
+            self._send(json.dumps(tool_processor.inventory()), "application/json")
+        elif self.path == "/market" or self.path.startswith("/market?"):
+            # Network, so only when the marketplace is actually opened - never
+            # on a page load, and never on a timer. Cached inside market.py;
+            # ?refresh=1 is the button that says "ask GitHub again anyway".
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                data = market.catalogue(refresh=q.get("refresh", [""])[0] == "1")
+            except Exception as e:
+                # Browsing is a round trip to somebody else's server, so it can
+                # fail in ways nothing here controls. The tab shows the note.
+                data = {"entries": [], "notes": [type(e).__name__ + ": " + str(e)],
+                        "fetched": 0}
+            self._send(json.dumps(data), "application/json")
         elif self.path == "/injection" or self.path.startswith("/injection?"):
             # Fetched when the page is told something changed, not on a timer -
             # but one signal ("a turn ended") covers several things that may
@@ -1499,6 +1530,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/tools":
             self._post_tools()
+            return
+        if self.path == "/inventory/toggle":
+            self._post_toggle()
+            return
+        if self.path == "/market/install":
+            self._post_install()
             return
         if self.path == "/context/pin":
             self._post_pin()
@@ -1956,6 +1993,64 @@ class Handler(BaseHTTPRequestHandler):
         _broadcast_tools()
         _broadcast_context()
 
+    def _post_toggle(self):
+        """Switch one tool or skill on or off - which MOVES its file between
+        tools/ and disabled/tools/ (or skills/ and disabled/skills/), see
+        tool_processor.set_enabled - and hand back the whole inventory as it
+        now stands, so the tab redraws from what is actually on disk rather
+        than from what it assumed the click did.
+
+        A refusal (something already there under that name, a file that moved
+        underneath us) comes back 200 with ok:false and the reason, not as an
+        HTTP error: it is an answer about tools, and the tab shows it in the
+        same line it shows a success in."""
+        body = self._body()
+        if not isinstance(body, dict):
+            self._send("expected a JSON object", code=400)
+            return
+        kind = body.get("kind")
+        path = body.get("path", "")
+        enable = body.get("enabled")
+        if kind not in ("tool", "skill") or not isinstance(path, str) \
+                or not isinstance(enable, bool):
+            self._send('expected {"kind": "tool"|"skill", "path": ..., '
+                       '"enabled": true|false}', code=400)
+            return
+        ok, note = tool_processor.set_enabled(kind, path, enable)
+        self._send(json.dumps({"ok": ok, "note": note,
+                               "items": tool_processor.inventory()}),
+                   "application/json")
+        if ok:
+            # The tool list is part of what every chat is told, so this moves
+            # the sidebar and the context panel in every other open window too.
+            _broadcast_tools()
+            _broadcast_context()
+
+    def _post_install(self):
+        """Download one marketplace entry into tools/ or skills/, switched on -
+        see market.py. The reply carries the refreshed inventory, so the tab
+        redraws with the new arrival in the enabled list rather than guessing
+        where it went."""
+        body = self._body()
+        if not isinstance(body, dict):
+            self._send("expected a JSON object", code=400)
+            return
+        repo = body.get("repo", "")
+        path = body.get("path", "")
+        if not isinstance(repo, str) or not isinstance(path, str) \
+                or not repo or not path:
+            self._send('expected {"repo": "owner/repo", "path": ...}', code=400)
+            return
+        try:
+            ok, note = market.install(repo, path)
+        except Exception as e:
+            ok, note = False, "install failed - " + type(e).__name__ + ": " + str(e)
+        self._send(json.dumps({"ok": ok, "note": note,
+                               "items": tool_processor.inventory()}),
+                   "application/json")
+        if ok:
+            _broadcast_tools()
+
     def _post_pin(self):
         """Pin an existing tool or skill's content into ONE chat - the one the
         asking window names in ?chat= - written into that chat's own settings
@@ -2340,27 +2435,31 @@ def serve():
     # land, marked as a report, not something the user typed.
     main.notify = lambda note, origin: _run_turn(note, kind="report",
                                                  target=main.chat(origin))
-    # A /stop seals the chat's streaming bubble on the page immediately, so the
-    # answer visibly stops the instant it's asked for, not when the worker gets
-    # around to giving up.
+    # /stop doesn't ask a turn to end, it ENDS it: by the time this is called
+    # the transcript has been closed out and the chat handed on, and only an
+    # abandoned thread is still winding down somewhere - and that thread can no
+    # longer reach this page (main.turn guards every callback it holds). So this
+    # says what is true, in the same breath and in the same shape as a turn
+    # finishing normally: seal the bubble, and then everything "done" does.
+    #
+    # Saying it in full here is the whole reason the page can react instantly.
+    # It used to send only "stopped" and then sleep 200ms hoping the worker had
+    # let go of the chat, which is why the busy bar lingered and a queued
+    # message sat greyed out waiting for a "done" that was still minutes away.
     def _on_stop_callback(stem):
-        # Seal the page's streaming bubble at once, so the answer visibly stops
-        # the moment /stop lands rather than a chunk later. main.on_stop is
-        # given the bare id (that's what the stop set keys off), so it's mapped
-        # to the route the page filters events by.
-        _broadcast({"type": "stopped", "chat": main.route_of(stem)})
-        # The worker only gives up at its next safe point, so the chat still
-        # holds its lock for a moment after this. Nudge the sidebar once that
-        # has unwound, so the busy dot goes out without waiting for the turn's
-        # own "done". This used to push a whole _status() payload, which no
-        # longer exists in a form that means anything to every page at once -
-        # each window asks about its OWN chat now, so this is a signal and the
-        # windows that care re-ask.
-        def _settle():
-            time.sleep(0.2)  # let the worker notice and release the lock
-            _broadcast_chats()
-
-        threading.Thread(target=_settle, daemon=True).start()
+        # main.on_stop is given the bare id (that's what the stop set keys off),
+        # so it's mapped to the route the page filters events by.
+        route = main.route_of(stem)
+        # Seals the streaming bubble; the page draws nothing more into it.
+        _broadcast({"type": "stopped", "chat": route})
+        # And the turn is over - this is what drops the "main agent working"
+        # bar and sends whatever the user had queued behind it.
+        _broadcast({"type": "done", "chat": route})
+        c = main.open_agent(stem)
+        if c is not None:
+            _broadcast_context(c)
+        # The busy dot, and this chat's new position in the by-recency order.
+        _broadcast_chats()
 
     main.on_stop = _on_stop_callback
     main.on_restart = _restart_self

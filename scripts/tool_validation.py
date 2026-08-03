@@ -10,14 +10,22 @@ not here - so this file has no prompt text of its own to fall out of sync with i
 
 A caller can pass its own prompt instead (validate_tool_use's `prompt`): a cron
 job's "safety_prompt" in cron.json, or an agent's own settings .json. That
-only changes the wording of the question - the verification model, and the
-whitelist/blacklist here, stay global.
+only changes the wording of the question - the verification model, and the two
+lists, stay global.
+
+The lists live in settings.py's DEFAULTS too ("safety_whitelist",
+"safety_blacklist"), edited on the same tab, and are read per call so a rule
+added there applies to the very next tool call without a restart. They bracket
+the model check on both sides: a whitelisted TOOL NAME runs without being
+asked about, a blacklisted PHRASE anywhere in the call is refused without being
+asked about, and everything else goes to the model.
 """
 
 import json
 
 import provider
 import settings
+import turnctx
 
 PINK = "\033[95m"
 RESET = "\033[0m"
@@ -53,6 +61,19 @@ def _canonical(call):
     return (call.get("tool") or "") + "(" + json.dumps(call.get("args", {})) + ")"
 
 
+def _entries(values):
+    """One of the safety tab's two lists, ready to match on: stripped,
+    lower-cased, and with the empty ones dropped.
+
+    The empties matter. Both lists are typed into a form, so a row left blank
+    or a stray trailing comma reaches here as "" - and "" is in every string
+    there has ever been, so a single blank blacklist row would block every
+    tool call the agent ever makes. Lower-casing is the same kind of
+    tolerance: the call text is already lower-cased, and a user who typed
+    "Main.py" meant the file, not a different one."""
+    return [v.strip().lower() for v in values if v and v.strip()]
+
+
 def validate_tool_use(call, prompt=None):
     """(safe, reasoning) - the verification model's verdict on the call and its
     one-line why, so the verdict can be shown with its reasoning. Any error is
@@ -65,8 +86,8 @@ def validate_tool_use(call, prompt=None):
     does. A prompt WITHOUT "{call}" would ask the model to judge a call it was
     never shown, and whatever came back would be meaningless, so that falls
     back to the global prompt rather than being run. The verification model
-    and the whitelist/blacklist below are global either way: only the wording
-    of the question changes, never who answers it.
+    and the two lists are global either way: only the wording of the question
+    changes, never who answers it.
 
     `call` is the PARSED {"tool", "args"} dict - the same shape
     tool_processor.process() runs, not the model's raw call text - so this
@@ -75,38 +96,39 @@ def validate_tool_use(call, prompt=None):
     whitelist below matches the actual tool name rather than a substring of
     the whole call (a command whose ARGUMENT happened to contain
     "screenshot_tool" used to false-positive the old text-substring check)."""
+    # A stopped turn asks nothing. This check is a whole extra model round-trip
+    # on the way to a call that is no longer going to be run, and it used to be
+    # one of the longest stretches of a turn with no way to interrupt it - the
+    # user pressed stop and then waited out a request about work already
+    # abandoned. Raising here (rather than returning "unsafe") keeps it out of
+    # the validation log too: nothing was checked, because nothing is running.
+    turnctx.check()
+
     text = _canonical(call)
     call_lower = text.lower()
     tool_name = (call.get("tool") or "").lower()
 
+    # One read for all three: the lists and the prompt below all come out of
+    # the same settings file, and this runs on every single tool call.
+    chosen = settings.load()
+
     # Whitelist check - trusted tools skip the model check entirely and run.
     # Matched on the parsed tool name exactly, not a substring of the call.
-    WHITELIST = [
-        "screenshot_tool",
-    ]
-    if tool_name in WHITELIST:
+    if tool_name in _entries(chosen["safety_whitelist"]):
         _note("WHITELISTED TOOL DETECTED: " + tool_name + " - marking SAFE")
         return True, "whitelisted tool (" + tool_name + ")"
 
-    # Blacklist check - automatically mark as unsafe if touching core files.
-    # Scanned across the whole canonical text (tool + args), not just the
-    # tool name - what this is meant to catch is usually a path ARGUMENT
-    # naming a core file, not the tool itself.
-    BLACKLIST = [
-        #"main.py",
-        #"tool_processor.py",
-        #"tool_validation.py",
-        #"provider.py",
-        #"settings.py",
-        #"command_processor.py"
-    ]
+    # Blacklist check - automatically mark as unsafe if the call names one of
+    # the blocked phrases. Scanned across the whole canonical text (tool +
+    # args), not just the tool name - what this is meant to catch is usually a
+    # path ARGUMENT naming a core file, not the tool itself.
+    for phrase in _entries(chosen["safety_blacklist"]):
+        if phrase in call_lower:
+            _note("BLACKLISTED PHRASE DETECTED: " + phrase + " - marking UNSAFE")
+            return False, ("This tool call names a blocked phrase (" + phrase
+                           + ") and has been stopped by the blacklist on the "
+                             "safety tab.")
 
-    for filename in BLACKLIST:
-        if filename in call_lower:
-            _note("BLACKLISTED FILE DETECTED: " + filename + " - marking UNSAFE")
-            return False, "This tool call attempts to modify a core Uniagent file (" + filename + ") and has been blocked by the blacklist."
-
-    chosen = settings.load()
     if prompt and "{call}" not in prompt:
         _note("custom safety prompt has no {call} placeholder - using the global one")
         prompt = None

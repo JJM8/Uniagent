@@ -53,13 +53,67 @@ Notes specific to Windows:
   rights — see the README's NSSM note. The scheduled task covers the normal
   case: it comes up at every logon and restarts if the server crashes.
 
-## Linux
+## Linux (one line)
+
+Paste this into any terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JJM8/Uniagent/main/install.sh | bash
+```
+
+The installer:
+
+1. installs **git**, **python3** and **python3-venv** if they're missing, using
+   whichever package manager the machine has (apt, dnf, pacman, zypper, apk).
+   This is the only step that needs root, and it is skipped entirely on a
+   machine that already has them — so on most boxes the install never asks for
+   a password.
+2. clones Uniagent into `~/Uniagent` (or `$UNIAGENT_HOME`)
+3. makes a `.venv` and installs the dependencies. The voice extras are
+   attempted and skipped without complaint if the system headers aren't there.
+4. writes `.env` from the example if you don't have one yet, `chmod 600` since
+   it holds API keys and mail passwords
+5. puts a `uniagentcli` command in `~/.local/bin` (new terminal needed if that
+   wasn't on your PATH already)
+6. installs **two systemd user services** — `uniagent-server.service` (the web
+   UI) and `uniagent-cron.service` (the scheduled-prompt watcher) — enables
+   both, and starts them. User services rather than system ones, so no root:
+   everything runs as you, which is what the agent needs anyway to read your
+   `.env` and write your chats. It also turns on **lingering** so they come up
+   at boot instead of waiting for you to log in; that one step may ask for a
+   password, and the install is still fine if you refuse it.
+7. waits (up to 90s) for the server to answer on port 8764, then prints the
+   password and opens `https://localhost:8764`. The password comes from `.env`,
+   where the server writes the one it generates on first run — so
+   `grep UNIAGENT_PASSWORD ~/Uniagent/.env` gets it back at any time.
+
+Re-running it later is the update path: an existing checkout is fast-forwarded
+rather than re-cloned, an existing `.env` is left alone, and the services are
+restarted onto the new code.
+
+Day-to-day:
+
+```bash
+systemctl --user restart uniagent-server.service uniagent-cron.service   # restart
+systemctl --user status uniagent-server.service                          # is it up?
+journalctl --user -u uniagent-server.service -f                          # live logs
+~/Uniagent/install.sh --remove                                           # stop and unregister
+```
+
+`--remove` takes out the services and the CLI shim and leaves the checkout and
+your `.env` alone; delete `~/Uniagent` by hand to finish the job.
+
+If the machine has no systemd user session (a container, some minimal
+installs), the installer says so and tells you the command to start the server
+by hand — everything else is still installed.
+
+## Linux, by hand
 
 ### Prerequisites
 
 ```bash
 sudo apt update
-sudo apt install python3 python3-pip git -y
+sudo apt install python3 python3-pip python3-venv git -y
 ```
 
 ## Clone and install

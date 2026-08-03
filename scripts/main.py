@@ -18,6 +18,7 @@ import settings
 import tokens
 import tool_processor
 import tool_validation
+import turnctx
 import voice_input
 
 name = "Uniagent"
@@ -148,6 +149,66 @@ def _approve(question):
         pass
     return input(question + " (y/n) > ").strip().lower() == "y"
 
+
+class TurnSlot:
+    """Which turn owns an agent right now - one at a time, next in line waits.
+
+    This replaces the plain threading.Lock each Agent used to hold for the
+    length of its turn. A lock can only be released by the thread that took it,
+    and that is precisely what made /stop slow: the chat stayed owned until the
+    stopped worker got around to unwinding, so the page could not go idle and a
+    queued message could not go out, however long the worker was still stuck in
+    a socket read or a tool.
+
+    Ownership here is a value, not a thread's claim on a mutex, so /stop can
+    take the chat off the abandoned turn and hand it to the next one
+    immediately (see main.request_stop). The abandoned thread's own release()
+    then finds it no longer holds the slot and does nothing, which is the whole
+    point: whether it unwinds in a millisecond or a minute changes nothing for
+    anybody waiting."""
+
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._ctx = None
+
+    def acquire(self, ctx, blocking=True):
+        """Take the slot for `ctx`. Blocking (the default) waits for whoever
+        has it; non-blocking returns False rather than waiting, which is what
+        /compact wants - a chat already mid-turn is told so, not queued."""
+        with self._cond:
+            if not blocking:
+                if self._ctx is not None:
+                    return False
+                self._ctx = ctx
+                return True
+            while self._ctx is not None:
+                self._cond.wait()
+            self._ctx = ctx
+            return True
+
+    def release(self, ctx):
+        """Give the slot up, but ONLY if `ctx` still holds it. False means
+        somebody else does now - a stopped turn whose chat has already been
+        handed on - and the caller must not touch the chat any further."""
+        with self._cond:
+            if self._ctx is not ctx:
+                return False
+            self._ctx = None
+            self._cond.notify_all()
+            return True
+
+    def held(self):
+        """Whether anything owns this agent right now - what "is it busy" means
+        everywhere, and what goes false the instant /stop lands rather than
+        whenever the abandoned worker finally notices."""
+        with self._cond:
+            return self._ctx is not None
+
+    def context(self):
+        with self._cond:
+            return self._ctx
+
+
 class Agent:
     """One agent's conversation and the model it runs on.
 
@@ -164,8 +225,8 @@ class Agent:
     bare path); never off `path.stem`.
 
     Chat, CronJob and Subagent are all Agents - the same thing, a running
-    conversation with a model behind it. The lock is PER AGENT, so turns of
-    different agents run in parallel.
+    conversation with a model behind it. The turn slot is PER AGENT, so turns
+    of different agents run in parallel.
 
     provider/model/temperature are None when nothing has been pinned, and the
     agent then follows whatever the settings page has selected (see models())."""
@@ -233,7 +294,9 @@ class Agent:
         # The id a browser knows this chat by - the same string for an ordinary
         # chat, 'cron/<name>' for a cron job. See chat_route().
         self.route = chat_route(self.path)
-        self.lock = threading.Lock()
+        # Who is running a turn in this agent right now. Not a lock - see
+        # TurnSlot's docstring on why ownership has to be transferable.
+        self.slot = TurnSlot()
         self.history = self.path.read_text() if self.path.exists() else ""
         cfg = self._read_settings()
         # A model passed in (a cron job knows its from cron.json before its files
@@ -442,11 +505,21 @@ class Chat(Agent):
     kind = "chat"
 
 
-# Every agent opened this run, one object per file. Two callers asking for the
-# same one must get the same object - separate copies would each hold their own
-# history and lock, and two turns could scramble the file.
+# Every agent opened this run, one object per file, keyed by flat id. Two
+# callers asking for the same one must get the same object - separate copies
+# would each hold their own history and turn slot, and two turns could scramble
+# the file.
 _open = {}
 _open_lock = threading.Lock()
+
+
+def open_agent(cid):
+    """The already-open Agent with this flat id, or None. Deliberately does not
+    open one: the callers that want this (request_stop) are asking about
+    something RUNNING, and nothing can be running in an agent no thread has
+    opened yet."""
+    with _open_lock:
+        return _open.get(cid)
 
 
 def agent(path, cls=Chat, **kw):
@@ -591,9 +664,14 @@ _migrate_json_names()  # <id>.md/<id>.json   -> history.json/settings.json
 
 
 def busy_chats():
-    """Ids of every open chat that is mid-turn right now."""
+    """Ids of every open chat that is mid-turn right now.
+
+    A chat /stop has abandoned is NOT in here, even if the thread that was
+    running it is still winding down: request_stop() takes the slot back as it
+    stops the turn, so this goes false at once and the page's "main agent
+    working" bar goes with it."""
     with _open_lock:
-        return sorted(cid for cid, c in _open.items() if c.lock.locked())
+        return sorted(cid for cid, c in _open.items() if c.slot.held())
 
 
 # The chat the TERMINAL is looking at - where a line typed into cli.py, and a
@@ -641,7 +719,7 @@ def discard_if_untouched(keep=None):
     c = current
     if c is None or c is keep or c.kind != "chat":
         return None
-    if c.lock.locked() or _has_conversation(c):
+    if c.slot.held() or _has_conversation(c):
         return None
     folder = c.path.parent
     if folder.exists():
@@ -649,7 +727,7 @@ def discard_if_untouched(keep=None):
         # Anything that isn't one of our own chats/chat-*/ folders is left
         # exactly as it is, registry included: dropping it from _open without
         # deleting it would let the next chat() call build a SECOND Agent for
-        # the same files, with its own lock, which is the one thing _open
+        # the same files, with its own turn slot, which is the one thing _open
         # exists to prevent.
         if not (folder.name.startswith("chat-")
                 and folder.parent.resolve() == CHATS.resolve()):
@@ -773,11 +851,13 @@ new_chat(persist=False)
 # no live chat, so reports stay in their transcript files.
 notify = None
 
-# How a front-end is told a chat's own turn was just asked to stop, called as
-# on_stop(stem) the instant /stop lands - BEFORE the worker thread winds down.
-# server.py points this at a broadcast that seals the streaming bubble on the
-# page right away, so the stop looks instant even though the worker can only
-# give up cooperatively a chunk or two later. None when nothing is watching.
+# How a front-end is told a chat's turn is OVER because /stop ended it, called
+# as on_stop(stem) from inside request_stop() - on the stopping thread, before
+# it returns, and after the transcript has already been closed out and the chat
+# handed on. By the time this runs the turn is finished as far as everything
+# except one doomed thread is concerned, so a front-end should treat it exactly
+# as it treats a turn ending normally: seal the bubble, drop the busy bar, send
+# whatever was queued behind it. None when nothing is watching.
 on_stop = None
 
 # How a front-end restarts its own process, called as on_restart() with no
@@ -800,29 +880,143 @@ def turn_chat():
     return (c or current).path
 
 
-# Chats whose turn has been asked to stop, by stem. A running turn is a worker
-# thread part-way through a tool loop, and a thread can't be safely killed from
-# outside - so stopping is COOPERATIVE: the turn checks this at the points it
-# can safely give up (between tool-loop passes, and between streamed chunks)
-# and returns early, leaving the history complete rather than half-written.
+# Everything stopped since it last started, by key - a chat's stem for its own
+# turn, a subagent's thread tag for a subagent's. This is the coarse, sticky
+# record ("was this stopped?"), NOT the mechanism: the real work is done by the
+# turn's context in turnctx, which breaks open the blocking call the turn is
+# actually sitting in. This set survives the context being dropped, which is
+# what lets a caller ask after the fact (subagent.py's report, run()'s loop).
 _stops = set()
 _stops_lock = threading.Lock()
 
 
-def request_stop(stem):
-    """Ask the turn running in chat `stem` to stop at its next check."""
+def _no_result_yet(turns):
+    """Tool call ids in the last assistant turn that nothing has answered.
+
+    Only ever non-empty when a turn was cut short between making a call and
+    recording its result - which the old cooperative stop could not produce
+    (it only ever gave up at the top of a pass) and abandoning the thread very
+    much can. Left unanswered, the next request carries an assistant turn
+    holding a tool_call with no matching tool result, which the strict
+    providers reject outright and the lenient ones simply misread."""
+    if not turns or not turns[-1].get("tool_calls"):
+        return []
+    return [tc.get("id") for tc in turns[-1]["tool_calls"] if tc.get("id")]
+
+
+def _stopped_history(ctx, fallback):
+    """The transcript a stopped turn leaves behind, built by whoever STOPPED it
+    rather than by the turn itself.
+
+    This is what makes the stop instant instead of merely requested: the chat
+    is closed out here and now, on the stopping thread, so nothing waits on the
+    abandoned worker reaching a safe point to write the same thing.
+
+    It reproduces exactly what the cooperative path used to write, plus the two
+    cases only abandonment can reach: text streamed but not yet folded into the
+    turns list, and a tool call left hanging without its result. `fallback` is
+    the chat's history as last saved, used when the turn had not published its
+    working list yet (it was still setting up)."""
+    turns = list(ctx.turns) if ctx.turns is not None else None
+    if turns is None:
+        # Stopped in the moment between taking the chat and building the turns
+        # list. The history on disk is everything up to this turn, so the
+        # message being answered has to be put back by hand - without it the
+        # transcript would show a stop with nothing before it to explain what
+        # was stopped.
+        try:
+            turns = json.loads(fallback) if fallback else []
+        except json.JSONDecodeError:
+            turns = []
+        if ctx.text:
+            turns.append({"role": "user", "content": ctx.text})
+
+    # Whatever the current response had streamed before the stop. Compared
+    # against the last turn rather than trusted blindly: run() may have folded
+    # this very text in already (the two happen on different threads and either
+    # order is possible), and appending it twice would show the reply twice.
+    partial = ctx.partial
+    if partial and partial.strip():
+        if not turns or turns[-1].get("content") != partial:
+            turns.append({"role": "assistant", "content": partial})
+
+    for call_id in _no_result_yet(turns):
+        turns.append({"role": "tool", "tool_call_id": call_id, "content":
+                      "STOPPED - the user stopped the turn before this call "
+                      "finished. Whether it ran at all is unknown, so check "
+                      "rather than assume, and wait for the user's next "
+                      "instruction before carrying on."})
+
+    turns.append({"role": "assistant", "content": STOPPED})
+    return json.dumps(turns, indent=2)
+
+
+def request_stop(key):
+    """Stop whatever is running under `key`, NOW - a chat's stem, or a
+    subagent's thread tag.
+
+    For a chat's own turn this does the whole job rather than asking for it:
+
+      1. cancel the turn's context, which closes the provider connection or
+         subprocess it is blocked on, so the worker thread is woken this
+         instant instead of at its next voluntary check;
+      2. write the stopped transcript itself (see _stopped_history), because
+         the thread that would otherwise write it is being abandoned;
+      3. hand the chat's slot on, so the page goes idle and anything queued
+         behind this turn starts immediately;
+      4. tell the front-end (on_stop) that the turn is over.
+
+    The worker is not waited for and never joins the story again: every
+    callback it holds was wrapped by turnctx.guard when the turn started, so
+    once its context is cancelled it can neither stream, save, nor report. It
+    exits whenever its blocked call gives up.
+
+    A subagent has no chat to hand on, so it gets step 1 only and unwinds
+    through its own report as it always has - now near-instantly, since the
+    call it was stuck in is broken open too.
+
+    Returns True if something was actually stopped."""
     with _stops_lock:
-        _stops.add(stem)
+        _stops.add(key)
+
+    ctx = turnctx.get(key)
+    if ctx is None:
+        return False
+
+    # cancel() is the one-shot: a second /stop, or a stop racing the turn's own
+    # ending, gets False here and must not close the transcript out twice.
+    if not ctx.cancel():
+        return False
+
+    if ctx.kind != "turn":
+        return True  # a subagent - no chat of its own to release
+
+    c = open_agent(key)
+    if c is None:
+        return True
+    try:
+        c.history = _stopped_history(ctx, c.history)
+        c.save()
+    finally:
+        # The handover happens whatever went wrong writing the transcript out.
+        # A chat left owned by a turn that has already been cancelled would be
+        # busy forever - no thread will ever come back to release it - and that
+        # is a far worse outcome than a transcript missing its last line.
+        turnctx.unpublish(ctx)
+        c.slot.release(ctx)
+    if on_stop:
+        on_stop(key)
+    return True
 
 
-def stop_requested(stem):
+def stop_requested(key):
     with _stops_lock:
-        return stem in _stops
+        return key in _stops
 
 
-def clear_stop(stem):
+def clear_stop(key):
     with _stops_lock:
-        _stops.discard(stem)
+        _stops.discard(key)
 
 
 # This chat's most recent known token usage, by stem - the real counts
@@ -1412,9 +1606,16 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
     after its call, inventing tool results and firing more calls, and none of
     that tail should be shown, remembered, or paid for.
 
-    `should_stop`, if given, is checked between chunks: a stopped turn gives up
-    mid-answer rather than making the user wait out a long one, and whatever
-    arrived before that is still returned so it can be kept.
+    `should_stop`, if given, is checked between chunks - a backstop now rather
+    than the mechanism. A /stop breaks the provider connection open through
+    this thread's turn context (provider._stream_post), so the loop below
+    normally exits by raising Stopped out of the generator on the spot; this
+    check only catches the case where a chunk happened to be in hand already.
+    Whatever arrived before either is still returned so it can be kept.
+
+    Text is published onto the turn's context as it arrives, so a /stop landing
+    mid-answer can write that partial reply into the transcript itself instead
+    of losing it with the abandoned thread (see _stopped_history).
 
     `usage`, if given, is a dict provider.stream_response() fills in with real
     token counts as the provider reports them. Breaking out at the first tool
@@ -1443,6 +1644,15 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
     """
     response = ""
     in_call = False  # has the call started being written yet?
+
+    # This response's text as it grows, readable by whoever stops the turn.
+    # Reset here rather than at the end of the pass: from the moment a new
+    # response starts streaming, the previous one is already accounted for in
+    # the turns list, and leaving it published would have a stop append it a
+    # second time.
+    ctx = turnctx.current()
+    if ctx is not None:
+        ctx.partial = ""
 
     #temp guard
     if temperature is None:
@@ -1483,6 +1693,8 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
         if should_stop and should_stop():
             break
         response += chunk
+        if ctx is not None:
+            ctx.partial = response
         # Reply text only. The call itself never comes through here - it
         # arrives on the structured channel and is shown by show_call above -
         # so there is nothing to scan, trim or break out of mid-stream: the
@@ -1609,10 +1821,13 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
     loop instead of only landing at the end of the turn. `on_text`, if given, is
     handed each piece of the reply as the model writes it and takes over from
     printing - so a UI can show the answer arriving instead of waiting out the
-    whole turn. `should_stop`, if given, is checked between tool-loop passes and
-    between streamed chunks: when it goes true the turn gives up early and
-    returns the history as it stands, which is how /stop cuts a turn short
-    (a worker thread can't be killed from outside, so it has to agree to stop).
+    whole turn. `should_stop`, if given, is checked between tool-loop passes -
+    the backstop for a caller that stops a turn without a context to cancel
+    (a subagent's parent, cli.py's Ctrl-C). The turn's own cancellation is
+    sharper than that: /stop cancels this thread's turn context, which breaks
+    open whatever blocking call it is actually in and unwinds this function
+    with turnctx.Stopped. Either way the history returned is whatever had been
+    written when it gave up.
 
     `on_tool_call`, `on_tool_result` and `on_safety`, if given, fire the moment
     a call is parsed, its result comes back, and the safety verdict is known - so
@@ -1651,6 +1866,15 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
     turns.append({"role": "user", "content": text})
     bad_json = 0  # consecutive "meant to be a tool call but wouldn't parse" tries
     last_response = None  # the previous pass's raw reply, to catch a stuck loop
+
+    # Published so a /stop landing part-way through can close this transcript
+    # out itself rather than waiting for this thread to come back and do it -
+    # see _stopped_history(). The SAME list object, not a copy: it is read as it
+    # stands at the moment of the stop, so every append below is visible without
+    # anything having to re-publish it.
+    ctx = turnctx.current()
+    if ctx is not None:
+        ctx.turns = turns
 
     def sync():
         if on_save:
@@ -1844,10 +2068,17 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
          temperature=None, on_tool_call=None, on_tool_result=None, on_safety=None,
          safety=None, safety_prompt=None, inject=None):
     """One turn of agent `c` through run(), mirrored to its file as it goes.
-    Serialised against other turns of the same agent by its lock; turns of
+    Serialised against other turns of the same agent by its turn slot; turns of
     OTHER agents run in parallel. on_text/approve pass through to run(), so a
     front-end other than the terminal (server.py) can catch the stream and
     answer the safety gate its own way.
+
+    Every callback the caller handed in is wrapped so it goes silent the moment
+    this turn is stopped. That is what lets /stop abandon the thread outright
+    instead of waiting for it: a stopped turn still running somewhere cannot
+    stream text to a page, cannot write the transcript, cannot report a tool
+    result, because all three of those are these callbacks. See
+    turnctx.guard(), and request_stop() for the other half.
 
     The model comes from the agent itself: its header is re-read here, at the
     start of the turn, so a /model (or /temperature) on the loaded chat or a
@@ -1861,7 +2092,7 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
     every level is the normal case and means "as the settings page says".
 
     Only turns IN THIS PROCESS can be stopped: /stop names an agent. Cron jobs
-    are real agents too (their own lock, file and listing) but run in the
+    are real agents too (their own turn slot, file and listing) but run in the
     separate cron watcher process, so /stop can't reach them from here.
 
     A cron run has no special case here and doesn't want one: each run gets its
@@ -1884,39 +2115,78 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
     safe_prompt = safety_prompt or c.safety_prompt
 
     stem = c.id
-    # Clear ONLY once this turn actually holds the lock - not before. A second
-    # message sent while a turn is still running starts THIS function on its
-    # own thread right away, which used to clear_stop() here before ever
-    # blocking on c.lock - wiping out a /stop meant for the turn still in
-    # flight a moment before its own should_stop() check could see it, so the
-    # turn you tried to stop just carried on regardless. Waiting until the
-    # lock is actually held means nothing else for this chat is running, so
-    # clearing here can only ever affect THIS turn about to start.
-    with c.lock:
-        clear_stop(stem)
-
+    ctx = turnctx.TurnContext(stem)
+    # Recorded before the chat is even taken, so a stop landing in the gap
+    # before run() has built its turns list can still say what was asked.
+    ctx.text = text
+    # Wait for whatever is running in this chat. A second message sent while a
+    # turn is still going starts THIS function on its own thread right away and
+    # parks here; a /stop on the turn ahead releases the slot immediately, so
+    # the wait ends then rather than whenever that turn's thread unwinds.
+    c.slot.acquire(ctx)
+    # Published only now that the turn actually owns the chat, so /stop is never
+    # ambiguous when two are lined up: it finds the one that is RUNNING, and the
+    # one still queued goes on to run normally afterwards. Clearing the stop
+    # flag has to wait for the same moment, or a message sent a beat before a
+    # /stop would wipe the stop meant for the turn still in flight.
+    turnctx.publish(ctx)
+    turnctx.bind(ctx)
+    clear_stop(stem)
+    try:
         def keep(updated):
             c.history = updated
             c.save()
 
-        # c.history is read HERE, holding the lock, not on the way in: a second
+        # c.history is read HERE, owning the chat, not on the way in: a second
         # message sent while the first was still working starts this function
         # immediately and then waits right here, so anything read before the
         # wait is a snapshot from before the turn ahead of it finished.
         c.history = run(text, c.history,
                         provider_name=prov, model=mod, temperature=temp,
-                        approve=approve, on_save=keep,
-                        on_text=on_text, should_stop=lambda: stop_requested(stem),
-                        chat_id=stem, on_tool_call=on_tool_call,
-                        on_tool_result=on_tool_result, on_safety=on_safety,
+                        approve=turnctx.guard(ctx, approve),
+                        on_save=turnctx.guard(ctx, keep),
+                        on_text=turnctx.guard(ctx, on_text),
+                        should_stop=lambda: stop_requested(stem),
+                        chat_id=stem,
+                        on_tool_call=turnctx.guard(ctx, on_tool_call),
+                        on_tool_result=turnctx.guard(ctx, on_tool_result),
+                        on_safety=turnctx.guard(ctx, on_safety),
                         pinned=c.pinned, safety=safe_on, safety_prompt=safe_prompt,
                         inject=inject)
         # run() syncs as it goes, so the file is usually already this - but it
         # is the RETURNED history that's authoritative, and leaving the two to
         # agree by convention means anything run() adds after its last sync
         # lives only in memory until some later turn happens to write it out.
-        c.save()
-    clear_stop(stem)
+        if not ctx.cancelled:
+            c.save()
+    except turnctx.Stopped:
+        # This turn was abandoned. request_stop() has already written the
+        # stopped transcript, released the chat and told the front-end, so there
+        # is nothing left to do and nothing to report - swallowing it here is
+        # what keeps /stop from surfacing as a crash in the caller.
+        pass
+    finally:
+        # Both are no-ops when /stop already did them - unpublish only clears an
+        # entry that is still ours, release only releases a slot we still hold -
+        # so an abandoned thread arriving here late cannot disturb the turn that
+        # has since taken over the chat.
+        turnctx.unpublish(ctx)
+        c.slot.release(ctx)
+    # Only a turn that ended on its own terms clears the flag. An abandoned one
+    # arriving here is late by definition - the chat may well be on its next
+    # turn, and if THAT one has since been stopped too, clearing here would wipe
+    # a stop meant for it and leave stop_requested() saying the opposite of the
+    # truth. The next turn clears it for itself as it starts (above), which is
+    # the only place that can know it is clearing its own.
+    if not ctx.cancelled:
+        clear_stop(stem)
+    # The context is deliberately left BOUND to this thread. Whoever called
+    # this still has cleanup of its own to do - server.py's worker broadcasts
+    # the turn as finished - and needs to know whether the turn it just ran was
+    # stopped, on the error path as much as the normal one. turnctx.cancelled()
+    # answers that, and the next turn on this thread binds its own context over
+    # the top before anything else happens.
+    return ctx
 
 
 def prompt(text, on_text=None, approve=_approve):

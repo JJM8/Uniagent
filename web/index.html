@@ -1305,6 +1305,132 @@
   .danger { background: none; border: 1px solid var(--red); color: var(--red); flex: 0 0 auto; }
   .set-note { color: var(--dim); font-size: 12px; line-height: 1.5; }
   .set-note b { color: var(--text); font-weight: 600; }
+  /* The safety tab's two lists. Not a textarea of one-per-line, and not the
+     cron tab's cards either: an entry here is a single short string with
+     nothing else to say about it, so a row is just the box holding it and the
+     × that drops it. Editing in place means changing a rule is typing in it,
+     rather than deleting a row and adding the corrected one back. */
+  .list-edit { display: flex; flex-direction: column; gap: 6px; }
+  .list-row { display: flex; gap: 6px; align-items: center; }
+  .list-row > input { flex: 1 1 auto; min-width: 0; font-size: 12.5px; padding: 6px 12px; }
+  /* Square, and the same height as the box beside it whatever the font does. */
+  .list-del {
+    flex: 0 0 auto;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--dim);
+    cursor: pointer;
+    font-size: 15px;
+    line-height: 1;
+    padding: 6px 10px;
+  }
+  .list-del:hover { color: var(--red); border-color: var(--red); background: var(--red-a15); }
+  /* An empty list must still look like a list, or the add button below reads
+     as belonging to whatever came before it. */
+  .list-empty { color: var(--dim); font-size: 11.5px; font-style: italic; padding: 2px 0; }
+  .list-add { align-self: flex-start; flex: 0 0 auto; padding: 5px 11px; font-size: 12px; }
+
+  /* ---- the tools tab -------------------------------------------------------
+     One row per tool or skill: the switch, then what it is. Rows are grouped
+     into what is on and what is off rather than sorted into one list with the
+     switches scattered down it - the question this tab answers is "what is the
+     agent carrying right now", and that is the top group read on its own. */
+  .inv-group { display: flex; flex-direction: column; gap: 6px; }
+  .inv-label {
+    color: var(--dim);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+  .inv-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 11px;
+  }
+  /* An off row is legible but visibly not in play. Not display:none-adjacent
+     dimming - you have to be able to read the description of the thing you are
+     deciding whether to switch back on. */
+  .inv-item.off { opacity: 0.72; }
+  .inv-item.broken { border-color: var(--red); }
+  .inv-text { flex: 1 1 auto; min-width: 0; }
+  .inv-name {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
+    color: var(--text);
+    font-size: 12.5px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .inv-desc {
+    color: var(--dim);
+    font-size: 11.5px;
+    line-height: 1.45;
+    margin-top: 3px;
+    /* A description is a paragraph in some tools and a sentence in others;
+       three lines is enough to tell them apart without a wall of text. */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .inv-why { color: var(--red); font-size: 11px; margin-top: 3px; }
+  .inv-repo { color: var(--dim); font-size: 10.5px; font-weight: 400; }
+  .inv-empty { color: var(--dim); font-size: 11.5px; font-style: italic; }
+  .inv-item .ghost { flex: 0 0 auto; padding: 5px 11px; font-size: 12px; }
+  /* The switch itself: a checkbox, so it is still a checkbox to the keyboard
+     and to a screen reader - only its two boxes are drawn instead. */
+  .switch { position: relative; flex: 0 0 auto; width: 34px; height: 19px; margin-top: 1px; }
+  .switch input { position: absolute; inset: 0; width: 100%; height: 100%;
+                  margin: 0; opacity: 0; cursor: pointer; }
+  .switch .track {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: var(--border);
+    transition: background 0.15s ease;
+    pointer-events: none;
+  }
+  .switch .track::before {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    background: var(--dim);
+    transition: transform 0.15s ease, background 0.15s ease;
+  }
+  .switch input:checked ~ .track { background: var(--accent); }
+  .switch input:checked ~ .track::before { transform: translateX(15px); background: var(--bg); }
+  .switch input:disabled { cursor: progress; }
+  .switch input:focus-visible ~ .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #inv-status { color: var(--dim); font-size: 11.5px; min-height: 14px; }
+  #inv-status.err { color: var(--red); }
+  /* The search box takes the room; its two buttons stay their own size rather
+     than each claiming a third of the row the way .row's default would. */
+  #market-search { flex: 2 1 220px; }
+  #market-refresh { flex: 0 0 auto; }
+  #market-status { color: var(--dim); font-size: 11.5px; min-height: 14px; }
+  #market-status.err { color: var(--red); }
+  #market-box > summary {
+    cursor: pointer;
+    color: var(--dim);
+    font-size: 12px;
+    font-weight: 500;
+    padding: 4px 0;
+  }
+  #market-box > summary:hover { color: var(--text); }
+  #market-box[open] { display: flex; flex-direction: column; gap: 12px; }
   /* The providers tab is a grid of pictures, three across, because picking a
      provider is a thing you do by recognising a logo rather than by reading a
      form. Three is fixed rather than auto-filled: it keeps the icons big
@@ -1739,6 +1865,8 @@
       <button class="set-tab" data-tab="appearance">appearance</button>
       <button class="set-tab" data-tab="voice">voice</button>
       <button class="set-tab" data-tab="context">context</button>
+      <button class="set-tab" data-tab="tools">tools/skills</button>
+      <button class="set-tab" data-tab="compaction">compaction</button>
       <button class="set-tab" data-tab="cron">cron</button>
       <button class="set-tab" data-tab="safety">safety</button>
       <button class="set-tab" data-tab="system">system</button>
@@ -1992,6 +2120,92 @@
         </div>
       </div>
 
+      <!-- tools -->
+      <div class="tab-panel" data-panel="tools" hidden>
+        <div class="set-note">
+          Every tool and skill on this machine. A switch here <b>moves the
+          file</b>: switched off, a tool goes to <b>disabled/tools/</b> and a
+          skill to <b>disabled/skills/</b>, where nothing scans for them - so it
+          is not imported, not described in the prompt, not in the tool list
+          sent to the provider, and not callable. Switched back on, it moves
+          home. (Your own <b>unused/</b> folder is left alone - this uses
+          <b>disabled/</b>.) Takes effect on the next message; restart below to
+          make it so this second.
+        </div>
+        <div class="row">
+          <button type="button" id="inv-restart" class="ghost">restart server now</button>
+          <button type="button" id="inv-reload" class="ghost">rescan the folders</button>
+        </div>
+        <div id="inv-status"></div>
+        <div class="inv-label">enabled</div>
+        <div class="inv-group" id="inv-on"></div>
+        <div class="inv-label">disabled</div>
+        <div class="inv-group" id="inv-off"></div>
+
+        <details id="market-box">
+          <summary>marketplace - tools and skills from GitHub</summary>
+          <div class="set-note">
+            Read live from the repositories below. What you install is
+            <b>switched on</b> and in the agent from its next message - so it is
+            worth a read first: a tool is code that runs on this machine with
+            everything the agent can reach, and a skill is instructions the
+            model will follow. The switch above takes one back out without
+            deleting it.
+          </div>
+          <div class="row">
+            <input id="market-search" autocomplete="off" spellcheck="false"
+                   placeholder="search the tools and skills below">
+            <button type="button" id="market-refresh" class="ghost">ask GitHub again</button>
+          </div>
+          <div class="note">
+            Searches what the repositories below actually offer - name,
+            description and which repo it came from - and nothing else on
+            GitHub. To search somewhere new, add it as a repository first.
+          </div>
+          <details>
+            <summary>which repositories</summary>
+            <div class="field">
+              <div class="list-edit" id="s-market-repos"></div>
+              <button type="button" class="ghost list-add" data-add="s-market-repos">+ add a repository</button>
+              <div class="note">
+                <b>owner/repo</b>, or <b>owner/repo/folder</b> when the skills
+                sit in a subfolder. A skill is any folder holding a
+                <b>SKILL.md</b>; a tool is a <b>.py</b> at the top of the repo
+                (or of that folder) with NAME, DESCRIPTION, INSTRUCTIONS and
+                run() in it. Saving re-reads them.
+              </div>
+            </div>
+            <div class="row">
+              <button type="button" id="market-save" class="ghost">save repositories</button>
+            </div>
+          </details>
+          <div id="market-status"></div>
+          <div class="inv-group" id="market-list"></div>
+        </details>
+      </div>
+
+      <!-- compaction -->
+      <div class="tab-panel" data-panel="compaction" hidden>
+        <div class="set-note">
+          <b>/compact</b> hands a chat's whole conversation to that chat's own
+          model and swaps in whatever comes back as the new history. This is the
+          instruction sent after it - the last thing the model reads before it
+          writes the summary. The transcript it replaces is copied to
+          <b>chats/chat_archive/</b> first, every time, so a compaction that
+          drops something can still be read back.
+        </div>
+        <div class="field">
+          <label>the instruction sent after the conversation</label>
+          <textarea id="s-compaction-prompt" spellcheck="false"></textarea>
+          <div class="note">
+            No placeholders - the conversation is the messages before this one,
+            not text pasted into it, so what you write here reaches the model
+            word for word. Empty the box to go back to the default shown in
+            grey. Applies to the next <b>/compact</b>; nothing needs restarting.
+          </div>
+        </div>
+      </div>
+
       <!-- cron -->
       <div class="tab-panel" data-panel="cron" hidden>
         <!-- The jobs come first, for the same reason the providers tab leads
@@ -2078,6 +2292,41 @@
           <textarea id="s-safety-prompt" spellcheck="false"></textarea>
           <div class="note">Must contain <b>{call}</b> - it's swapped for the tool call with a plain text replace (not a template), so any other { or } in here is safe to leave as-is.</div>
         </div>
+        <div class="set-note">
+          Two lists bracket that check. A tool on the first runs without being
+          asked about; a call naming anything on the second is stopped without
+          being asked about; everything else goes to the model. Both only apply
+          while the check above is <b>on</b> - switched off, nothing is vetted
+          at all. Edits apply to the next tool call; nothing needs restarting.
+        </div>
+        <div class="field">
+          <label>always allow these tools - never asked about</label>
+          <div class="list-edit" id="s-whitelist"></div>
+          <button type="button" class="ghost list-add" data-add="s-whitelist">+ add a tool</button>
+          <div class="note">
+            One <b>tool name</b> per row - <b>screenshot_tool</b>, not a phrase
+            or a path. Matched whole and case-insensitively against the tool
+            being called, so a call that merely mentions the name in an
+            argument is still checked. This list is looked at first, so a tool
+            here also skips the blocked phrases below.
+          </div>
+        </div>
+        <div class="field">
+          <label>never allow a call containing these - blocked outright</label>
+          <div class="list-edit" id="s-blacklist"></div>
+          <button type="button" class="ghost list-add" data-add="s-blacklist">+ add a phrase</button>
+          <div class="note">
+            One <b>phrase</b> per row, matched anywhere in the call - the tool
+            name and its arguments both - so <b>main.py</b> stops any call that
+            so much as names that file. This is how the agent is kept out of
+            its own code: add the files it must not edit by itself
+            (<b>main.py</b>, <b>tool_processor.py</b>, <b>tool_validation.py</b>,
+            <b>provider.py</b>, <b>settings.py</b>, <b>command_processor.py</b>).
+            A blocked call stops and asks you, exactly like one the model
+            flagged - it's not a refusal, it's an approval you have to give in
+            person. Case doesn't matter, and blank rows are ignored.
+          </div>
+        </div>
       </div>
 
       <!-- system -->
@@ -2154,10 +2403,9 @@ let streaming = null;
 
 // Whether the current chat has a turn in flight right now - true from the
 // "user"/"report" broadcast that starts one until "done" closes it out.
-// "stopped" does NOT close it: the worker still holds the chat's lock until
-// it actually unwinds, a moment later, and only then is it safe to say
-// nothing is running. Messages typed while this is true don't go to the
-// server yet (see pendingMessages below).
+// A /stop closes it out too, and just as immediately: the server ends the turn
+// before it answers, and sends "done" right behind the "stopped". Messages typed
+// while this is true don't go to the server yet (see pendingMessages below).
 let turnBusy = false;
 // Up to two messages typed while turnBusy, oldest first: {text, sent}. When
 // the turn ends they go out together as one POST, and the entries collapse
@@ -2722,19 +2970,44 @@ let runningSubs = [];
 // The stop button is just the /stop command, so the button and typing /stop
 // are the same code path on the server - nothing to keep in step.
 const stopBtn = document.getElementById("stop-btn");
-stopBtn.addEventListener("click", async () => {
-  stopBtn.disabled = true;
-  stopBtn.textContent = "stopping...";
-  try {
-    const r = await (await fetch("/input" + chatQuery("?"), { method: "POST", body: "/stop" })).json();
-    line("system", "system: " + r.text);
-  } catch (e) {
-    line("system", "system: could not reach the server to stop it");
+
+// Bumped every time a stop goes out. A /status request made before the stop can
+// easily land after it, carrying a snapshot in which the turn was still running
+// - and that would put the "main agent working" bar straight back up a moment
+// after it was taken down. Any reply older than the last stop is dropped.
+let stopEpoch = 0;
+
+// What the page does the instant a stop is asked for, without waiting to hear
+// back. It can afford to: /stop ends the turn on the server BEFORE it answers
+// (it cancels the turn, writes the stopped transcript and hands the chat on, all
+// on the request's own thread), and the matching "stopped" and "done" events are
+// already on their way down /stream. So this is not optimism about what might
+// happen - it is drawing something that has, by then, already happened.
+//
+// The button used to sit at "stopping..." for a fixed 1500ms afterwards. That
+// was a guess at how long a cooperative stop might take to be noticed; nothing
+// about stopping is cooperative any more, so there is nothing to wait out.
+// `q` names the chat to stop, defaulting to the one this window is showing. A
+// denied approval stops the chat that ASKED, which need not be this one - and
+// then there is no bar of ours to take down, so the drawing below is skipped.
+function stopChatTurn(q) {
+  const mine = q === undefined;
+  if (mine) {
+    q = chatQuery("?");
+    stopEpoch++;
+    // Seal whatever was streaming and take the bar down now.
+    streaming = null;
+    pendingSafety = null;
+    status.hidden = true;
+    statusText.textContent = "";
   }
-  // The turn ends at its next safe point, not instantly - pollStatus puts the
-  // button back to normal once the bar goes away.
-  setTimeout(() => { stopBtn.disabled = false; stopBtn.textContent = "stop"; }, 1500);
-});
+  return fetch("/input" + q, { method: "POST", body: "/stop" })
+    .then(r => r.json())
+    .then(r => line("system", "system: " + r.text))
+    .catch(() => line("system", "system: could not reach the server to stop it"));
+}
+
+stopBtn.addEventListener("click", () => { stopChatTurn(); });
 
 // ---- approvals -------------------------------------------------------------
 
@@ -2780,10 +3053,10 @@ async function answerApproval(chatStem, yes) {
   clearApproval();
   const r = await (await fetch("/input" + q, { method: "POST", body: "/approve " + (yes ? "y" : "n") })).json();
   line("system", "system: " + r.text);
-  // A denial means "no, and don't keep going either" - cut the turn short
-  // right there instead of leaving it free to add its own acknowledgement
-  // first, so anything queued behind it (see flushQueue) goes out at once.
-  if (!yes) await fetch("/input" + q, { method: "POST", body: "/stop" });
+  // A denial means "no, and don't keep going either" - end the turn right there
+  // instead of leaving it free to add its own acknowledgement first, so anything
+  // queued behind it (see flushQueue) goes out at once.
+  if (!yes) await stopChatTurn(q);
 }
 
 async function pollStatus() {
@@ -2792,7 +3065,11 @@ async function pollStatus() {
     // this window already knows, and says so in the query - so nothing here
     // reassigns currentChat any more. That is what used to make one device
     // follow another's chat switch within two seconds.
+    const epoch = stopEpoch;
     const s = await (await fetch("/status" + chatQuery("?"))).json();
+    // Answered before the stop, arriving after it: everything below would
+    // redraw the turn as still running. See stopEpoch.
+    if (epoch !== stopEpoch) return;
     runningSubs = s.subagents;
     // This chat's token count, as recorded in its own settings .json - so the
     // bar is right the moment a chat is opened (this request goes out with the
@@ -3383,10 +3660,17 @@ function renderToolItem(t) {
   const nameEl = document.createElement("span");
   nameEl.className = "tool-item-name-text";
   nameEl.textContent = t.name;
-  const badge = document.createElement("span");
-  badge.className = "tool-item-badge " + t.type;
-  badge.textContent = t.type;
-  nameRow.append(dot, nameEl, badge);
+  nameRow.append(dot, nameEl);
+  // Tools are badged, skills are not. In a list that is mostly skills the tag
+  // was on nearly every row, which made it decoration rather than information -
+  // and the settings page's tools/skills tab is where the two are actually
+  // sorted out. Untagged here now means skill.
+  if (t.type !== "skill") {
+    const badge = document.createElement("span");
+    badge.className = "tool-item-badge " + t.type;
+    badge.textContent = t.type;
+    nameRow.appendChild(badge);
+  }
   const desc = document.createElement("div");
   desc.className = "tool-item-desc";
   desc.textContent = t.description;
@@ -4015,14 +4299,15 @@ events.onmessage = (e) => {
     pendingSafety = null;
     line("error", "error: " + ev.text);
   } else if (ev.type === "stopped") {
-    // /stop just landed, but the turn hasn't actually exited yet - it's only
-    // been asked to stop, and still holds the chat's lock until its worker
-    // notices and unwinds. Only seal the bubble it was streaming into here;
-    // leave turnBusy and the queue alone until the worker's own "done" a
-    // moment later. Flushing here instead used to send a queued message
-    // early, starting a second turn that raced the first one's "done"
-    // redraw - if that redraw landed before the new turn's history write won
-    // the race for the lock, the queued bubble vanished until ITS OWN "done".
+    // The turn is over: by the time the server sends this it has already been
+    // cancelled, its transcript written and the chat handed on, so there is no
+    // worker left to wait for. Seal the bubble here; the "done" that follows
+    // this immediately does the rest (bar down, queue out) through exactly the
+    // same path a turn ending normally takes.
+    //
+    // It used to be otherwise - /stop only ASKED, and the chat stayed held
+    // until its worker noticed - which is why turnBusy and the queue had to be
+    // left alone here and waited on the real "done" minutes later.
     streaming = null;
     pendingSafety = null;
   } else if (ev.type === "done") {
@@ -4083,10 +4368,10 @@ async function submitChatText(text) {
     // that queue - so flush it here, or a message typed during a compaction
     // sits greyed out until some later turn happens to end.
     if (text.startsWith("/compact")) flushQueue();
-    // A denial means "no, and don't keep going either" - cut the turn short
-    // right there instead of leaving it free to add its own acknowledgement
-    // first, so anything queued behind it (see flushQueue) goes out at once.
-    if (/^\/approve\s+n/i.test(text)) await fetch("/input" + chatQuery("?"), { method: "POST", body: "/stop" });
+    // A denial means "no, and don't keep going either" - end the turn right
+    // there instead of leaving it free to add its own acknowledgement first, so
+    // anything queued behind it (see flushQueue) goes out at once.
+    if (/^\/approve\s+n/i.test(text)) await stopChatTurn();
   }
 }
 
@@ -4384,6 +4669,11 @@ const setSaved = document.getElementById("set-saved");
 // The settings as the server last told us. Saving sends the whole lot back, so
 // a field the page never touched is never blanked.
 let known = {};
+// What each setting ships as, straight from the server's DEFAULTS. Used to show
+// a default without making it the saved value - the compaction prompt's empty
+// box draws its default as the placeholder, so clearing the box is a visible
+// "back to this" rather than a blank you have to take on trust.
+let defaults = {};
 let models = {};
 // Every provider that can be picked, in the server's order. The select pairs
 // below build their own options from it; the cron tab's rows need the same
@@ -4406,6 +4696,7 @@ const F = {
   temperature: document.getElementById("s-temperature"),
   safety_validation: document.getElementById("s-safety"),
   safety_prompt: document.getElementById("s-safety-prompt"),
+  compaction_prompt: document.getElementById("s-compaction-prompt"),
 };
 const tempValue = document.getElementById("s-temperature-value");
 const accentPick = document.getElementById("s-accent");
@@ -4418,6 +4709,109 @@ let accentValue = "";
 function flash(text) {
   setSaved.textContent = text;
   setTimeout(() => { if (setSaved.textContent === text) setSaved.textContent = ""; }, 2500);
+}
+
+// ---- the safety tab's two lists ---------------------------------------------
+// Both are the same widget - an array of short strings, one editable row each -
+// so they share the code below rather than each growing its own copy. What a
+// row MEANS is the only difference between them (a tool name that skips the
+// check, a phrase that blocks the call), and the notes under each box say which.
+// They save with everything else on the tab, on the one "save settings" button:
+// a list is a setting here, not a document with a save of its own.
+const listBoxes = {
+  safety_whitelist: document.getElementById("s-whitelist"),
+  safety_blacklist: document.getElementById("s-blacklist"),
+  market_repos: document.getElementById("s-market-repos"),
+};
+// What an empty box says, and what a blank row shows as a hint. An empty list
+// is a real state for both of these - and a meaningful one - so it gets a line
+// saying what it means instead of an empty gap that reads as "not loaded yet".
+const LIST_HINTS = {
+  "s-market-repos": {
+    placeholder: "anthropics/skills",
+    empty: "no repositories - the marketplace has nowhere to look.",
+  },
+  "s-whitelist": {
+    placeholder: "screenshot_tool",
+    empty: "no tools trusted outright - every call goes to the model.",
+  },
+  "s-blacklist": {
+    placeholder: "main.py",
+    empty: "nothing blocked outright - the model's verdict is the only thing stopping a call.",
+  },
+};
+
+function listEmptyNote(box) {
+  // Only when there is genuinely nothing, so it can't sit under a row.
+  const note = box.querySelector(".list-empty");
+  if (box.querySelector(".list-row")) {
+    if (note) note.remove();
+    return;
+  }
+  if (note) return;
+  const div = document.createElement("div");
+  div.className = "list-empty";
+  div.textContent = (LIST_HINTS[box.id] || {}).empty || "nothing here yet.";
+  box.appendChild(div);
+}
+
+function listRow(box, value) {
+  const row = document.createElement("div");
+  row.className = "list-row";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.value = value || "";
+  input.placeholder = (LIST_HINTS[box.id] || {}).placeholder || "";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  // Enter is what a list of one-line entries invites you to press, and the
+  // form has no submit for it to trigger - so it means "and the next one".
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    addListRow(box);
+  });
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "list-del";
+  del.title = "remove";
+  del.textContent = "×";
+  del.addEventListener("click", () => { row.remove(); listEmptyNote(box); });
+  row.append(input, del);
+  return row;
+}
+
+function drawList(box, values) {
+  box.innerHTML = "";
+  for (const v of values || []) box.appendChild(listRow(box, v));
+  listEmptyNote(box);
+}
+
+function addListRow(box) {
+  const row = listRow(box, "");
+  box.appendChild(row);
+  listEmptyNote(box);
+  row.querySelector("input").focus();
+}
+
+// What the box holds, as the setting: trimmed, blanks dropped, and each entry
+// only once. A blank row is how a half-typed thought or a row you meant to
+// delete looks, and on the blacklist a blank entry would match every call
+// there is - the server and tool_validation.py both guard that too, but a list
+// should not be able to leave this page in a state that needs guarding.
+function readList(box) {
+  const seen = [];
+  for (const input of box.querySelectorAll("input")) {
+    const v = input.value.trim();
+    if (v && !seen.includes(v)) seen.push(v);
+  }
+  return seen;
+}
+
+for (const button of document.querySelectorAll(".list-add")) {
+  button.addEventListener("click", () => {
+    addListRow(document.getElementById(button.dataset.add));
+  });
 }
 
 // Every provider/model select pair on the models+safety tabs. Kept paired so
@@ -4490,6 +4884,7 @@ function populateModels(providerSel, modelSel, wanted) {
 async function loadSettings() {
   const s = await (await fetch("/settings")).json();
   known = s.values;
+  defaults = s.defaults || {};
   models = s.models;
   providerNames = s.providers || [];
 
@@ -4534,6 +4929,13 @@ async function loadSettings() {
   tempValue.textContent = Number(known.temperature).toFixed(1);
   F.safety_validation.checked = known.safety_validation;
   F.safety_prompt.value = known.safety_prompt;
+  drawList(listBoxes.safety_whitelist, known.safety_whitelist);
+  drawList(listBoxes.safety_blacklist, known.safety_blacklist);
+  drawList(listBoxes.market_repos, known.market_repos);
+  // Blank is a real saved value here - it means "use the default" - so the box
+  // stays empty and the default shows through as its placeholder.
+  F.compaction_prompt.value = known.compaction_prompt || "";
+  F.compaction_prompt.placeholder = defaults.compaction_prompt || "";
   setVoiceKey(known.voice_key);
   applyTheme(known.theme);
   accentValue = known.accent || "";
@@ -4720,6 +5122,13 @@ document.getElementById("set-save").addEventListener("click", async () => {
     temperature: Number(F.temperature.value),
     safety_validation: F.safety_validation.checked,
     safety_prompt: F.safety_prompt.value.trim() || known.safety_prompt,
+    safety_whitelist: readList(listBoxes.safety_whitelist),
+    safety_blacklist: readList(listBoxes.safety_blacklist),
+    market_repos: readList(listBoxes.market_repos),
+    // Not defaulted back to the known value like safety_prompt above: an empty
+    // box is how the compaction tab says "use the shipped prompt", and
+    // compaction.py reads a blank setting as exactly that.
+    compaction_prompt: F.compaction_prompt.value.trim(),
     voice_key: voiceKey,
     voice_provider: F.voice_provider.value,
     voice_model: F.voice_model.value.trim(),
@@ -4727,6 +5136,12 @@ document.getElementById("set-save").addEventListener("click", async () => {
   const r = await fetch("/settings", { method: "POST", body: JSON.stringify(body) });
   if (!r.ok) { flash("could not save"); return; }
   known = await r.json();
+  // Redrawn from the answer, not left as typed: a blank row dropped and a
+  // duplicate collapsed are changes to what was saved, and a list that still
+  // showed them would be quietly lying about what is now in force.
+  drawList(listBoxes.safety_whitelist, known.safety_whitelist);
+  drawList(listBoxes.safety_blacklist, known.safety_blacklist);
+  drawList(listBoxes.market_repos, known.market_repos);
   applyTheme(known.theme);
   accentValue = known.accent || "";
   applyAccent(accentValue);
@@ -6152,6 +6567,279 @@ document.getElementById("r-server").addEventListener("click", () => restart("ser
 document.getElementById("r-cron").addEventListener("click", () => restart("cron"));
 document.getElementById("r-both").addEventListener("click", () => restart("both"));
 
+// ---- the tools tab ----------------------------------------------------------
+// What the agent is carrying, and where to get more. A switch here is not a
+// setting: it MOVES the file (see tool_processor.set_enabled), so the reply to
+// every toggle carries the whole inventory as it now stands on disk and the
+// list is redrawn from that - never from what the click assumed had happened.
+// A refusal therefore puts the switch back by itself, because the row is drawn
+// from what the server says is there.
+const invOn = document.getElementById("inv-on");
+const invOff = document.getElementById("inv-off");
+const invStatus = document.getElementById("inv-status");
+const marketBox = document.getElementById("market-box");
+const marketList = document.getElementById("market-list");
+const marketSearch = document.getElementById("market-search");
+const marketStatus = document.getElementById("market-status");
+// The catalogue as fetched, kept so the filter box can narrow what is drawn
+// without asking GitHub again - typing is not a reason to make a request.
+let marketEntries = [];
+// The marketplace is a round trip to GitHub, so it is fetched when the section
+// is actually opened - not on a page load, not when the tab is opened, and
+// never on a timer. After that it stays as fetched until "ask GitHub again".
+let marketLoaded = false;
+
+function invSay(text, bad) {
+  invStatus.textContent = text || "";
+  invStatus.classList.toggle("err", !!bad);
+}
+
+function marketSay(text, bad) {
+  marketStatus.textContent = text || "";
+  marketStatus.classList.toggle("err", !!bad);
+}
+
+function invBadge(kind) {
+  const badge = document.createElement("span");
+  badge.className = "tool-item-badge " + kind;
+  badge.textContent = kind;
+  return badge;
+}
+
+function invRow(item) {
+  const row = document.createElement("div");
+  row.className = "inv-item" + (item.enabled ? "" : " off") + (item.broken ? " broken" : "");
+
+  const label = document.createElement("label");
+  label.className = "switch";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = item.enabled;
+  box.title = item.enabled ? "switch off" : "switch on";
+  box.addEventListener("change", () => toggleItem(item, box));
+  const track = document.createElement("span");
+  track.className = "track";
+  label.append(box, track);
+
+  const text = document.createElement("div");
+  text.className = "inv-text";
+  const name = document.createElement("div");
+  name.className = "inv-name";
+  name.append(item.name, invBadge(item.kind));
+  text.appendChild(name);
+  if (item.description) {
+    const desc = document.createElement("div");
+    desc.className = "inv-desc";
+    desc.textContent = item.description;
+    text.appendChild(desc);
+  }
+  // A tool that is switched ON but wouldn't import is the one state this list
+  // must not show as simply "on" - it is in the folder, it is not in the agent.
+  if (item.broken) {
+    const why = document.createElement("div");
+    why.className = "inv-why";
+    why.textContent = "not loading - " + item.broken;
+    text.appendChild(why);
+  }
+
+  row.append(label, text);
+  return row;
+}
+
+function drawInventory(items) {
+  invOn.innerHTML = "";
+  invOff.innerHTML = "";
+  for (const item of items || []) {
+    (item.enabled ? invOn : invOff).appendChild(invRow(item));
+  }
+  for (const [box, message] of [
+    [invOn, "nothing is switched on - the agent has no tools or skills at all."],
+    [invOff, "nothing switched off."],
+  ]) {
+    if (box.children.length) continue;
+    const empty = document.createElement("div");
+    empty.className = "inv-empty";
+    empty.textContent = message;
+    box.appendChild(empty);
+  }
+}
+
+async function toggleItem(item, box) {
+  box.disabled = true;
+  invSay(box.checked ? "switching on..." : "switching off...");
+  try {
+    const r = await fetch("/inventory/toggle", {
+      method: "POST",
+      body: JSON.stringify({ kind: item.kind, path: item.path, enabled: box.checked }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    drawInventory(data.items);
+    invSay(data.ok ? data.note + " - live from your next message." : data.note, !data.ok);
+    // The tool list is part of what every chat is told, so the sidebar's copy
+    // is now out of date in this window as well as in the others the server
+    // signalled.
+    markToolsDirty();
+  } catch (e) {
+    box.disabled = false;
+    invSay("could not move it: " + e.message, true);
+  }
+}
+
+async function loadInventory() {
+  try {
+    drawInventory(await (await fetch("/inventory")).json());
+  } catch (e) {
+    invSay("could not read the tools folder: " + e.message, true);
+  }
+}
+
+function marketRow(entry) {
+  const row = document.createElement("div");
+  row.className = "inv-item";
+
+  const text = document.createElement("div");
+  text.className = "inv-text";
+  const name = document.createElement("div");
+  name.className = "inv-name";
+  name.append(entry.name, invBadge(entry.kind));
+  const repo = document.createElement("span");
+  repo.className = "inv-repo";
+  repo.textContent = entry.repo;
+  name.appendChild(repo);
+  text.appendChild(name);
+  if (entry.description) {
+    const desc = document.createElement("div");
+    desc.className = "inv-desc";
+    desc.textContent = entry.description;
+    text.appendChild(desc);
+  }
+  row.appendChild(text);
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost";
+  if (entry.installed) {
+    button.textContent = "installed";
+    button.disabled = true;
+  } else {
+    button.textContent = "install";
+    button.addEventListener("click", () => install(entry, button));
+  }
+  row.appendChild(button);
+  return row;
+}
+
+async function install(entry, button) {
+  button.disabled = true;
+  button.textContent = "downloading...";
+  marketSay("downloading " + entry.name + "...");
+  try {
+    const r = await fetch("/market/install", {
+      method: "POST", body: JSON.stringify({ repo: entry.repo, path: entry.path }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    drawInventory(data.items);
+    marketSay(data.note, !data.ok);
+    if (data.ok) {
+      button.textContent = "installed";
+      markToolsDirty();
+    } else {
+      button.textContent = "install";
+      button.disabled = false;
+    }
+  } catch (e) {
+    marketSay("could not install it: " + e.message, true);
+    button.textContent = "install";
+    button.disabled = false;
+  }
+}
+
+function drawMarket() {
+  const filter = marketSearch.value.trim().toLowerCase();
+  marketList.innerHTML = "";
+  let shown = 0;
+  for (const entry of marketEntries) {
+    // A "note" entry is the listing talking about itself - a repo too big to
+    // return in one go - not something installable, and never filtered away.
+    if (entry.kind === "note") {
+      const line = document.createElement("div");
+      line.className = "inv-empty";
+      line.textContent = entry.repo + ": " + entry.description;
+      marketList.appendChild(line);
+      continue;
+    }
+    const haystack = (entry.name + " " + entry.description + " " + entry.repo).toLowerCase();
+    if (filter && !haystack.includes(filter)) continue;
+    marketList.appendChild(marketRow(entry));
+    shown++;
+  }
+  if (!shown) {
+    const empty = document.createElement("div");
+    empty.className = "inv-empty";
+    empty.textContent = filter
+      ? "nothing in these repositories matches “" + marketSearch.value.trim()
+        + "” - add another repository below to widen the search."
+      : "nothing installable found in those repositories.";
+    marketList.appendChild(empty);
+  }
+}
+
+async function loadMarket(refresh) {
+  marketLoaded = true;
+  marketList.innerHTML = "";
+  marketEntries = [];
+  marketSay(refresh ? "asking GitHub..." : "reading the repositories...");
+  let data;
+  try {
+    data = await (await fetch("/market" + (refresh ? "?refresh=1" : ""))).json();
+  } catch (e) {
+    marketSay("could not reach the server: " + e.message, true);
+    return;
+  }
+  marketEntries = data.entries || [];
+  drawMarket();
+  marketSay((data.notes || []).join(" "), (data.notes || []).length > 0);
+}
+
+async function saveRepos(repos) {
+  try {
+    const r = await fetch("/settings", {
+      method: "POST", body: JSON.stringify({ market_repos: repos }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    known = await r.json();
+    drawList(listBoxes.market_repos, known.market_repos);
+    return true;
+  } catch (e) {
+    marketSay("could not save the repository list: " + e.message, true);
+    return false;
+  }
+}
+
+marketBox.addEventListener("toggle", () => {
+  if (marketBox.open && !marketLoaded) loadMarket(false);
+});
+document.getElementById("market-refresh").addEventListener("click", () => loadMarket(true));
+// Searching is local: it narrows what the configured repositories already
+// offered, which is why it can happen on every keystroke without a request.
+// Enter is swallowed rather than doing anything of its own - there is nothing
+// further to ask for, and letting it through submits the page's form.
+marketSearch.addEventListener("input", drawMarket);
+marketSearch.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") e.preventDefault();
+});
+document.getElementById("market-save").addEventListener("click", async () => {
+  marketSay("saving...");
+  if (await saveRepos(readList(listBoxes.market_repos))) loadMarket(true);
+});
+document.getElementById("inv-restart").addEventListener("click", () => restart("server"));
+document.getElementById("inv-reload").addEventListener("click", () => {
+  invSay("rescanning...");
+  loadInventory().then(() => invSay("rescanned."));
+});
+
 // ---- settings: open, close, tabs -------------------------------------------
 
 for (const tab of document.querySelectorAll(".set-tab")) {
@@ -6165,6 +6853,11 @@ for (const tab of document.querySelectorAll(".set-tab")) {
     // resizes to fit. Start every tab at the top.
     document.getElementById("set-body").scrollTop = 0;
     if (tab.dataset.tab === "context") loadContext();
+    // Cheap and local (it scans two folders), so it is re-read every time the
+    // tab is opened rather than cached - a tool the agent has just written
+    // itself is in the list the moment you look. The marketplace inside it is
+    // the opposite and waits to be asked: that one is somebody else's server.
+    if (tab.dataset.tab === "tools") loadInventory();
     if (tab.dataset.tab === "cron") loadCron();
     if (tab.dataset.tab === "providers") loadProviders();
     if (tab.dataset.tab === "email") loadEmail();

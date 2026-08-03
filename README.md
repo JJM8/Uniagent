@@ -119,7 +119,20 @@ at every logon, waits for the server to answer, and opens the web UI with the
 password on screen. No administrator rights required. Full walkthrough in
 `setup.md`.
 
-**Linux/macOS:**
+**Linux** — one line, pasted into any terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JJM8/Uniagent/main/install.sh | bash
+```
+
+Same deal: it installs git and Python if they're missing, clones into
+`~/Uniagent`, builds a `.venv`, writes `.env`, puts `uniagentcli` on your PATH,
+and installs the server and the cron watcher as **systemd user services** so
+both start at boot and restart if they crash. It finishes by printing the web
+password. No root needed unless git or Python have to be installed. Full
+walkthrough in `setup.md`.
+
+**Linux/macOS, by hand:**
 
 ```bash
 git clone https://github.com/JJM8/Uniagent.git

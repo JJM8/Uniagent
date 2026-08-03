@@ -5,6 +5,7 @@ import functools
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -12,6 +13,8 @@ import uuid
 from pathlib import Path
 
 import requests
+
+import turnctx
 
 # --- Fallback defaults. The real choices live with the callers: the main
 # agent's model in main.py, the safety-check model in tool_validation.py. These
@@ -78,24 +81,124 @@ def _check(r):
         raise RuntimeError("provider returned HTTP " + str(r.status_code) + ": " + r.text[:300])
 
 
+def _pause(seconds):
+    """time.sleep, except a /stop cuts it short instead of being waited out.
+    Retry backoff is a real part of how long a turn can sit doing nothing, so
+    it has to be interruptible like everything else."""
+    ctx = turnctx.current()
+    if ctx is None:
+        time.sleep(seconds)
+        return
+    if ctx.event.wait(seconds):
+        raise turnctx.Stopped(ctx.key)
+
+
+def _response_socket(r):
+    """The raw socket under a streaming requests Response, or None.
+
+    Reached through private attributes because there is no public way down to
+    it, and the layers differ by version - so each route is tried and the first
+    one that yields something wins, rather than one path being assumed and
+    raising on a library upgrade."""
+    raw = getattr(r, "raw", None)
+    if raw is None:
+        return None
+    routes = (
+        lambda: raw._connection.sock,
+        lambda: raw._fp.fp.raw._sock,
+        lambda: raw._original_response.fp.raw._sock,
+    )
+    for route in routes:
+        try:
+            sock = route()
+        except Exception:
+            continue
+        if sock is not None:
+            return sock
+    return None
+
+
+def _break_open(r):
+    """Wake a thread blocked reading `r`, from OUTSIDE that thread.
+
+    Deliberately NOT r.close(). Closing a requests Response closes the buffered
+    file object the reading thread is sitting inside, and that waits on the very
+    lock that thread is holding - so the stopper blocks until the read it is
+    trying to interrupt finishes on its own. That is a deadlock, and it is
+    precisely the failure this whole change exists to remove: /stop would hang
+    for as long as the provider felt like staying silent.
+
+    Shutting the SOCKET down takes no lock at all. The blocked recv returns
+    immediately with nothing, the read raises where it stands, and the turn's
+    context is already marked cancelled so that raise is read as the stop it is
+    (see _sse). Tidying up the Response itself is left to the reading thread,
+    which does it on the way out."""
+    sock = _response_socket(r)
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass  # already gone, which is the outcome wanted anyway
+
+
+def _stream_post(url, **kwargs):
+    """requests.post for a streaming provider call, tied to the turn making it.
+
+    Two things happen here that a bare requests.post can't do. The turn is
+    checked first, so a request whose turn was stopped while it queued is never
+    sent at all; and the response is handed to the turn's context, so a /stop
+    landing while this thread is parked waiting for the model's first token
+    closes the connection out from under it and the read raises immediately.
+    Without that, /stop could not be noticed until the next chunk arrived -
+    which on a slow or thinking model is many seconds away, and is exactly what
+    made stopping feel broken.
+
+    Every streaming wire goes through here rather than calling requests
+    directly, so a provider added later is cancellable without its author
+    having to think about /stop at all."""
+    turnctx.check()
+    r = requests.post(url, **kwargs)
+    ctx = turnctx.current()
+    if ctx is not None:
+        ctx.register(r, closer=lambda: _break_open(r))
+    return r
+
+
 def _sse(r):
     """The JSON payload of each `data:` line of a Server-Sent Events response.
 
     OpenAI, DeepSeek, Anthropic and Gemini all stream as SSE, so they share this.
     Blank lines are separators, `event:` lines only name what follows (the same
     name is in the payload), and OpenAI-style APIs end with a literal [DONE].
+
+    The read is wrapped in the turn's cancellation watch, so /stop breaks the
+    connection rather than waiting politely for the next frame. A cancelled
+    turn's socket error is not an error - the context says the turn was
+    stopped, so it is re-raised as Stopped and nothing reports a network
+    failure the user never had.
     """
     _check(r)
-    for line in r.iter_lines(decode_unicode=True):
-        if not line or not line.startswith("data:"):
-            continue
-        body = line[5:].strip()
-        if body == "[DONE]":
-            return
+    with turnctx.watch(r, closer=lambda: _break_open(r)):
         try:
-            yield json.loads(body)
-        except json.JSONDecodeError:
-            continue  # a keep-alive or a partial frame - nothing to read
+            for line in r.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                body = line[5:].strip()
+                if body == "[DONE]":
+                    return
+                try:
+                    yield json.loads(body)
+                except json.JSONDecodeError:
+                    continue  # a keep-alive or a partial frame - nothing to read
+        except turnctx.Stopped:
+            raise
+        except Exception:
+            # The socket dying BECAUSE this turn was stopped is not a provider
+            # failure - it is the stop working. Anything else is a real error
+            # and goes up as itself.
+            turnctx.check()
+            raise
 
 
 # --- One function per provider. Each takes (model, prompt) and yields the
@@ -487,7 +590,7 @@ def _anthropic(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, t
         body["system"] = system
     if tools:
         body["tools"] = tools
-    r = requests.post(
+    r = _stream_post(
         base_url.rstrip("/") + "/v1/messages",
         headers={
             "x-api-key": _key("ANTHROPIC_API_KEY") if key is None else key,
@@ -565,7 +668,7 @@ def _openai_style(url, headers, body, usage=None, tools=None, tool_call=None, re
         body["stream_options"] = {"include_usage": True}
     flaky = 0
     while True:
-        r = requests.post(url, headers=headers, json=body, stream=True)
+        r = _stream_post(url, headers=headers, json=body, stream=True)
         if r.status_code == 200:
             break
         try:
@@ -602,7 +705,7 @@ def _openai_style(url, headers, body, usage=None, tools=None, tool_call=None, re
         # three times and still raises, just a few seconds later.
         if r.status_code == 401 and flaky < 2:
             flaky += 1
-            time.sleep(1.5 * flaky)
+            _pause(1.5 * flaky)
             continue
         _check(r)  # not fixable - raise with the provider's own message
     for event in _sse(r):
@@ -787,7 +890,7 @@ def _gemini(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool
         body["systemInstruction"] = {"parts": [{"text": system}]}
     if tools:
         body["tools"] = tools
-    r = requests.post(
+    r = _stream_post(
         base_url.rstrip("/") + f"/models/{model}:streamGenerateContent?alt=sse",
         headers={"x-goog-api-key": _key("GEMINI_API_KEY") if key is None else key},
         json=body,
@@ -2655,15 +2758,25 @@ def _logged(provider, model, prompt, temperature, call, usage=None, tools=None, 
     it's readable by the caller once the generator is done (or even partway
     through, for whichever field has arrived so far). `tool_call` works the
     same way, for a native provider tool-call instead of token counts, as does
-    `reasoning` for a thinking model's reasoning_content."""
+    `reasoning` for a thinking model's reasoning_content.
+
+    Every provider's stream passes through here, which makes it the one place
+    that can guarantee a stopped turn produces nothing further no matter WHICH
+    provider answered: the check before each piece gives cooperative
+    cancellation to the wires that don't go through _sse (Bedrock's boto3
+    stream, claude-subscription's SDK), and it holds for any provider added
+    later. _stream_post is what makes it immediate on top of that; this is the
+    floor underneath it."""
     pieces = []
     error = None
     try:
         for piece in call(model, prompt, temperature, usage=usage, tools=tools,
                           tool_call=tool_call, reasoning=reasoning,
                           on_call_delta=on_call_delta):
+            turnctx.check()
             pieces.append(piece)
             yield piece
+        turnctx.check()
     except Exception as e:
         error = e
         raise
