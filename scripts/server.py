@@ -58,6 +58,7 @@ import provider_refs
 import settings
 import tokens
 import tool_processor
+import update
 import workspace
 import turnctx
 import voice_input
@@ -1233,6 +1234,44 @@ def _env():
             "password": auth.ENV_NAME}
 
 
+UPDATE_LOG = ROOT / "update.log"
+
+
+def _update_local():
+    """Which commit this install is on, WITHOUT going to the network. The
+    settings page draws this on open, and an update check is a click - see
+    _post_update_check. Nothing here is worth making the page wait on a remote
+    that might be slow or unreachable."""
+    info = {"ref": update.target_ref(), "current": update._commit("HEAD"), "log": ""}
+    try:
+        # The tail only: a long update writes plenty and the page redraws this
+        # every second while one is running.
+        info["log"] = UPDATE_LOG.read_text(errors="replace")[-20000:]
+    except OSError:
+        pass
+    return info
+
+
+def _spawn_update():
+    """Run scripts/update.py as its own detached process, logging to
+    update.log, and come straight back.
+
+    Detached because the update ENDS by restarting this server: a child of ours
+    would be killed with us, and a child that is merely backgrounded would
+    still be in the unit's cgroup. start_new_session (setsid) is not enough to
+    leave the cgroup either, which is why update.restart_services() asks systemd
+    with --no-block and writes nothing afterwards - by then the job is queued
+    and it no longer matters whether the process lives to see it."""
+    py = update._python()
+    log = open(UPDATE_LOG, "w")
+    kwargs = {"stdout": log, "stderr": subprocess.STDOUT, "cwd": str(ROOT)}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED | NEW_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    subprocess.Popen([py, str(ROOT / "scripts" / "update.py")], **kwargs)
+
+
 def _restart_cron():
     """Restart the cron watcher, which is a separate process and so cannot
     restart itself from here. Only possible if it is running as the user
@@ -1538,6 +1577,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 data["hash"] = digest
                 self._send(json.dumps(data), "application/json")
+        elif self.path == "/update":
+            self._send(json.dumps(_update_local()), "application/json")
         elif self.path == "/cron":
             # An empty box would be a dead end on a fresh install: whatever is
             # typed into it has to be valid JSON to save, so hand over the
@@ -1607,6 +1648,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/context/pin":
             self._post_pin()
+            return
+        if self.path == "/update/check":
+            self._post_update_check()
+            return
+        if self.path == "/update":
+            self._post_update()
             return
         if self.path == "/restart":
             self._post_restart()
@@ -2391,6 +2438,42 @@ class Handler(BaseHTTPRequestHandler):
             self._send(str(e), code=502)
             return
         self._send(json.dumps({"text": text}), "application/json")
+
+    def _post_update_check(self):
+        """Ask the remote what is new. This is the one route here that waits on
+        the network, and it only ever runs because someone pressed the button."""
+        py = update._python()
+        try:
+            r = subprocess.run([py, str(ROOT / "scripts" / "update.py"),
+                                "--check", "--json"],
+                               capture_output=True, text=True, timeout=90, cwd=str(ROOT))
+        except (OSError, subprocess.SubprocessError) as e:
+            self._send(json.dumps({"ok": False, "error": "could not run the check: "
+                                   + type(e).__name__}), "application/json")
+            return
+        # --json puts the survey on the last line; anything before it is noise
+        # worth keeping out of the JSON parse but worth showing if it failed.
+        line = (r.stdout.strip().splitlines() or [""])[-1]
+        try:
+            self._send(json.dumps(json.loads(line)), "application/json")
+        except ValueError:
+            self._send(json.dumps({"ok": False, "error":
+                                   (r.stderr.strip() or line or "the check said nothing")[:400]}),
+                       "application/json")
+
+    def _post_update(self):
+        """Start the update and answer at once. Nothing is streamed back from
+        here: the update outlives this process by design (it restarts us), so
+        the page follows update.log through GET /update instead and waits for
+        the server to come back the same way a restart does."""
+        try:
+            _spawn_update()
+        except OSError as e:
+            self._send(json.dumps({"ok": False, "error": "could not start the update: "
+                                   + type(e).__name__}), "application/json")
+            return
+        self._send(json.dumps({"ok": True, "text": "updating - watch the log below."}),
+                   "application/json")
 
     def _post_restart(self):
         """Restart the server, the cron watcher, or both. Answer FIRST - once

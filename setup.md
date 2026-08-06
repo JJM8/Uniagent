@@ -33,7 +33,9 @@ If a step can't finish, the installer stops there and tells you what to install
 by hand. Re-running it afterwards is safe: an existing checkout is pulled rather
 than re-cloned, and an existing `.env` is left alone.
 
-Afterwards: `update.ps1` pulls new code and restarts the server;
+Afterwards: `update.ps1` pulls new code and restarts the server, keeping your
+`.env`, chats, prompts, settings and anything you added yourself (the settings
+page's system tab has the same thing as a button);
 `install-autostart.ps1 -Remove` stops it starting at logon. `schtasks /End /TN
 Uniagent` stops it right now. To remove it completely, run
 `install-autostart.ps1 -Remove` and delete `%USERPROFILE%\Uniagent` (plus

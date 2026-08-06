@@ -1359,6 +1359,36 @@
   .danger { background: none; border: 1px solid var(--red); color: var(--red); flex: 0 0 auto; }
   .set-note { color: var(--dim); font-size: 12px; line-height: 1.5; }
   .set-note b { color: var(--text); font-weight: 600; }
+  /* What an update would bring, and then what it is doing. Both are capped and
+     scrolled rather than allowed to grow: a checkout that is fifty commits
+     behind would otherwise push the buttons off the bottom of the panel while
+     you are still reading the list. */
+  .up-log, .up-list {
+    margin: 0;
+    max-height: 200px;
+    overflow: auto;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--dim);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .up-log {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .up-list div { display: flex; gap: 8px; }
+  .up-list .sha {
+    flex: 0 0 auto;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--accent);
+  }
+  /* The two refusals - a local edit or a local commit - are the only things
+     here the user has to act on, so they are the only thing not in --dim. */
+  .up-warn { color: var(--red); font-size: 11px; line-height: 1.5; }
   /* The safety tab's two lists. Not a textarea of one-per-line, and not the
      cron tab's cards either: an entry here is a single short string with
      nothing else to say about it, so a row is just the box holding it and the
@@ -2570,6 +2600,30 @@
           file changes nothing until that process is restarted</b>. Settings and
           everything under context/ are re-read as they change, so those never
           need this.
+        </div>
+        <div class="field">
+          <label>update</label>
+          <div class="note" id="up-where">reading this install...</div>
+          <div class="row">
+            <button type="button" id="up-check" class="ghost">check for updates</button>
+            <button type="button" id="up-now" class="ghost" hidden>update now</button>
+          </div>
+          <div class="note" id="up-status" hidden></div>
+          <div class="up-warn" id="up-warn" hidden></div>
+          <div class="up-list" id="up-list" hidden></div>
+          <pre class="up-log" id="up-log" hidden></pre>
+          <div class="note">
+            Fetches the latest code and restarts onto it. <b>Nothing of yours is
+            touched</b>: your .env and API keys, your chats, your system prompt
+            and memories, your settings, model lists, cron jobs, MCP servers and
+            workspaces all stay exactly as they are, because an update only ever
+            fast-forwards and git only writes files it ships. A tool or skill you
+            added yourself is left alone for the same reason - only the ones that
+            came with Uniagent are updated, and they are updated wherever you
+            have them, switched on or off. If you have edited a file that ships
+            with Uniagent and the update changes that same file, it stops and
+            tells you rather than picking a winner.
+          </div>
         </div>
         <div class="field">
           <label>restart</label>
@@ -7417,6 +7471,165 @@ document.getElementById("cron-save").addEventListener("click", async () => {
 
 document.getElementById("cron-reload").addEventListener("click", () => loadCron());
 
+// ---- settings: system tab, the updater --------------------------------------
+// Three routes, and the split between them is the point. GET /update is local
+// and instant - which commit this is, and whatever the last update wrote - so
+// opening this tab costs nothing. POST /update/check is the only one that goes
+// out to the network, and it only ever runs because the button was pressed.
+// POST /update starts the update and returns straight away: the update outlives
+// the server (it restarts it), so there is nothing to stream back and the log
+// is followed as a file instead. See scripts/update.py.
+
+const UP_DONE  = "::uniagent-update-done::";
+const upWhere  = document.getElementById("up-where");
+const upStatus = document.getElementById("up-status");
+const upWarn   = document.getElementById("up-warn");
+const upList   = document.getElementById("up-list");
+const upLog    = document.getElementById("up-log");
+const upCheck  = document.getElementById("up-check");
+const upNow    = document.getElementById("up-now");
+
+function upSetLog(text) {
+  upLog.hidden = !text;
+  // Redraw only on a real change: this is polled every second, and rewriting
+  // the box each time would fight the user for the scroll position.
+  if (!text || upLog.textContent === text) return;
+  const atBottom = upLog.scrollHeight - upLog.scrollTop - upLog.clientHeight < 30;
+  upLog.textContent = text.split(UP_DONE)[0].trimEnd();   // the marker is ours, not theirs
+  if (atBottom) upLog.scrollTop = upLog.scrollHeight;
+}
+
+async function loadUpdate() {
+  try {
+    const u = await (await fetch("/update")).json();
+    const c = u.current;
+    if (!c) {
+      upWhere.textContent = "this folder is not a git checkout, so it cannot update itself.";
+      upCheck.disabled = true;
+      return;
+    }
+    upWhere.textContent = "on " + c.sha + " - " + c.subject
+      + " (" + new Date(c.date).toLocaleDateString() + "), following " + u.ref + ".";
+    upSetLog(u.log);
+  } catch (e) {
+    upWhere.textContent = "could not read this install.";
+  }
+}
+
+function upRender(s) {
+  upStatus.hidden = false;
+  if (!s.ok) { upStatus.textContent = s.error || "the check failed."; return; }
+  if (s.up_to_date) {
+    upStatus.textContent = "up to date - nothing new on " + s.ref + ".";
+    return;
+  }
+  const n = (k, one, many) => k + " " + (k === 1 ? one : many);
+  upStatus.textContent = n(s.behind, "new commit", "new commits") + ", "
+    + n(s.files.length, "file", "files") + " to update"
+    + (s.deps_changed ? ", and the dependencies have changed too." : ".");
+
+  if (s.commits.length) {
+    upList.hidden = false;
+    upList.innerHTML = s.commits.map(c =>
+      '<div><span class="sha">' + escapeHtml(c.sha) + "</span><span>"
+      + escapeHtml(c.subject) + "</span></div>").join("");
+  }
+
+  // The two things an update refuses to decide for you. Either one means the
+  // update button stays away until it is sorted out.
+  const stop = [];
+  if (s.diverged) {
+    stop.push("This checkout has " + s.ahead + " commit(s) of its own that the remote "
+      + "does not, so it cannot fast-forward. Merge or drop them and check again.");
+  }
+  if (s.blocked && s.blocked.length) {
+    stop.push("Edited here AND changed by the update: " + s.blocked.join(", ")
+      + ". Revert or commit them first - an update will not pick which version to keep.");
+  }
+  upWarn.hidden = !stop.length;
+  upWarn.textContent = stop.join(" ");
+  upNow.hidden = stop.length > 0;
+}
+
+upCheck.addEventListener("click", async () => {
+  upCheck.disabled = true;
+  upCheck.textContent = "checking...";
+  upStatus.hidden = upWarn.hidden = upList.hidden = true;
+  upNow.hidden = true;
+  try {
+    upRender(await (await fetch("/update/check", { method: "POST" })).json());
+  } catch (e) {
+    upStatus.hidden = false;
+    upStatus.textContent = "could not reach the server.";
+  }
+  upCheck.disabled = false;
+  upCheck.textContent = "check for updates";
+});
+
+upNow.addEventListener("click", async () => {
+  // An update ends in a restart, so it drops whatever is running - the same
+  // warning the restart buttons give, for the same reason.
+  try {
+    const s = await (await fetch("/status" + chatQuery("?"))).json();
+    if ((s.main || s.subagents.length || s.background.length)
+        && !confirm("Something is still working. Update anyway and lose it?")) return;
+  } catch (e) { /* can't tell - go ahead */ }
+  if (!confirm("Update to the latest code and restart?\n\nYour keys, chats, prompts, "
+      + "memories, settings and anything you added yourself are kept.")) return;
+
+  upNow.disabled = true;
+  upNow.textContent = "updating...";
+  upList.hidden = true;
+  upStatus.hidden = true;
+  try {
+    const r = await (await fetch("/update", { method: "POST" })).json();
+    if (!r.ok) {
+      upStatus.hidden = false;
+      upStatus.textContent = r.error;
+      upNow.disabled = false;
+      upNow.textContent = "update now";
+      return;
+    }
+  } catch (e) { /* it may already be on its way down - follow the log regardless */ }
+  upFollow();
+});
+
+// Follow update.log to the end. Losing the server partway through is not a
+// failure here, it IS the restart - but only once the log has said it got to
+// the end, which is what the marker is for: without it, "the server stopped
+// answering" and "the update died" look identical from in here.
+function upFollow() {
+  let ticks = 0, doneAt = 0, wentDown = false;
+  const tick = setInterval(async () => {
+    ticks++;
+    try {
+      const u = await (await fetch("/update", { cache: "no-store" })).json();
+      const log = u.log || "";
+      upSetLog(log);
+      // It answered again after going away: that is the new code talking.
+      if (wentDown) { clearInterval(tick); location.reload(); return; }
+      if (!doneAt && log.includes(UP_DONE)) {
+        doneAt = ticks;
+        // Finished with no restart coming - nothing more will happen.
+        if (!log.includes(UP_DONE + " restarting")) { clearInterval(tick); upFinished(); return; }
+      }
+      // It said it would restart and is still answering 20s later, so it could
+      // not restart itself. The log says why.
+      if (doneAt && ticks - doneAt > 20) { clearInterval(tick); upFinished(); return; }
+    } catch (e) {
+      if (doneAt) wentDown = true;   // the restart, landing
+    }
+    if (ticks > 600) { clearInterval(tick); upFinished(); }
+  }, 1000);
+}
+
+function upFinished() {
+  upNow.hidden = true;
+  upNow.disabled = false;
+  upNow.textContent = "update now";
+  loadUpdate();
+}
+
 // ---- settings: system tab --------------------------------------------------
 
 async function restart(what) {
@@ -7752,6 +7965,10 @@ for (const tab of document.querySelectorAll(".set-tab")) {
     if (tab.dataset.tab === "providers") loadProviders();
     if (tab.dataset.tab === "email") loadEmail();
     if (tab.dataset.tab === "workspaces") loadWorkspaces();
+    // Local only - which commit this is, and the last update's log. Whether
+    // anything NEW exists is a question for the remote, and that waits for the
+    // button (see upCheck).
+    if (tab.dataset.tab === "system") loadUpdate();
     // The speech models are a round trip to the provider itself, so they are
     // fetched when this tab is actually looked at rather than on every
     // settings load - see loadVoiceModels.

@@ -174,6 +174,42 @@ On first run the server generates a password and prints it. Open https://localho
 
 Your browser will warn about the certificate the first time on each device, because Uniagent signs its own. Click Advanced, then proceed. Port 8763 only redirects to 8764 — the app itself is HTTPS-only, since the password would otherwise cross the network in plain text.
 
+### Updating
+
+Settings → **system** → **check for updates**, then **update now**. It shows
+what the update would bring before it does anything, and the server restarts
+itself onto the new code with the page reconnecting on its own. From a terminal
+it is the same thing:
+
+```bash
+./scripts/update.sh --check     # what would change, without changing it
+./scripts/update.sh             # do it, then restart the services
+```
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\update.ps1
+```
+
+**Nothing of yours is touched.** Your `.env` and API keys, chats, system prompt,
+memories, settings, model lists, cron jobs, MCP servers and workspaces all stay
+as they are — an update only ever fast-forwards, and git only writes the files
+Uniagent ships. Nothing is reset and `git clean` is never run, so a tool or
+skill you wrote yourself is simply invisible to it.
+
+Tools and skills that *did* ship are updated wherever you keep them, switched on
+or off. That last part needs doing on purpose: `tools/`, `skills/` and
+`disabled/` are all tracked, and the switch in the tools tab moves a bundle
+between them, so a plain `git pull` would update the copy at its shipped path
+and leave your moved one stale and duplicated — turning a skill you had
+switched off back on. The updater takes those moves out of the way first and
+puts them back after.
+
+If you have edited a file that ships with Uniagent and the update changes that
+same file, it stops and names the file rather than picking a winner. Same for
+local commits: it fast-forwards or it does nothing. And it never writes to
+`.env` — if a new version documents keys you don't have, it lists them and
+leaves them to you.
+
 ### CLI mode
 
 ```bash

@@ -85,6 +85,11 @@ firefox_bg/
 # whatever page happened to be open at the time.
 experiments/
 
+# The updater's crash note - the tools and skills it has moved out of the way
+# mid-update, so the next run can put them back. Only exists while one is
+# running, and it is about THIS install's switched-off bundles. See update.py.
+update_state.json
+
 # Logs. model_io.log in particular is every prompt and reply, in full.
 *.log
 model_io.log

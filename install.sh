@@ -102,12 +102,19 @@ PY
 
 if [ -d "$ROOT/.git" ]; then
     step "Updating the existing checkout in $ROOT"
-    git -C "$ROOT" fetch --quiet origin "$REF"
-    # Merge rather than reset: a local .env or edited settings is the normal
-    # state of a working install and must survive an update.
+    # Handed to update.py rather than done here with a fast-forward, and that
+    # is not tidiness. tools/, skills/ and disabled/ are all tracked, and
+    # switching a tool or skill off MOVES it between them - so a plain
+    # fast-forward updates the shipped copy at its shipped path and leaves the
+    # moved one behind, stale and duplicated, with the thing you switched off
+    # switched back on. update.py takes the moves out of the way first and puts
+    # them back after. It also refuses rather than clobbering a shipped file
+    # you have edited. See its docstring.
     git -C "$ROOT" checkout --quiet "$REF" 2>/dev/null || true
-    git -C "$ROOT" merge --ff-only "origin/$REF" --quiet \
-        || warn "Local commits or changes here - skipping the fast-forward. Merge by hand if you wanted the new code."
+    # --no-restart: the services are restarted at the end of this script anyway,
+    # once the dependencies and .env are also in place.
+    python3 "$ROOT/scripts/update.py" --ref "origin/$REF" --no-restart \
+        || warn "The update did not go through - see the message above. Carrying on with the existing code."
 elif [ -e "$ROOT" ]; then
     die "$ROOT already exists and is not a git checkout. Move it, or set UNIAGENT_HOME to somewhere else."
 else
@@ -324,7 +331,7 @@ fi
 printf '  API keys:   %s   (or the settings page in the web UI)\n' "$ENV_FILE"
 printf '  Logs:       journalctl --user -u %s -f\n' "$SERVER_UNIT"
 printf '  Restart:    systemctl --user restart %s %s\n' "$SERVER_UNIT" "$CRON_UNIT"
-printf '  Update:     curl -fsSL https://raw.githubusercontent.com/JJM8/Uniagent/main/install.sh | bash\n'
+printf '  Update:     %s/scripts/update.sh   (or the system tab in the web UI)\n' "$ROOT"
 printf '  Uninstall:  %s/install.sh --remove\n' "$ROOT"
 
 if [ "$up" -eq 1 ] && have xdg-open && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
