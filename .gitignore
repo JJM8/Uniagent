@@ -24,9 +24,23 @@ bin/
 chats/
 
 # What the agent has learned about its user. Both halves: the always-loaded
-# facts file (context/2memory.md ships as a template, so only a filled-in one
-# is a problem - see below) and the per-topic files.
-memories/
+# facts file (context/2memory.md, which fills up with their accounts, their
+# hardware, the people in their life) and the per-topic files. Anchored, like
+# /context/ below, so it takes the live folder and not defaults/memories/.
+/memories/
+
+# The live context folder - the user's prompts, edited to taste, and the memory
+# file above. What ships is defaults/context/, which main.seed_context() copies
+# in when a file here is missing and the settings page's "revert to default"
+# puts back wholesale. Keeping the live copy out means a pull can never land on
+# top of an edited system prompt. Anchored with a leading slash: an unanchored
+# "context/" would match at any depth and take defaults/context/ - the one copy
+# that has to stay in the repo - down with it.
+/context/
+
+# Where "revert to default" puts the old context/ folder, dated. Same personal
+# facts, just yesterday's.
+/archive/
 
 # Scheduled jobs - your prompts, your addresses, your routine. cron.example.json
 # is the documented one; this is yours.

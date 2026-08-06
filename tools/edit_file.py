@@ -1,7 +1,7 @@
 """Swaps one exact piece of text in a file, so changing three lines doesn't
 mean resending the whole thing."""
 
-from pathlib import Path
+from _workspace import here as _here
 
 NAME = "edit_file"
 DESCRIPTION = ("Change part of an existing file by swapping one exact piece of text for "
@@ -10,7 +10,7 @@ DESCRIPTION = ("Change part of an existing file by swapping one exact piece of t
 INSTRUCTIONS = """HOW TO CALL: use the tool-call syntax already given to you, with tool name "edit_file".
 
 Arguments:
-- path: the file to change. A relative path is from the project root.
+- path: the file to change. A relative path is from the workspace root.
 - old:  the exact text to find, copied character for character from the file.
         (any argument name containing "old", e.g. old_text, also works)
 - new:  what to put there instead.
@@ -38,7 +38,6 @@ WHEN TO USE WHICH TOOL:
 Returns "(replaced N occurrence(s) in <path>)" once it is really on disk. You
 do not need to read the file back to check it worked."""
 
-ROOT = Path(__file__).parent.parent
 
 # For native provider tool-calling. run()'s own fuzzy old/new matching (any
 # kwarg name merely CONTAINING "old"/"new" also works, see below) only
@@ -49,7 +48,7 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "description":
-            "The file to change. A relative path is from the project root."},
+            "The file to change. A relative path is from the workspace root."},
         "old": {"type": "string", "description":
             "The exact text to find, copied character for character from the file."},
         "new": {"type": "string", "description": "What to put there instead."},
@@ -61,7 +60,7 @@ SCHEMA = {
 }
 
 
-def run(path, all=False, **kwargs):
+def run(path, all=False, workspace=None, **kwargs):
     old = None
     new = None
     for key, value in kwargs.items():
@@ -75,31 +74,41 @@ def run(path, all=False, **kwargs):
                 "`new` (any argument name containing 'old' or 'new' also works, e.g. "
                 "old_text/new_text).")
 
-    target = Path(path) if Path(path).is_absolute() else ROOT / path
-
-    if not target.exists():
-        return ("ERROR: there is no file at " + str(target)
-                + ". To make a new file, use write_file.")
-    if old == new:
-        return "ERROR: `old` and `new` are identical, so this edit would change nothing."
+    # workspace comes from tool_processor, never from the model - see the note
+    # in read_file, and its absence from SCHEMA above.
+    ws = workspace or _here()
+    target = ws.resolve(path)
 
     try:
-        text = target.read_text()
+        if not ws.exists(target):
+            return ("ERROR: there is no file at " + target + " (" + ws.where + ")"
+                    + ". To make a new file, use write_file.")
+        if old == new:
+            return "ERROR: `old` and `new` are identical, so this edit would change nothing."
+        text = ws.read_text(target)
     except OSError as e:
-        return "ERROR: could not read " + str(target) + ": " + str(e)
+        return "ERROR: could not read " + target + ": " + str(e)
+    except Exception as e:
+        return "ERROR: " + str(e)   # workspace unreachable - the message says why
 
     count = text.count(old)
     if count == 0:
-        return ("ERROR: that exact text is not in " + str(target) + ". Read the file "
+        return ("ERROR: that exact text is not in " + target + ". Read the file "
                 "with read_file and copy `old` from what it shows you - it has to match "
                 "character for character, including indentation.")
     # Refusing an ambiguous match is the whole point: replacing the first of
     # several occurrences silently changes a line the model never looked at.
     if count > 1 and not all:
-        return ("ERROR: that text appears " + str(count) + " times in " + str(target)
+        return ("ERROR: that text appears " + str(count) + " times in " + target
                 + ", so it is ambiguous and nothing was changed. Either include more "
                 'surrounding lines in `old` to pin down which one you mean, or pass '
                 '"all": true to replace all ' + str(count) + " of them.")
 
-    target.write_text(text.replace(old, new))
-    return "(replaced " + str(count) + " occurrence(s) in " + str(target) + ")"
+    try:
+        ws.write_text(target, text.replace(old, new))
+    except OSError as e:
+        return "ERROR: could not write " + target + ": " + str(e)
+    except Exception as e:
+        return "ERROR: " + str(e)
+    return ("(replaced " + str(count) + " occurrence(s) in " + target
+            + (" " + ws.where if ws.is_remote else "") + ")")

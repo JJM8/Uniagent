@@ -19,6 +19,7 @@ import tokens
 import tool_processor
 import tool_validation
 import turnctx
+import workspace
 import voice_input
 
 name = "Uniagent"
@@ -32,6 +33,40 @@ CONTEXT = Path(__file__).parent.parent / "context"
 # What counts as a context file. Anything else in context/ (an image, a stray
 # .json) is left alone rather than pasted into the prompt as mojibake.
 CONTEXT_SUFFIXES = (".md", ".txt")
+
+# The shipped context files, kept OUTSIDE context/ so they are never injected
+# alongside the live ones - two copies of the system prompt in every prompt is
+# exactly the bug this folder would cause if it lived one level up. These are
+# what a fresh install starts from (seed_context) and what "revert to default"
+# in the settings page puts back.
+DEFAULTS = Path(__file__).parent.parent / "defaults"
+DEFAULT_CONTEXT = DEFAULTS / "context"
+DEFAULT_MEMORIES = DEFAULTS / "memories"
+
+# Where a preset goes when it is replaced, one dated folder per swap, so a
+# reset is undoable by hand and never silently destroys months of facts.
+ARCHIVE = Path(__file__).parent.parent / "archive"
+
+
+def preset_parts():
+    """The two halves of a "preset" - the agent's whole learned state - as
+    (name, live folder, shipped default) each. Archived, reverted and restored
+    together, never one without the other: resetting the prompt while leaving a
+    memories/ folder full of the last install's projects behind is not a reset
+    of anything.
+
+    They stay SEPARATE FOLDERS on disk, and memories/ is deliberately NOT moved
+    inside context/. Everything in context/ is injected in full on every single
+    turn; memories/ is the half that must not be, which is the entire reason it
+    sits outside (see MEMORIES above). Folding it in would put every memory
+    file, in full, into every prompt - the exact cost the split exists to
+    avoid. One unit to the user, two folders to the model.
+
+    Read from the module globals at call time rather than frozen into a
+    constant, so pointing these at a temp folder is enough to exercise the
+    whole thing without touching a real install."""
+    return (("context", CONTEXT, DEFAULT_CONTEXT),
+            ("memories", MEMORIES, DEFAULT_MEMORIES))
 
 # Individual memory files - one topic per file, kept OUTSIDE context/ on
 # purpose so they are NOT swept up and fully injected by context_text() the
@@ -286,7 +321,7 @@ class Agent:
                      "safety_prompt", "input_tokens",
                      "output_tokens", "tokens_model", "tokens_at",
                      "context_input", "context_max", "context_model",
-                     "context_exact", "pinned")
+                     "context_exact", "pinned", "workspace")
 
     def __init__(self, path, provider=None, model=None, temperature=None):
         self.path = Path(path)  # history.json; settings.json sits beside it
@@ -323,6 +358,12 @@ class Agent:
         self.context_model = cfg.get("context_model")
         self.context_exact = cfg.get("context_exact")
         self.pinned = cfg.get("pinned") or []
+        # Which workspace this chat's tools work in - a workspace id out of
+        # WORKSPACES in .env, or None for the default one. Just the id: the
+        # root and the ssh destination behind it are config that can change
+        # under a chat that was filed here months ago, and a copy of them in
+        # every chat folder would be a hundred stale copies to fix.
+        self.workspace = cfg.get("workspace")
 
     def _settings_path(self):
         return self.path.parent / SETTINGS_FILE
@@ -354,6 +395,10 @@ class Agent:
         self.safety = cfg.get("safety")
         self.safety_prompt = cfg.get("safety_prompt")
         self.pinned = cfg.get("pinned") or []
+        # Re-read for the same reason as the model: the workspace dropdown
+        # writes the chat's .json, and the very next turn has to run in the
+        # new place without the server being restarted.
+        self.workspace = cfg.get("workspace")
 
     def models(self):
         """The (provider, model, temperature) this turn actually runs on: the
@@ -522,6 +567,26 @@ def open_agent(cid):
         return _open.get(cid)
 
 
+def live_workspace(chat_id, fallback=None):
+    """The workspace this chat is in RIGHT NOW, not when its turn started.
+
+    A turn is not an instant: set_workspace can move the chat half way through
+    one, and every tool call after that has to land in the new place. Reading
+    the id once at the top of run() meant the move was written, reported, and
+    then ignored until the next message - so the model would say "moved to the
+    Pi", run the next command on the machine it had just left, and be telling
+    the truth about the part it could see. That is the worst shape a bug can
+    have: everything says it worked.
+
+    Off the open Agent rather than off its .json, because that object IS the
+    chat while a turn is running and set_workspace writes through it. `_open`
+    is keyed by the same flat id tools are handed, so no path juggling here -
+    and a chat that somehow isn't open falls back to what the turn began with.
+    """
+    a = _open.get(chat_id)
+    return a.workspace if a is not None else fallback
+
+
 def agent(path, cls=Chat, **kw):
     """The one Agent object for `path`, opened on first use. `cls` picks which
     kind to build the first time (Chat, CronJob, Subagent); a later call for the
@@ -659,6 +724,288 @@ def _migrate_layout():
         flat.unlink()
 
 
+def seed_context():
+    """Put any shipped file that isn't in context/ or memories/ there. Runs at
+    import, so a fresh clone - where both are gitignored and therefore absent
+    entirely - comes up with a working system prompt and memory file instead of
+    an empty prompt and no rule telling the agent to remember anything.
+
+    Only ever ADDS. A file already there is the user's, edited or not, and is
+    left exactly as it is: this runs on every single start, so anything else
+    would overwrite their prompt every time the server restarted. Putting a
+    default back on purpose is revert_preset()'s job, and that one is a button
+    someone has to press."""
+    for _, live, default in preset_parts():
+        live.mkdir(parents=True, exist_ok=True)
+        if not default.is_dir():
+            continue
+        for src in sorted(default.rglob("*")):
+            if not src.is_file() or src.name.startswith("."):
+                continue
+            dst = live / src.relative_to(default)
+            if dst.exists():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+
+# A preset's own record of itself, kept inside its folder. Dotted, so every
+# reader here skips it for free: it must not count as content when presets are
+# compared (_tree), and must not be copied into a live folder (_install_preset).
+#
+# Renaming writes here rather than renaming the folder. The folder name is the
+# timestamp it was taken, and that is the one thing about a preset that is
+# never allowed to drift - it is the id every other record points at, and a
+# name the user can retype is not something to hang identity on.
+PRESET_META = ".preset.json"
+
+
+def _meta(folder):
+    """A preset's metadata, filled in from the folder itself for anything
+    missing - an archive made before this file existed, or one the user copied
+    in by hand, still lists with a name and a date."""
+    stamp = folder.name
+    out = {"label": stamp, "created": "", "unloaded": ""}
+    try:
+        saved = json.loads((folder / PRESET_META).read_text())
+        if isinstance(saved, dict):
+            out.update({k: v for k, v in saved.items() if k in out and isinstance(v, str)})
+    except (OSError, ValueError):
+        pass
+    if not out["created"]:
+        try:
+            out["created"] = datetime.fromtimestamp(
+                folder.stat().st_mtime).isoformat(" ", "seconds")
+        except OSError:
+            pass
+    # A preset that has never been explicitly unloaded was archived the moment
+    # it stopped being live, so that is when it came out of context.
+    if not out["unloaded"]:
+        out["unloaded"] = out["created"]
+    return out
+
+
+def _write_meta(folder, **fields):
+    meta = _meta(folder)
+    meta.update(fields)
+    try:
+        (folder / PRESET_META).write_text(json.dumps(meta, indent=2))
+    except OSError:
+        pass
+    return meta
+
+
+def _tree(folder):
+    """{relative path: bytes} for every file in `folder`, or {} if it isn't
+    there. Dotfiles skipped, so a .gitkeep holding an otherwise-empty default
+    folder open doesn't count as content and make a pristine install look
+    edited."""
+    out = {}
+    if not folder.is_dir():
+        return out
+    for p in folder.rglob("*"):
+        if not p.is_file() or p.name.startswith("."):
+            continue
+        try:
+            out[p.relative_to(folder).as_posix()] = p.read_bytes()
+        except OSError:
+            continue
+    return out
+
+
+def is_default_preset():
+    """True when the live folders are byte-for-byte the shipped defaults, and
+    so hold nothing anyone could want back. What stops every reset and every
+    preset switch from leaving another identical copy of the defaults in the
+    archive, which is noise the list has to be read past forever."""
+    return all(_tree(live) == _tree(default) for _, live, default in preset_parts())
+
+
+def _matching_preset(tree=None):
+    """The archived preset holding exactly this content, or None. `tree`
+    defaults to what is live now."""
+    want = tree if tree is not None else {part: _tree(live)
+                                          for part, live, _ in preset_parts()}
+    for folder in (ARCHIVE.iterdir() if ARCHIVE.is_dir() else []):
+        if not folder.is_dir() or folder.name.startswith("."):
+            continue
+        if all(_tree(folder / part) == want.get(part, {})
+               for part, _, _ in preset_parts()):
+            return folder
+    return None
+
+
+def archive_preset():
+    """Take the live folders out of use and keep them as a preset, leaving
+    fresh empty ones behind. Returns the preset folder, or None if there was
+    nothing worth keeping (see is_default_preset).
+
+    Nothing is ever deleted, which is what makes a one-button reset of the
+    agent's entire memory a reasonable thing to offer at all: every fact it had
+    is sitting in a dated folder, readable, and can be put back.
+
+    Content already held by a preset does NOT get a second folder - that preset
+    is stamped as unloaded just now and reused. Otherwise switching back and
+    forth between two presets would breed a near-identical copy on every swap,
+    and "last unloaded" would be a fiction: each copy would look like it had
+    come out of context exactly once, at the moment it was made."""
+    if is_default_preset():
+        return None
+    now = datetime.now().isoformat(" ", "seconds")
+    same = _matching_preset()
+    if same is not None:
+        _write_meta(same, unloaded=now)
+        for _, live, _ in preset_parts():
+            if live.exists():
+                shutil.rmtree(live)
+            live.mkdir(parents=True, exist_ok=True)
+        return same
+    ARCHIVE.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    dest = ARCHIVE / stamp
+    # Same second, second press: never land on top of an existing archive.
+    n = 2
+    while dest.exists():
+        dest = ARCHIVE / (stamp + "-" + str(n))
+        n += 1
+    dest.mkdir(parents=True)
+    for part, live, _ in preset_parts():
+        if live.exists():
+            shutil.move(str(live), str(dest / part))
+        live.mkdir(parents=True, exist_ok=True)
+    _write_meta(dest, label=stamp, created=now, unloaded=now)
+    return dest
+
+
+def _install_preset(source):
+    """Replace the live folders with `source`'s copy of them. A part missing
+    from source (an archive taken before memories/ was part of a preset, say)
+    leaves that folder empty rather than untouched - a preset is the whole
+    state, so a half-applied one would be neither what was there nor what was
+    asked for."""
+    for part, live, _ in preset_parts():
+        if live.exists():
+            shutil.rmtree(live)
+        src = source / part
+        if src.is_dir():
+            # Dotfiles left behind, the same as everywhere else here reads
+            # these folders: the .gitkeep that holds an empty defaults/memories
+            # open in the repo is scaffolding, and copying it into a live
+            # install would put a stray file in a folder the user opens.
+            shutil.copytree(src, live, ignore=shutil.ignore_patterns(".*"))
+        else:
+            live.mkdir(parents=True, exist_ok=True)
+
+
+def revert_preset():
+    """Reset context/ AND memories/ to the shipped defaults, archiving what was
+    there first. A hard replacement: a file the user added themselves - a
+    10tools.md, say - is archived with the rest and NOT restored, because it is
+    not part of what "the default" means.
+
+    Returns the archive folder, or None when the live state was already the
+    defaults and there was nothing to keep."""
+    if not DEFAULT_CONTEXT.is_dir():
+        raise FileNotFoundError("no defaults to revert to: " + str(DEFAULT_CONTEXT))
+    archived = archive_preset()
+    _install_preset(DEFAULTS)
+    return archived
+
+
+def preset_path(name):
+    """The archived preset `name` points at, or None if it names anything else.
+    Resolved and re-checked against archive/, the same guard _context_path uses,
+    so a name like ../../.ssh can't be read or copied over the live folders."""
+    if not name or name.startswith("/") or "\x00" in name:
+        return None
+    path = (ARCHIVE / name).resolve()
+    if ARCHIVE.resolve() not in path.parents or not path.is_dir():
+        return None
+    return path
+
+
+def presets():
+    """Every saved preset, most recently out of use first: its id, the name it
+    was given, when it was taken, when it last came out of context, and how
+    many files each half holds - enough for the settings page to list them
+    without reading every file in every preset.
+
+    `live` marks the one whose content is loaded right now, if any, so the list
+    can say "in use" instead of showing it as something to go back to."""
+    if not ARCHIVE.is_dir():
+        return []
+    here = {part: _tree(live) for part, live, _ in preset_parts()}
+    out = []
+    for p in sorted(ARCHIVE.iterdir()):
+        if not p.is_dir() or p.name.startswith("."):
+            continue
+        meta = _meta(p)
+        out.append({"name": p.name,
+                    "label": meta["label"],
+                    "created": meta["created"],
+                    "unloaded": meta["unloaded"],
+                    "live": all(_tree(p / part) == here[part]
+                                for part, _, _ in preset_parts()),
+                    "counts": {part: len(_tree(p / part))
+                               for part, _, _ in preset_parts()}})
+    out.sort(key=lambda d: d["unloaded"], reverse=True)
+    return out
+
+
+def rename_preset(name, label):
+    """Give a preset a name of its own. The folder keeps its timestamp id -
+    only the label moves, so nothing that points at this preset breaks and the
+    date it was taken stays honest."""
+    folder = preset_path(name)
+    if folder is None:
+        raise FileNotFoundError("no such preset: " + str(name))
+    label = " ".join(str(label).split())[:80] or folder.name
+    return _write_meta(folder, label=label)
+
+
+def preset_files(name):
+    """Every file in a preset, with its text - what the settings page shows
+    when a saved preset is expanded to be read through before loading it."""
+    folder = preset_path(name)
+    if folder is None:
+        raise FileNotFoundError("no such preset: " + str(name))
+    out = {}
+    for part, _, _ in preset_parts():
+        files = []
+        # Same numeric order the model is fed them in, not plain alphabetical,
+        # so reading a preset here matches how it would actually be loaded.
+        items = sorted(_tree(folder / part).items(),
+                       key=lambda kv: [_context_order(s) for s in kv[0].split("/")])
+        for rel, body in items:
+            try:
+                files.append({"path": rel, "text": body.decode("utf-8")})
+            except UnicodeDecodeError:
+                files.append({"path": rel, "text": "(not text)"})
+        out[part] = files
+    return out
+
+
+def restore_preset(name):
+    """Swap an archived preset back in, archiving the live one on the way past
+    - unless it is exactly the shipped defaults, in which case there is nothing
+    in it worth another folder.
+
+    The archive being restored is COPIED, not moved, so it stays in the list
+    and can be swapped back to again. Returns (archive folder or None), and
+    raises if `name` isn't a real preset."""
+    source = preset_path(name)
+    if source is None:
+        raise FileNotFoundError("no such preset: " + str(name))
+    # Restoring what is already live: a no-op that would otherwise archive a
+    # copy of the preset next to the preset it came from.
+    if all(_tree(source / part) == _tree(live) for part, live, _ in preset_parts()):
+        return None
+    archived = archive_preset()
+    _install_preset(source)
+    return archived
+
+
+seed_context()         # a missing context or memory file <- its shipped default
 _migrate_layout()      # flat chats/<id>.md  -> a folder per chat
 _migrate_json_names()  # <id>.md/<id>.json   -> history.json/settings.json
 
@@ -1398,24 +1745,28 @@ def memories_text():
             desc = first_line.lstrip("#").strip() or "(no description)"
             lines.append(p.stem + ": " + desc)
 
-        if lines:
-            text = (
-                "Memories: individual topic files, one per file, living in "
-                + str(MEMORIES) + " - NOT loaded automatically, unlike context/. "
-                "If what's being discussed matches one below, or reading it would "
-                "help, read that file in full FIRST (read_file or ask_file) before "
-                "answering - don't wait to be asked. If something worth keeping "
-                "comes up that belongs in one of these, append to it (check it "
-                "isn't already there first, don't duplicate). If it's a new fact "
-                "specific to a project, person, or topic none of these cover - not "
-                "a general fact about the user, which belongs in the memory file "
-                "in context/ - create a new "
-                "file here with write_file: " + str(MEMORIES) + "/<topic>.md, first "
-                "line a short one-line description, so it's listed here next turn.\n"
-                + "\n".join(lines)
-            )
-        else:
-            text = ""
+        # The instructions go out even with nothing to list. An empty folder is
+        # exactly when the model most needs telling that memories/ is where a
+        # project fact goes - said only once there is already a file here, it
+        # can never write the first one, and every project fact it learns
+        # either lands in the always-injected memory file or is lost.
+        text = (
+            "Memories: individual topic files, one per file, living in "
+            + str(MEMORIES) + " - NOT loaded automatically, unlike context/. "
+            "If what's being discussed matches one below, or reading it would "
+            "help, read that file in full FIRST (read_file or ask_file) before "
+            "answering - don't wait to be asked. If something worth keeping "
+            "comes up that belongs in one of these, append to it (check it "
+            "isn't already there first, don't duplicate). If it's a new fact "
+            "specific to a project, person, or topic none of these cover - not "
+            "a general fact about the user, their computer or this environment, "
+            "which belongs in the memory file in context/ - create a new "
+            "file here with write_file: " + str(MEMORIES) + "/<topic>.md, first "
+            "line a short one-line description, so it's listed here next turn."
+        )
+        text += ("\n" + "\n".join(lines)) if lines \
+            else "\nThere are no memory files yet - write the first one when a " \
+                 "fact worth keeping turns up."
         _memories_cache["key"] = key
         _memories_cache["text"] = text
         return text
@@ -1462,7 +1813,7 @@ def _injection_call(name, provider_name, model):
     return fn(**kwargs)
 
 
-def injection_breakdown(provider_name, model, pinned=None):
+def injection_breakdown(provider_name, model, pinned=None, workspace_id=None):
     """This turn's injection list (the model's own from models_custom.json, or
     the shared default), resolved but kept as separate pieces - one
     {"label", "kind", "text"} dict per item, in order, kind/skipped-entries
@@ -1540,10 +1891,17 @@ def injection_breakdown(provider_name, model, pinned=None):
     for p in (pinned or []):
         if p.get("text"):
             breakdown.append({"label": p["label"], "kind": "pinned", "text": p["text"]})
+    # Where this chat's tools actually work. Last, and always present: a model
+    # that does not know it is operating on another machine will confidently
+    # hand back paths from the wrong computer, and a model that does not know
+    # its root will keep guessing at relative paths. One line, and the context
+    # panel shows it alongside everything else the model was told.
+    breakdown.append({"label": "workspace", "kind": "workspace",
+                      "text": workspace.describe(workspace_id)})
     return breakdown
 
 
-def system_text(provider_name, model, pinned=None):
+def system_text(provider_name, model, pinned=None, workspace_id=None):
     """The system message for this turn - injection_breakdown()'s pieces
     joined into one string. This is what every model actually sees in place
     of the old hardcoded context_text() + memories_text() +
@@ -1557,7 +1915,7 @@ def system_text(provider_name, model, pinned=None):
     really are sent - but they travel as the request's own `tools` array, so
     pasting them in here as well would send every schema twice, once in a
     shape no provider parses."""
-    parts = injection_breakdown(provider_name, model, pinned)
+    parts = injection_breakdown(provider_name, model, pinned, workspace_id)
     return "\n\n".join(p["text"] for p in parts
                        if p["text"] and p["kind"] != "schema")
 
@@ -1797,7 +2155,7 @@ def append_error(c, msg):
 def run(text, history, provider_name=None, model=None, temperature=0, approve=_approve,
         on_save=None, on_text=None, should_stop=None, chat_id=None,
         on_tool_call=None, on_tool_result=None, on_safety=None, pinned=None,
-        safety=None, safety_prompt=None, inject=None):
+        safety=None, safety_prompt=None, inject=None, workspace_id=None):
     """Run one turn over `history` and return the updated history: reply to text,
     and work through any tool calls it makes.
 
@@ -1911,7 +2269,10 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         # provider's wire format actually needs. What goes into the system
         # message is this model's own injection list if it has one
         # (models_custom.json), else the shared default - see system_text().
-        system = system_text(provider_name, model, pinned)
+        # Read fresh every pass, so the line telling the model where it is
+        # working is right on the pass after a move rather than a turn later.
+        here = live_workspace(chat_id, workspace_id)
+        system = system_text(provider_name, model, pinned, here)
         messages = [{"role": "system", "content": system}] + turns
         usage = {}
         native_call = {}
@@ -2054,8 +2415,12 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
 
         # chat_id goes with the call so a tool that keeps something per
         # conversation - the terminal's open shell - knows whose it is. It
-        # comes from the caller, never from the model's own args.
-        result = tool_processor.process(call, chat_id)
+        # comes from the caller, never from the model's own args. The
+        # workspace rides along the same way and for the same reason: which
+        # machine and which root a file tool works in is the chat's business,
+        # not something the model gets to put in its arguments.
+        result = tool_processor.process(
+            call, chat_id, workspace_id=live_workspace(chat_id, workspace_id))
         turns.append({"role": "tool", "tool_call_id": call_id, "content": result})
         sync()
         if on_tool_result:
@@ -2152,7 +2517,7 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
                         on_tool_result=turnctx.guard(ctx, on_tool_result),
                         on_safety=turnctx.guard(ctx, on_safety),
                         pinned=c.pinned, safety=safe_on, safety_prompt=safe_prompt,
-                        inject=inject)
+                        inject=inject, workspace_id=c.workspace)
         # run() syncs as it goes, so the file is usually already this - but it
         # is the RETURNED history that's authoritative, and leaving the two to
         # agree by convention means anything run() adds after its last sync

@@ -143,6 +143,33 @@ cp .env.example .env
 python3 scripts/server.py
 ```
 
+### Moving an install somewhere else
+
+An installed Uniagent is just its folder. Nothing inside it records where it
+lives, so you can copy the whole thing to another machine, another disk or a USB
+stick, and run one script there to make it a service again:
+
+```bash
+./attach.sh                 # Linux: asks which port, then starts it
+```
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\install-autostart.ps1 -Install
+```
+
+That does the second half of the installer and nothing else — finds a Python
+that can run the code, writes the services with this folder's path in them, and
+starts them. No clone, no pull, no questions about API keys: your password,
+providers, chats, skills and settings all travelled with the folder. Run it
+again after moving the folder, and it points at the new location. `./attach.sh
+--remove` unhooks it, leaving the folder alone.
+
+Two things worth knowing when the folder lives on a stick: everything it writes
+(chats, `model_io.log`) is written to the stick, which is slow on cheap flash;
+and `.env` holds your API keys in plain text, so a lost stick is lost keys. If
+the stick isn't plugged in at boot, the services skip themselves quietly rather
+than restart-looping — plug it in and `systemctl --user start uniagent-server`.
+
 On first run the server generates a password and prints it. Open https://localhost:8764 in a browser, or https://your-machine-ip:8764 from any device on your network, and enter it. The password lives in `.env` as `UNIAGENT_PASSWORD`; change it there and restart to log every device out.
 
 Your browser will warn about the certificate the first time on each device, because Uniagent signs its own. Click Advanced, then proceed. Port 8763 only redirects to 8764 — the app itself is HTTPS-only, since the password would otherwise cross the network in plain text.

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import provider
 import turnctx
+import workspace
 
 TOOLS_DIR = Path(__file__).parent.parent / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
@@ -650,13 +651,20 @@ def _find(name):
     return None
 
 
-def process(call, chat_id=None):
+def process(call, chat_id=None, workspace_id=None):
     """Run the tool the call asks for and return its output as text.
 
     chat_id is the conversation the call came from, and is handed to any tool
     whose run() declares it - that's how the terminal keeps one open shell per
     chat instead of one for everybody. Tools that don't ask for it never see
     it, so nothing else needed changing.
+
+    workspace_id is the same idea for WHERE the call happens: the chat's
+    workspace, resolved here into a workspace.Workspace and handed to any tool
+    whose run() declares `workspace`. That object knows its own root and, if
+    the workspace is a remote one, does its reading, writing and running over
+    ssh - so a tool asks it for a file and never has to care which machine the
+    file is on.
 
     A stopped turn never starts a tool. Once one HAS started it is left to
     finish on its own - a command already running cannot be un-run, and killing
@@ -680,8 +688,17 @@ def process(call, chat_id=None):
     # the real one wins, so it can never reach into another chat's terminal.
     args = dict(call.get("args", {}))
     try:
-        if "chat_id" in inspect.signature(t["run"]).parameters:
+        params = inspect.signature(t["run"]).parameters
+        if "chat_id" in params:
             args["chat_id"] = chat_id
+        # Same contract as chat_id, one line further on: a tool that declares
+        # `workspace` is handed the chat's one, a tool that doesn't is called
+        # exactly as before. That is what keeps this cheap - no registry of
+        # which tools are workspace-aware, no schema entry for the model to
+        # fill in wrongly, and nothing at all to do for the twelve tools that
+        # have no business with the filesystem.
+        if "workspace" in params:
+            args["workspace"] = workspace.get(workspace_id)
     except (TypeError, ValueError):
         pass  # can't read the signature - just call it the plain way
     try:

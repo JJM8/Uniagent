@@ -14,12 +14,14 @@ if _SCRIPTS not in sys.path:
 
 import main
 
+from _workspace import here as _here
+
 NAME = "ask_file"
 DESCRIPTION = ("SMART file inspector: USE THIS WHEN READING A FILE UNLESS YOU ARE READY TO MAKE VERY SPECIFIC EDITS, USE THIS TO UNDERSTAND FILES OR A CODEBASE - summarization, config values, function purpose, errors, whatever. It uses a subagent to answer from the file so you don't bloat your context with raw content. Saves tokens and keeps you smart. Call this before read_file every time.")
 INSTRUCTIONS = """HOW TO CALL: use the tool-call syntax already given to you, with tool name "ask_file". Do not explain what you are doing first.
 
 Arguments:
-- path:     the file to read. A relative path is from the project root.
+- path:     the file to read. A relative path is from the workspace root.
 - offset:   OPTIONAL, first line to read, counting from 1. Use it to page
             through something big.
 - limit:    OPTIONAL, how many lines to read from there. Defaults to 2000.
@@ -39,7 +41,6 @@ off the disk.
 Read a file before you edit it. Guessing at what a file contains and then
 trying to edit it wastes a turn when the text you guessed isn't there."""
 
-ROOT = Path(__file__).parent.parent
 MAX_LINES = 2000
 
 # For native provider tool-calling.
@@ -47,7 +48,7 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "description":
-            "The file to read. A relative path is from the project root."},
+            "The file to read. A relative path is from the workspace root."},
         "offset": {"type": "integer", "description":
             "Optional, first line to read, counting from 1. Use it to page "
             "through something big. Defaults to 1."},
@@ -68,20 +69,23 @@ def _build_prompt(question, file_content):
         return f"You are a search sub agent. Answer the query: '{question}' using this file content:\n{file_content}"
     return search_prompt + file_content
 
-def run(path, offset=1, limit=MAX_LINES, question=None):
-    target = Path(path) if Path(path).is_absolute() else ROOT / path
-
-    if not target.exists():
-        return "ERROR: there is no file at " + str(target)
-    if target.is_dir():
-        listing = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
-        return (str(target) + " is a folder, not a file. It contains:\n"
-                + "\n".join(listing))
+def run(path, offset=1, limit=MAX_LINES, question=None, workspace=None):
+    # workspace comes from tool_processor, never from the model - see the note
+    # in read_file, and its absence from SCHEMA above.
+    ws = workspace or _here()
+    target = ws.resolve(path)
 
     try:
-        lines = target.read_text(errors="replace").split("\n")
+        if not ws.exists(target):
+            return "ERROR: there is no file at " + target + " (" + ws.where + ")"
+        if ws.is_dir(target):
+            return (target + " is a folder, not a file. It contains:\n"
+                    + "\n".join(ws.listdir(target)))
+        lines = ws.read_text(target).split("\n")
     except OSError as e:
-        return "ERROR: could not read " + str(target) + ": " + str(e)
+        return "ERROR: could not read " + target + ": " + str(e)
+    except Exception as e:
+        return "ERROR: " + str(e)   # workspace unreachable - the message says why
 
     offset = max(1, int(offset))
     chunk = lines[offset - 1:offset - 1 + int(limit)]

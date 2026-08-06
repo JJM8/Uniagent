@@ -58,6 +58,7 @@ import provider_refs
 import settings
 import tokens
 import tool_processor
+import workspace
 import turnctx
 import voice_input
 # Not "from tools import _discovery": tools/ was never on sys.path as a
@@ -544,6 +545,11 @@ def _status(c):
             "pinned": bool(c.provider or c.model),
             "temperature_pinned": c.temperature is not None,
             "approval": command_processor.pending_question(cur),
+            # Which workspace THIS chat's tools work in. Rides along here for
+            # the same reason the model does: the corner dropdown has to show
+            # the chat you just opened, and this is the request the page
+            # already makes the instant you switch chats.
+            "workspace": c.workspace or "",
             # THIS chat's token count, read off its settings .json - no
             # injection resolved, no tokenizer run (see main.stored_usage).
             # It rides along here because this is the request the page already
@@ -909,16 +915,21 @@ def _icon_url(path):
     return "/image?path=" + quote(path)
 
 
-def _context_path(rel):
-    """The context file `rel` names, or None if it points anywhere else. Resolved
-    and re-checked against context/, so a name like ../../.bashrc can't be read
-    or written through this - and the suffix must be one main.py actually loads,
-    so this can't be used to drop a file the agent will never see."""
+def _context_path(rel, kind="context"):
+    """The editable file `rel` names, or None if it points anywhere else.
+    Resolved and re-checked against its own folder, so a name like
+    ../../.bashrc can't be read or written through this - and the suffix must
+    be one main.py actually loads, so this can't be used to drop a file the
+    agent will never see.
+
+    `kind` picks the folder: the always-injected context/, or memories/, whose
+    files the settings page edits through the same box even though only their
+    one-line descriptions are ever injected."""
+    root = main.MEMORIES if kind == "memories" else main.CONTEXT
     if not rel or rel.startswith("/") or "\x00" in rel:
         return None
-    path = (main.CONTEXT / rel).resolve()
-    root = main.CONTEXT.resolve()
-    if root not in path.parents or path.suffix.lower() not in main.CONTEXT_SUFFIXES:
+    path = (root / rel).resolve()
+    if root.resolve() not in path.parents or path.suffix.lower() not in main.CONTEXT_SUFFIXES:
         return None
     return path
 
@@ -944,16 +955,31 @@ def _pin_path(rel):
 
 
 def _context():
-    """Every context file, in the exact order they are fed to the model, with
-    its text - what the settings page's context tab draws and edits."""
-    out = []
-    for p in main.context_files():
-        try:
-            text = p.read_text()
-        except OSError:
-            continue
-        out.append({"path": p.relative_to(main.CONTEXT).as_posix(), "text": text})
-    return out
+    """What the settings page's context tab draws and edits: the context files
+    in the exact order they are fed to the model, the memory files alphabetically
+    beside them, and the archived presets that can be swapped back in.
+
+    Both halves in one payload because they are edited on one screen and reset
+    by one button - see main.preset_parts for why they are still two folders on
+    disk. Each carries `kind`, which is what POST /context needs back to know
+    which folder a save belongs to."""
+    def read(paths, root, kind):
+        out = []
+        for p in paths:
+            try:
+                text = p.read_text()
+            except OSError:
+                continue
+            out.append({"path": p.relative_to(root).as_posix(),
+                        "kind": kind, "text": text})
+        return out
+
+    return {"context": read(main.context_files(), main.CONTEXT, "context"),
+            "memories": read(main.memory_files(), main.MEMORIES, "memories"),
+            "presets": main.presets(),
+            # Greys out a reset that would do nothing but archive a copy of the
+            # defaults next to the defaults.
+            "is_default": main.is_default_preset()}
 
 
 def _settings():
@@ -1027,6 +1053,26 @@ def _email_accounts():
             "bridge_only": _email.BRIDGE_ONLY,
             "no_imap": _email.NO_IMAP,
             "app_password": _email.APP_PASSWORD}
+
+
+def _workspaces():
+    """What the settings page's workspaces tab draws, and what the chat's
+    corner dropdown fills itself from: every workspace, plus which one a chat
+    with nothing set falls back to.
+
+    No secrets here to withhold, unlike the email and provider tabs - a
+    workspace is a path and a hostname. The ssh key it uses is the user's own,
+    already on this machine, and Uniagent neither stores nor sees it."""
+    all_ws = provider.workspaces()
+    default = provider.default_workspace()
+    return {"workspaces": all_ws,
+            "default": default["id"] if default else "",
+            # What is wrong with WORKSPACES if it can't be read at all -
+            # otherwise the page shows an empty list and no reason why.
+            "error": provider.workspace_error(),
+            # Where a chat with no workspace, and no workspaces configured at
+            # all, actually works: the install folder, exactly as before.
+            "install_root": str(workspace.INSTALL_ROOT)}
 
 
 def _email_login_test(name):
@@ -1425,6 +1471,17 @@ class Handler(BaseHTTPRequestHandler):
                 path = main.VALIDATIONS / (stem + ".jsonl")
                 lines = path.read_text().splitlines() if path.exists() else []
                 self._send("[" + ",".join(lines) + "]", "application/json")
+        elif self.path.startswith("/context/preset?"):
+            # One preset's files, fetched only when a row is expanded to be
+            # read - the tab's own payload lists presets without their bodies,
+            # so having many stays cheap.
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                files = main.preset_files(q.get("name", [""])[0])
+            except FileNotFoundError as e:
+                self._send(str(e), code=404)
+            else:
+                self._send(json.dumps(files), "application/json")
         elif self.path == "/settings":
             self._send(json.dumps(_settings()), "application/json")
         elif self.path == "/providers":
@@ -1437,6 +1494,8 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json")
         elif self.path == "/email":
             self._send(json.dumps(_email_accounts()), "application/json")
+        elif self.path == "/workspaces":
+            self._send(json.dumps(_workspaces()), "application/json")
         elif self.path == "/context":
             self._send(json.dumps(_context()), "application/json")
         elif self.path == "/tools":
@@ -1525,6 +1584,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/context":
             self._post_context()
             return
+        if self.path == "/context/revert":
+            self._post_context_revert()
+            return
+        if self.path == "/context/restore":
+            self._post_context_restore()
+            return
+        if self.path == "/context/preset/rename":
+            self._post_preset_rename()
+            return
         if self.path == "/cron":
             self._post_cron()
             return
@@ -1557,6 +1625,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/email/default":
             self._post_email_default()
+            return
+        if self.path == "/workspaces":
+            self._post_workspace()
+            return
+        if self.path == "/workspaces/test":
+            self._post_workspace_test()
+            return
+        if self.path == "/workspaces/remove":
+            self._post_workspace_remove()
+            return
+        if self.path == "/workspaces/default":
+            self._post_workspace_default()
+            return
+        if self.path == "/workspace" or self.path.startswith("/workspace?"):
+            self._post_chat_workspace()
             return
         if self.path != "/input" and not self.path.startswith("/input?"):
             self._send("not found", code=404)
@@ -1900,14 +1983,141 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(json.dumps(_email_accounts()), "application/json")
 
-    def _post_context(self):
-        """Write one context file. The next turn picks it up on its own - the
-        context is re-read whenever its files change."""
+    # --- workspaces --------------------------------------------------------
+    #
+    # Where a chat's file and terminal tools work, and on which machine. These
+    # write .env through provider.save_workspace(), the same single place the
+    # settings page and anything else has to go through, and they answer with
+    # the refreshed list so the page never has to guess what it now looks like.
+
+    def _post_workspace(self):
+        """Add a workspace, or update the one with this id."""
         body = self._body()
         if not isinstance(body, dict):
             self._send("expected a JSON object", code=400)
             return
-        path = _context_path(body.get("path", ""))
+        try:
+            saved = provider.save_workspace(
+                name=str(body.get("name", "")),
+                path=str(body.get("path", "")),
+                ssh=str(body.get("ssh", "")),
+                port=body.get("port") or 0,
+                wsid=str(body.get("id", "")).strip(),
+                default=bool(body.get("default")))
+        except ValueError as e:
+            self._send(str(e), code=400)
+            return
+        except OSError as e:
+            self._send("could not save: " + str(e), code=500)
+            return
+        out = _workspaces()
+        # Whether it can actually be reached, checked once here rather than
+        # left for the first tool call to discover mid-turn. A workspace that
+        # saves fine and then cannot be used is exactly the thing a settings
+        # page should catch while the person is still looking at it.
+        ok, message = workspace.get(saved["id"]).check()
+        out["tested"] = {"id": saved["id"], "ok": ok, "message": message}
+        self._send(json.dumps(out), "application/json")
+
+    def _post_workspace_test(self):
+        """Reachability, on demand - the tab's test button.
+
+        Takes either a saved id, or the fields as typed, so a workspace can be
+        tested before it is saved."""
+        body = self._body()
+        if not isinstance(body, dict):
+            self._send("expected a JSON object", code=400)
+            return
+        wsid = str(body.get("id", "")).strip()
+        if wsid:
+            ws = workspace.get(wsid)
+        else:
+            ws = workspace.Workspace({"id": "", "name": str(body.get("name") or "this one"),
+                                      "path": str(body.get("path", "")),
+                                      "ssh": str(body.get("ssh", "")),
+                                      "port": body.get("port") or 0})
+        ok, message = ws.check()
+        self._send(json.dumps({"ok": ok, "message": message}), "application/json")
+
+    def _post_workspace_remove(self):
+        body = self._body()
+        if not isinstance(body, dict):
+            self._send("expected a JSON object", code=400)
+            return
+        try:
+            provider.delete_workspace(str(body.get("id", "")))
+        except ValueError as e:
+            self._send(str(e), code=400)
+            return
+        except OSError as e:
+            self._send("could not save: " + str(e), code=500)
+            return
+        self._send(json.dumps(_workspaces()), "application/json")
+
+    def _post_workspace_default(self):
+        """Which workspace a chat gets when it has never been given one."""
+        body = self._body()
+        if not isinstance(body, dict):
+            self._send("expected a JSON object", code=400)
+            return
+        try:
+            # Through provider, not by rewriting the list here: the built-in is
+            # in that list but must never be written to .env, and it holds the
+            # default by nothing else claiming it rather than by a flag.
+            provider.set_default_workspace(str(body.get("id", "")))
+        except ValueError as e:
+            self._send(str(e), code=400)
+            return
+        except OSError as e:
+            self._send("could not save: " + str(e), code=500)
+            return
+        self._send(json.dumps(_workspaces()), "application/json")
+
+    def _post_chat_workspace(self):
+        """Put THIS chat in a workspace - the dropdown in the corner of the
+        chat window.
+
+        Written to the chat's own settings.json, not to any global: two chats
+        open side by side can be working on two different machines, which is
+        most of the point. An empty id means "follow the default", which is
+        how a chat goes back to being unpinned."""
+        body = self._body()
+        if not isinstance(body, dict):
+            self._send("expected a JSON object", code=400)
+            return
+        wsid = str(body.get("workspace", "")).strip().lower()
+        if wsid and not any(w["id"] == wsid for w in provider.workspaces()):
+            self._send("there is no workspace called " + wsid, code=400)
+            return
+        c = _chat_of(self, create=True, mint=True)
+        if c is None:
+            self._send("no chat to set a workspace on", code=400)
+            return
+        c.workspace = wsid or None
+        try:
+            c._write_settings()
+        except OSError as e:
+            self._send("could not save: " + str(e), code=500)
+            return
+        ws = workspace.get(wsid)
+        ok, message = ws.check()
+        # The page redraws its dropdown from this rather than from what it
+        # sent, so a chat that was minted by this very request comes back with
+        # the id it was given.
+        self._send(json.dumps({"chat": c.route, "workspace": wsid,
+                               "name": ws.name, "where": ws.where,
+                               "ok": ok, "message": message}),
+                   "application/json")
+
+    def _post_context(self):
+        """Write one context or memory file. The next turn picks it up on its
+        own - both are re-read whenever their files change."""
+        body = self._body()
+        if not isinstance(body, dict):
+            self._send("expected a JSON object", code=400)
+            return
+        kind = body.get("kind", "context")
+        path = _context_path(body.get("path", ""), kind)
         text = body.get("text")
         if path is None or not isinstance(text, str):
             self._send("bad path or text", code=400)
@@ -1918,9 +2128,66 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             self._send("could not save: " + str(e), code=500)
             return
-        self._send(json.dumps({"saved": path.relative_to(main.CONTEXT).as_posix()}),
+        self._send(json.dumps({"saved": body.get("path"), "kind": kind}),
                    "application/json")
         _broadcast_context()  # that file is injected - the panel draws it
+
+    def _post_context_revert(self):
+        """Reset context/ AND memories/ to the shipped defaults. No body and no
+        path: this is the whole preset, not a file - see main.revert_preset,
+        which archives what was there under archive/ before replacing it.
+
+        Whole-preset on purpose. Reverting one file at a time leaves the agent
+        holding a default system prompt next to a memories folder full of
+        projects it was told to forget, and no obvious way back to a
+        known-good starting state. The archive is what makes it safe rather
+        than final."""
+        try:
+            archived = main.revert_preset()
+        except (OSError, FileNotFoundError) as e:
+            self._send("could not revert: " + str(e), code=500)
+            return
+        self._send(json.dumps({"archived": archived.name if archived else None,
+                               "state": _context()}), "application/json")
+        _broadcast_context()  # every injected file just changed
+
+    def _post_context_restore(self):
+        """Swap an archived preset back in, archiving the live one on the way
+        past unless it is exactly the shipped defaults. The archive being
+        restored is copied, not consumed, so it stays in the list to come back
+        to later."""
+        body = self._body()
+        if not isinstance(body, dict) or not isinstance(body.get("name"), str):
+            self._send("expected {\"name\": ...}", code=400)
+            return
+        try:
+            archived = main.restore_preset(body["name"])
+        except FileNotFoundError as e:
+            self._send(str(e), code=400)
+            return
+        except OSError as e:
+            self._send("could not restore: " + str(e), code=500)
+            return
+        self._send(json.dumps({"restored": body["name"],
+                               "archived": archived.name if archived else None,
+                               "state": _context()}), "application/json")
+        _broadcast_context()
+
+    def _post_preset_rename(self):
+        """Name a saved preset. Only the label moves - the folder keeps the
+        timestamp it was taken, which is what everything else points at."""
+        body = self._body()
+        if not isinstance(body, dict) or not isinstance(body.get("name"), str) \
+                or not isinstance(body.get("label"), str):
+            self._send("expected {\"name\": ..., \"label\": ...}", code=400)
+            return
+        try:
+            meta = main.rename_preset(body["name"], body["label"])
+        except FileNotFoundError as e:
+            self._send(str(e), code=400)
+            return
+        self._send(json.dumps({"name": body["name"], "label": meta["label"]}),
+                   "application/json")
 
     def _post_cron(self):
         """Write cron.json whole - one text field, no path needed since there's

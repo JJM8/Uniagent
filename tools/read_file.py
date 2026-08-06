@@ -1,7 +1,11 @@
 """Reads a file off the disk with line numbers, so edit_file has something
-exact to match against."""
+exact to match against.
 
-from pathlib import Path
+Reads it out of the chat's workspace, which may be a folder on this machine or
+one on another machine over ssh - see scripts/workspace.py. Nothing in here
+knows the difference."""
+
+from _workspace import here as _here
 
 NAME = "read_file"
 DESCRIPTION = ("Read a text file from the user's computer, with line numbers. Use this before "
@@ -9,7 +13,7 @@ DESCRIPTION = ("Read a text file from the user's computer, with line numbers. Us
 INSTRUCTIONS = """HOW TO CALL: use the tool-call syntax already given to you, with tool name "read_file".
 
 Arguments:
-- path:   the file to read. A relative path is from the project root.
+- path:   the file to read. A relative path is from the workspace root.
 - offset: OPTIONAL, first line to read, counting from 1. Use it to page
           through something big.
 - limit:  OPTIONAL, how many lines to read from there. Defaults to 2000.
@@ -26,7 +30,6 @@ off the disk.
 Read a file before you edit it. Guessing at what a file contains and then
 trying to edit it wastes a turn when the text you guessed isn't there."""
 
-ROOT = Path(__file__).parent.parent
 MAX_LINES = 2000
 MAX_CHARS = 60000  # a whole context window is not worth one runaway file
 
@@ -35,7 +38,7 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "path": {"type": "string", "description":
-            "The file to read. A relative path is from the project root."},
+            "The file to read. A relative path is from the workspace root."},
         "offset": {"type": "integer", "description":
             "Optional, first line to read, counting from 1. Defaults to 1."},
         "limit": {"type": "integer", "description":
@@ -45,20 +48,28 @@ SCHEMA = {
 }
 
 
-def run(path, offset=1, limit=MAX_LINES):
-    target = Path(path) if Path(path).is_absolute() else ROOT / path
-
-    if not target.exists():
-        return "ERROR: there is no file at " + str(target)
-    if target.is_dir():
-        listing = sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
-        return (str(target) + " is a folder, not a file. It contains:\n"
-                + "\n".join(listing))
+def run(path, offset=1, limit=MAX_LINES, workspace=None):
+    # workspace comes from tool_processor, never from the model - the same
+    # arrangement chat_id has, and deliberately absent from SCHEMA above. It
+    # carries the chat's root and, for a remote workspace, does the reading on
+    # the far machine. None means nobody passed one (a direct call, a test), and
+    # the install folder is what this tool always used before workspaces.
+    ws = workspace or _here()
+    target = ws.resolve(path)
 
     try:
-        lines = target.read_text(errors="replace").split("\n")
+        if not ws.exists(target):
+            return "ERROR: there is no file at " + target + " (" + ws.where + ")"
+        if ws.is_dir(target):
+            return (target + " is a folder, not a file. It contains:\n"
+                    + "\n".join(ws.listdir(target)))
+        lines = ws.read_text(target).split("\n")
     except OSError as e:
-        return "ERROR: could not read " + str(target) + ": " + str(e)
+        return "ERROR: could not read " + target + ": " + str(e)
+    except Exception as e:
+        # A workspace that can't be reached at all - the machine is off, the
+        # key isn't set up. Its message already says which and what to do.
+        return "ERROR: " + str(e)
 
     offset = max(1, int(offset))
     chunk = lines[offset - 1:offset - 1 + int(limit)]

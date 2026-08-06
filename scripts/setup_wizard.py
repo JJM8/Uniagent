@@ -10,6 +10,13 @@ that is the shortest path from "installed" to "actually answers you". Anything
 more belongs on the settings page, which can do all of it better and with a
 mouse.
 
+    setup_wizard.py --port-only
+
+asks the port question and nothing else. That is what attach.sh runs when a
+folder that is already set up is being adopted on a new machine: the password
+and the providers travelled with the folder, the port is the only thing that
+belongs to the machine.
+
 NOTHING HERE IS A SECOND SOURCE OF TRUTH. The wire list comes from
 provider.WIRES, whether a wire wants a key from provider.wants_key(), what its
 URL box is called from provider.base_url_label(), and the provider object is
@@ -262,8 +269,17 @@ def step_provider():
 
 # --- the whole thing -------------------------------------------------------
 
-def main():
+def main(argv=None):
     global TTY
+
+    # --port-only is attach.sh's entry point: that script sets up a folder that
+    # has already been through this wizard somewhere else, so the password and
+    # the providers came along in the copied .env and asking for them again
+    # would be asking for things you already have. The port is the one answer
+    # that genuinely belongs to the machine you are standing at.
+    argv = sys.argv[1:] if argv is None else list(argv)
+    port_only = "--port-only" in argv
+
     TTY = _open_tty()
     if TTY is None:
         # No terminal: an unattended install. Silence rather than a hang.
@@ -272,14 +288,21 @@ def main():
         return 0
 
     print()
-    print(BOLD + ACCENT + "  UNIAGENT" + RESET + DIM + "   first-run setup" + RESET)
-    print(DIM + "  Three questions. Everything here can be changed later on the "
-          "settings page." + RESET)
+    print(BOLD + ACCENT + "  UNIAGENT" + RESET + DIM
+          + ("   port" if port_only else "   first-run setup") + RESET)
+    if port_only:
+        print(DIM + "  One question. Everything else came with the folder." + RESET)
+    else:
+        print(DIM + "  Three questions. Everything here can be changed later on the "
+              "settings page." + RESET)
 
     try:
-        step_password()
-        port = step_port()
-        step_provider()
+        if port_only:
+            port = step_port()
+        else:
+            step_password()
+            port = step_port()
+            step_provider()
     except (EOFError, KeyboardInterrupt):
         # Ctrl-C or a closed pipe half way through. Whatever was answered is
         # already written, so say so rather than implying it was all lost.

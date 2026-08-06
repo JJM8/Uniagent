@@ -2736,6 +2736,282 @@ def set_env(name, value):
             pass
 
 
+# --- Workspaces. Where a chat's file and terminal tools do their work, and
+# optionally which machine they do it on.
+#
+# One .env variable holding a JSON list, exactly like LLM_PROVIDERS and
+# EMAIL_ACCOUNTS above, for the same reasons: it is the one file that is already
+# private, already backed up with the folder, and already the place a person
+# looks when they want to edit config by hand.
+#
+#   WORKSPACES=[{"id":"laptop","name":"Laptop","path":"/home/you/projects","ssh":"","default":true},
+#               {"id":"pi","name":"Pi","path":"/home/you","ssh":"you@192.168.1.50"}]
+#
+# `path` is the root relative paths resolve against. `ssh` blank means this
+# machine; anything else is an ssh destination - "user@host", or a Host alias
+# out of ~/.ssh/config - and the tools that understand workspaces then do their
+# reading, writing and running over there instead of here.
+#
+# Read from .env on every call and never cached, the same contract the provider
+# list keeps: a workspace added on the settings page has to work on the very
+# next turn, in this process and in the cron watcher, with neither restarted. ---
+
+WORKSPACE_VAR = "WORKSPACES"
+
+# The workspace that is always there: the Uniagent folder itself. It is not in
+# .env, cannot be edited and cannot be removed - it is where the tools worked
+# before workspaces existed, and it is what a chat falls back to when whatever
+# it was pointing at is gone. Something has to be the floor.
+#
+# The dot in the id is what keeps it out of reach: ids made from a name go
+# through _slug(), which only ever produces letters, digits and dashes, so no
+# workspace anyone adds can collide with this one. A hand-edited .env that uses
+# it anyway is dropped on the way in (see workspaces()).
+BUILTIN_WORKSPACE_ID = "uniagent.root"
+
+
+def builtin_workspace(is_default=True):
+    """The Uniagent folder as a workspace object, shaped like any other."""
+    return {"id": BUILTIN_WORKSPACE_ID,
+            "name": "Uniagent folder",
+            "path": str(Path(__file__).resolve().parent.parent),
+            "ssh": "", "port": 0,
+            "default": bool(is_default),
+            # The one flag the others never carry. The settings page reads it
+            # to know this row has no remove button and nothing to edit.
+            "builtin": True}
+
+# An id is referenced by every chat that sits in the workspace, so it has to
+# survive renames and be safe in a filename and a URL. The display name is the
+# thing people change; the id is the thing code holds onto.
+_WS_ID_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+_workspace_error = None
+
+
+def workspace_error():
+    """The last complaint about WORKSPACES, or None. Same idea as
+    custom_error(): a malformed list has to say so on the settings page rather
+    than silently behaving as though no workspaces were configured."""
+    return _workspace_error
+
+
+def _slug(text):
+    """A usable id out of a display name - "Josh's Pi 4" becomes "josh-s-pi-4"."""
+    out = re.sub(r"[^a-z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return out or "workspace"
+
+
+def _normalize_workspace(entry):
+    """One entry off .env as a clean object, or None if it isn't usable.
+
+    A workspace with no path is the one genuinely unusable case: every tool
+    that takes a workspace resolves against that path, and "" would silently
+    mean the process's current directory - which is scripts/, and would put the
+    agent's files inside the install."""
+    if not isinstance(entry, dict):
+        return None
+    path = str(entry.get("path") or "").strip()
+    if not path:
+        return None
+    name = str(entry.get("name") or "").strip()
+    wsid = str(entry.get("id") or "").strip().lower()
+    if not _WS_ID_OK.match(wsid):
+        wsid = _slug(name or path.rsplit("/", 1)[-1])
+    ssh = str(entry.get("ssh") or "").strip()
+    try:
+        port = int(entry.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    return {
+        "id": wsid,
+        "name": name or wsid,
+        # Only expanded for a local workspace: "~" on the far end of an ssh
+        # connection is the remote account's home, and expanding it here would
+        # quietly rewrite it to this machine's.
+        "path": str(Path(path).expanduser()) if not ssh else path,
+        "ssh": ssh,
+        "port": port if 1 <= port <= 65535 else 0,
+        "default": bool(entry.get("default")),
+    }
+
+
+def _saved_workspaces():
+    """Just the ones out of .env, normalized. The built-in is not among them -
+    it is not stored anywhere and never written back."""
+    global _workspace_error
+    raw = _env_value(WORKSPACE_VAR)
+    if not raw:
+        _workspace_error = None
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _workspace_error = (WORKSPACE_VAR + " in .env is not valid JSON (" + str(e)
+                            + ") - no workspaces are loaded until it is fixed.")
+        return []
+    if not isinstance(data, list):
+        _workspace_error = WORKSPACE_VAR + " in .env must be a JSON list of workspace objects."
+        return []
+    _workspace_error = None
+    out, seen = [], set()
+    for entry in data:
+        w = _normalize_workspace(entry)
+        if not w:
+            continue
+        # A duplicate id is not a warning, it is a chat pointing at two
+        # different machines depending on which one is read first. Later
+        # duplicates are dropped, first one wins. The built-in's id is dropped
+        # outright: a hand-edited .env must not be able to shadow the floor.
+        if w["id"] in seen or w["id"] == BUILTIN_WORKSPACE_ID:
+            continue
+        seen.add(w["id"])
+        out.append(w)
+    return out
+
+
+def workspaces():
+    """Every workspace: the built-in Uniagent folder first, then whatever is in
+    .env, in the order they sit there.
+
+    Never empty. The built-in is always the first entry, which is what makes
+    "there is always somewhere to work" true rather than a special case
+    everything downstream has to remember."""
+    saved = _saved_workspaces()
+    # The built-in is the default exactly when nothing else claims it, so no
+    # extra state is needed anywhere to record which one holds it.
+    return [builtin_workspace(not any(w["default"] for w in saved))] + saved
+
+
+def default_workspace():
+    """The workspace a chat gets when it has never been given one. Always a
+    workspace - the built-in when nothing else is marked."""
+    for w in workspaces():
+        if w["default"]:
+            return w
+    return builtin_workspace(True)
+
+
+def workspace(wsid=None):
+    """One workspace by id, or the default when `wsid` is None or unknown.
+
+    Unknown falls back rather than raising on purpose. A chat can outlive the
+    workspace it was filed under - deleted on the settings page, or the .env
+    copied to a machine that doesn't have that mount - and the chat should
+    still open and still answer, in the default place, instead of erroring on
+    every tool call until someone edits its settings file by hand."""
+    if wsid:
+        for w in workspaces():
+            if w["id"] == str(wsid).strip().lower():
+                return w
+    return default_workspace()
+
+
+def save_workspaces(entries):
+    """Write the whole workspace list back to .env, keeping only the fields a
+    workspace has. At most one default survives - two would make
+    default_workspace() depend on list order, which is not something anybody
+    intends when they tick a box."""
+    clean, seen_default = [], False
+    for w in entries:
+        is_default = bool(w.get("default")) and not seen_default
+        seen_default = seen_default or is_default
+        item = {"id": w["id"], "name": w["name"], "path": w["path"],
+                "ssh": w.get("ssh", ""), "default": is_default}
+        if w.get("port"):
+            item["port"] = int(w["port"])
+        clean.append(item)
+    set_env(WORKSPACE_VAR, json.dumps(clean, separators=(",", ":")) if clean else "")
+
+
+def save_workspace(name, path, ssh="", port=0, wsid=None, default=False):
+    """Add a workspace, or update the one with this id.
+
+    Raises ValueError with a sentence worth showing on anything the settings
+    page should refuse. The id is derived from the name on creation and then
+    never changes, because chats point at it: renaming "Pi" to "Raspberry Pi"
+    must not orphan every chat that was working there."""
+    name = (name or "").strip()
+    path = (path or "").strip()
+    ssh = (ssh or "").strip()
+    if not name:
+        raise ValueError("a workspace needs a name.")
+    if not path:
+        raise ValueError("a workspace needs a root directory.")
+    if ssh and not re.match(r"^[A-Za-z0-9._@\-]+$", ssh):
+        raise ValueError("that does not look like an ssh destination - it should be "
+                         "'user@host', a hostname, or a Host alias from ~/.ssh/config.")
+    try:
+        port = int(port or 0)
+    except (TypeError, ValueError):
+        raise ValueError("the ssh port has to be a number.")
+    if port and not 1 <= port <= 65535:
+        raise ValueError("a port has to be between 1 and 65535.")
+    if port and not ssh:
+        raise ValueError("a port only means something with an ssh destination.")
+
+    entries = _saved_workspaces()
+    wsid = (wsid or "").strip().lower()
+    if wsid == BUILTIN_WORKSPACE_ID:
+        raise ValueError("the Uniagent folder is built in - it cannot be edited.")
+    if wsid:
+        target = next((w for w in entries if w["id"] == wsid), None)
+        if target is None:
+            raise ValueError("there is no workspace with id " + wsid + ".")
+    else:
+        base = _slug(name)
+        candidate, n = base, 2
+        taken = {w["id"] for w in entries}
+        while candidate in taken:
+            candidate, n = base + "-" + str(n), n + 1
+        target = {"id": candidate}
+        entries.append(target)
+
+    target["name"] = name
+    target["path"] = str(Path(path).expanduser()) if not ssh else path
+    target["ssh"] = ssh
+    target["port"] = port
+    if default:
+        for w in entries:
+            w["default"] = (w is target)
+    # Nothing is forced to be the default here: with none of these claiming it
+    # the built-in holds it, so the list is never without one.
+    save_workspaces(entries)
+    return target
+
+
+def set_default_workspace(wsid):
+    """Which workspace a chat gets when it has never been given one.
+
+    The built-in is chosen by nothing else claiming it, so setting it means
+    clearing the flag off every saved workspace rather than writing it
+    anywhere."""
+    wsid = (wsid or "").strip().lower()
+    entries = _saved_workspaces()
+    if wsid != BUILTIN_WORKSPACE_ID and not any(w["id"] == wsid for w in entries):
+        raise ValueError("there is no workspace called " + repr(wsid) + ".")
+    for w in entries:
+        w["default"] = (w["id"] == wsid)
+    save_workspaces(entries)
+
+
+def delete_workspace(wsid):
+    """Remove a workspace. Chats still pointing at it fall back to the default
+    on their next tool call - see workspace()."""
+    wsid = (wsid or "").strip().lower()
+    if wsid == BUILTIN_WORKSPACE_ID:
+        raise ValueError("the Uniagent folder is built in - it cannot be removed. "
+                         "It is what a chat falls back to when its own workspace "
+                         "is gone, so there is always somewhere to work.")
+    entries = _saved_workspaces()
+    left = [w for w in entries if w["id"] != wsid]
+    if len(left) == len(entries):
+        raise ValueError("there is no workspace with id " + repr(wsid) + ".")
+    # No need to hand the default on: if the one removed held it, the built-in
+    # takes it back simply by nothing else claiming it.
+    save_workspaces(left)
+
+
 # --- Model I/O log. A debugging aid: every request that goes through
 # stream_response writes its full prompt and full reply here, one block per
 # call, separated so each input/output pair is readable on its own. Set

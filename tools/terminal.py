@@ -67,7 +67,7 @@ WHAT THIS TOOL ACTUALLY DOES: These commands REALLY RUN on the user's real compu
 
 So if the user asks you to DO something on their machine, you almost certainly CAN. Do not say "I can only run shell commands, I can't do that" - opening windows, launching apps and changing files ARE shell commands. Work out the command and run it. Only say you can't if there is genuinely no way to do it via a shell.
 
-IT IS ONE TERMINAL AND IT STAYS OPEN: This is not a fresh shell each time - it is the SAME terminal for this whole conversation, so state carries over exactly like a real one: `cd` once and every command after it runs from there; `export`, `source venv/bin/activate` and shell variables all stick too. Do NOT re-cd on every command and do NOT chain "cd x && ..." out of habit - you are already there. Run `pwd` if you have lost track of where you are.
+IT IS ONE TERMINAL AND IT STAYS OPEN: This is not a fresh shell each time - it is the SAME terminal for this whole conversation, so state carries over exactly like a real one: `cd` once and every command after it runs from there; `export`, `source venv/bin/activate` and shell variables all stick too. You are ALREADY in that directory. Re-running `cd` to a place you have already been is pure waste - it burns tokens and changes nothing - so NEVER do it, and never wrap every command in "cd x && ..." out of habit. If you have lost track of where you are, run `pwd` once and move on.
 
 WHEN A COMMAND IS STILL RUNNING: Slow things (builds, apt, downloads, big copies) are NOT killed at the timeout. You get what has been printed so far, plus "STILL RUNNING". The command is fine and is carrying on. To see more, call again with `command` left out entirely - that reads whatever new output has appeared since. Keep doing that until you see it finish. Or wait longer up front with a bigger `timeout`.
 
@@ -185,9 +185,15 @@ _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r(?!\n)")
 
 
 class _PosixTerminal:
-    """One bash, kept open, talked to through a pty."""
+    """One bash, kept open, talked to through a pty.
 
-    def __init__(self):
+    With a remote workspace the bash is on the other machine and the pty holds
+    an ssh session instead - same marker, same reading, same everything below.
+    That is deliberate: a remote terminal you can `cd` in, run sudo in and
+    leave a REPL sitting in is worth having, and a second implementation of all
+    this for the remote case would be two things to keep in step."""
+
+    def __init__(self, workspace=None):
         # openpty() gives a linked pair: the slave IS the terminal as far as
         # bash is concerned, the master is our end to read and write. This is
         # the part that makes sudo and REPLs work - they get a real terminal.
@@ -246,8 +252,26 @@ class _PosixTerminal:
         # immediately afterwards. start_new_session puts bash in its own
         # session, so a Ctrl-C in the real terminal running the agent doesn't
         # also kill every chat's shell.
+        self.workspace = workspace
+        if workspace is not None and workspace.is_remote:
+            # Over ssh the local `env=` never arrives - sshd builds the remote
+            # environment itself and only forwards what its AcceptEnv allows,
+            # which by default is nothing that matters here. So the marker
+            # variables are set ON the remote command line instead, where they
+            # are part of what bash is started with.
+            #
+            # -tt forces a terminal on the far side even though our own stdin
+            # is already a pty. Without it the remote bash gets a pipe, and
+            # sudo, ssh-agent prompts and every REPL stop working - which is
+            # the entire reason this class uses a pty in the first place.
+            remote = ("PROMPT_COMMAND=" + shlex.quote(prompt_cmd)
+                      + " PS1= PS2= TERM=dumb "
+                      "bash --norc --noprofile --noediting -i")
+            argv = list(workspace.ssh_argv("-tt", command=remote))
+        else:
+            argv = ["bash", "--norc", "--noprofile", "--noediting", "-i"]
         self.proc = subprocess.Popen(
-            ["bash", "--norc", "--noprofile", "--noediting", "-i"],
+            argv,
             stdin=slave, stdout=slave, stderr=slave,
             start_new_session=True,
             env=env,
@@ -263,6 +287,13 @@ class _PosixTerminal:
         # as the first command's result.
         self.read_until(self.mark, time.monotonic() + 5)
 
+        # The far side's pty does its own echoing, so without this every
+        # command comes back in its own output - the exact thing ECHO was
+        # turned off for locally, arriving from the other end of the wire.
+        if self.workspace is not None and self.workspace.is_remote:
+            self.write("stty -echo\n")
+            self.read_until(self.mark, time.monotonic() + 10)
+
         # Behave like the user's own terminal: bring in ~/.profile and
         # ~/.bashrc so PATH, aliases and exports are the ones the user actually
         # lives with (this is what puts ~/.local/bin - edagent, hfetch - on
@@ -272,6 +303,14 @@ class _PosixTerminal:
         # marker machinery is re-asserted afterwards in case either file
         # touched PROMPT_COMMAND or PS1.
         self._source_user_env(prompt_cmd)
+
+        # Start where the work is. Without this a local terminal opens in
+        # scripts/ - the server's own directory, which is nobody's idea of
+        # where their project lives - and a remote one opens in the far
+        # account's home rather than the workspace it was configured with.
+        if self.workspace is not None:
+            self.write("cd " + shlex.quote(self.workspace.root) + " 2>/dev/null\n")
+            self.read_until(self.mark, time.monotonic() + 10)
 
     def alive(self):
         return self.proc.poll() is None
@@ -391,7 +430,7 @@ class _WindowsTerminal:
       sitting on Read-Host would eat that line as its own input.
     """
 
-    def __init__(self):
+    def __init__(self, workspace=None):
         try:
             import winpty
         except ImportError as e:  # pragma: no cover - Windows-only path
@@ -401,6 +440,7 @@ class _WindowsTerminal:
                 "pip install pywinpty"
             ) from e
 
+        self.workspace = workspace
         self.mark = "__UNI_" + uuid.uuid4().hex + "__"
 
         # PowerShell 7 if it is there, else the 5.1 that ships with Windows.
@@ -464,21 +504,46 @@ class _WindowsTerminal:
         every statement resets it. $LASTEXITCODE is the exit code of the last
         native .exe and is null until one has run, so the two are combined: a
         cmdlet that failed has $? false and no exit code, which is a 1.
+
+        THE MARKER IS BUILT FROM TWO HALVES AND NEVER TYPED WHOLE. A console
+        echoes back everything written to it and, unlike a pty, there is no
+        ECHO flag to turn off. Writing the marker literally meant this very
+        line came straight back with the marker in it - read_until matched THAT
+        instead of the prompt, _unecho then stripped the line it had matched,
+        and the read returned empty while the real prompt marker stayed in the
+        buffer. Every command afterwards read the previous command's marker:
+        the first two results came back as "(the command ran successfully but
+        printed nothing)" and every one after that was the output of the
+        command before it. Split in half, no line ever contains the whole
+        string, so the only thing that can match is the prompt itself.
         """
+        head, tail = self.mark[:10], self.mark[10:]
+        # $global: so the prompt function can still see it - a function reads
+        # the enclosing scope, but a profile that runs in its own scope would
+        # otherwise be able to shadow it.
         prompt = (
             "function prompt { $o=$?; $c=$LASTEXITCODE; "
             "if ($null -eq $c) { $c = 0 }; "
             "if (-not $o -and $c -eq 0) { $c = 1 }; "
-            '"`n' + self.mark + '$c`n" }'
+            '"`n$($global:UNIMARK)$c`n" }'
         )
         self.write("Remove-Module PSReadLine -ErrorAction SilentlyContinue; "
-                   "$ProgressPreference='SilentlyContinue'; " + prompt + "\n")
+                   "$ProgressPreference='SilentlyContinue'; "
+                   "$global:UNIMARK = '" + head + "' + '" + tail + "'; "
+                   + prompt + "\n")
         self.read_until(self.mark, time.monotonic() + 5)
 
         # Now the user's own profile, the way _source_user_env does on POSIX,
         # then the prompt again in case the profile replaced it.
         self.write("if (Test-Path $PROFILE) { . $PROFILE }; " + prompt + "\n")
         self.read_until(self.mark, time.monotonic() + 10)
+
+        # Start where the work is, the same as the POSIX terminal does - a
+        # workspace that doesn't set the shell's directory isn't a workspace.
+        if self.workspace is not None:
+            self.write("Set-Location -LiteralPath "
+                       + _ps_quote(self.workspace.root) + "\n")
+            self.read_until(self.mark, time.monotonic() + 10)
 
     # --- the shared interface --------------------------------------------
 
@@ -558,12 +623,24 @@ def _reap():
             del _SESSIONS[key]
 
 
-def _session(chat_id):
-    """This chat's terminal, opening one if it hasn't got a live one."""
+def _key(chat_id, workspace):
+    """What a terminal is filed under: the chat AND the workspace it is in.
+
+    Both, because a chat that switches workspace has to get a different shell -
+    the old one is a bash on the old machine, sitting in a directory that may
+    not exist on this one. Keying on the chat alone would hand it straight back
+    and every command after the switch would quietly run in the old place."""
+    return (chat_id, getattr(workspace, "id", "") or "")
+
+
+def _session(chat_id, workspace=None):
+    """This chat's terminal in this workspace, opening one if it hasn't got a
+    live one."""
     _reap()
-    term = _SESSIONS.get(chat_id)
+    key = _key(chat_id, workspace)
+    term = _SESSIONS.get(key)
     if term is None or not term.alive():
-        term = _SESSIONS[chat_id] = _Terminal()
+        term = _SESSIONS[key] = _Terminal(workspace)
     term.used = time.monotonic()
     return term
 
@@ -642,7 +719,7 @@ def _finish(term, raw, done):
     return _report(_exit_code(raw, term.mark), output)
 
 
-def _oneshot(command, timeout):
+def _oneshot(command, timeout, workspace=None):
     """No chat_id, so there is no conversation for a terminal to belong to -
     run it the old way, in a throwaway shell. Cron jobs and anything calling
     the tool directly still work exactly as they did."""
@@ -652,6 +729,18 @@ def _oneshot(command, timeout):
 
     print("\n[terminal] wants to run:")
     print("    " + command)
+
+    if workspace is not None and workspace.is_remote:
+        # One command, one ssh round trip, on the connection the workspace
+        # already keeps open. Backgrounding is left to the remote shell here:
+        # there is no local process to hold onto, so the "&" means what it
+        # means over there.
+        print("    " + workspace.where)
+        try:
+            code, out = workspace.run(command, timeout=timeout or DEFAULT_TIMEOUT)
+        except Exception as e:
+            return "ERROR: " + str(e)
+        return _report(code, _cap(_clean(out)))
 
     # POSIX only: on Windows "&" is cmd's command separator, not backgrounding,
     # so stripping it off would change what the command means.
@@ -680,6 +769,8 @@ def _oneshot(command, timeout):
         result = subprocess.run(
             command, shell=True, capture_output=True, text=True,
             timeout=timeout or DEFAULT_TIMEOUT,
+            # A local workspace still decides where a one-shot command runs.
+            cwd=(workspace.root if workspace is not None else None),
         )
     except subprocess.TimeoutExpired as e:
         # Hand back what it managed before the timeout rather than nothing -
@@ -710,26 +801,37 @@ _ATEXIT_DONE = True
 
 
 def run(command=None, chat_id=None, timeout=None, input=None, reset=False,
-        background=False):
+        background=False, workspace=None):
     """Run `command` in this chat's terminal and return what it printed.
 
     chat_id is filled in by tool_processor, never by the model - it is what
-    keeps one chat's terminal separate from another's. `input` answers a
-    command that is still waiting (a password, a y/N). With neither, we read
-    whatever new output has appeared, which is how a slow command gets
-    followed. Without a chat_id at all we fall back to a one-shot shell."""
+    keeps one chat's terminal separate from another's. workspace arrives the
+    same way and decides WHERE the shell is: a directory on this machine, or a
+    bash on another machine over ssh. `input` answers a command that is still
+    waiting (a password, a y/N). With neither, we read whatever new output has
+    appeared, which is how a slow command gets followed. Without a chat_id at
+    all we fall back to a one-shot shell."""
+    if workspace is not None and workspace.is_remote and WINDOWS:
+        # The Windows terminal is built around PowerShell's own prompt
+        # function for its marker, and a remote bash under it would have no
+        # working marker at all - every result would be the previous command's
+        # output. Better to say so plainly than to return convincing nonsense.
+        return ("ERROR: remote workspaces need the Uniagent server to be on "
+                "Linux or macOS - this one is on Windows. Files still work over "
+                "ssh; it is only the terminal that cannot open a remote shell "
+                "from here.")
     if chat_id is None:
-        return _oneshot(command, timeout)
+        return _oneshot(command, timeout, workspace)
 
     if reset:
-        term = _SESSIONS.pop(chat_id, None)
+        term = _SESSIONS.pop(_key(chat_id, workspace), None)
         if term is not None:
             term.close()
         if command is None and input is None:
-            _session(chat_id)
+            _session(chat_id, workspace)
             return "(terminal closed and reopened - fresh shell, fresh directory)"
 
-    term = _session(chat_id)
+    term = _session(chat_id, workspace)
     deadline = time.monotonic() + (timeout or DEFAULT_TIMEOUT)
 
     # Answering something that is waiting - a password, a y/N, a line for a REPL.
