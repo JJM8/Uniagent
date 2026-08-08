@@ -13,16 +13,46 @@ import main
 
 NAME = "uniagent_command"
 
-DESCRIPTION = "Execute Uniagent slash commands: /model, /stop, /history, /chats, /load, /new, /help"
+# This DESCRIPTION does the real teaching, not INSTRUCTIONS below it. A tool
+# with a SCHEMA is sent to the model as a native tool definition carrying its
+# name, this description and its schema - and NOTHING else (see
+# tool_processor.tools_schema). The INSTRUCTIONS are only ever seen if something
+# goes and reads this file, which for a schema'd tool the model has no reason to
+# do. So everything it must know to use /workspace correctly - above all what a
+# workspace IS - has to be here, in the few hundred characters it is actually
+# given. The system prompt carries the other half: which workspaces exist right
+# now, with their devices and paths (see workspace.describe).
+DESCRIPTION = (
+    "Run a Uniagent slash command. Most important: /workspace, which CHANGES WHICH "
+    "DEVICE AND DIRECTORY THIS CHAT WORKS ON. A workspace is one saved place to work - "
+    "a computer, and a root directory on it. Whichever workspace this chat is in "
+    "decides, for every tool call you make, which machine read_file/write_file/"
+    "edit_file/ask_file read and write on, which machine the terminal's commands "
+    "actually run on, and what a relative path means. A workspace on another device is "
+    "reached over ssh and is real: there, `ls` lists THAT device's files and a file you "
+    "write lands on THAT device's disk, not on the machine running Uniagent - and "
+    "Uniagent's own folder (memories/, context/, skills/) is not reachable from there. "
+    "So whenever the user means another of their devices - \"what's on my phone\", "
+    "\"check the logs on the Pi\", \"is it still running on the server\" - move this "
+    "chat there first with /workspace <id> and then do the work, instead of answering "
+    "from the machine you happen to be on. They need not say the word \"workspace\". "
+    "The system prompt lists every workspace that exists with its device and path; "
+    "\"/workspace\" with no name lists them too, and it can only move between those - "
+    "it cannot create one. Moving affects this chat only, applies from your next tool "
+    "call, and lasts until changed. Other commands: /model, /stop, /history, /chats, "
+    "/load, /new, /help.")
 
 INSTRUCTIONS = """
 HOW TO CALL: use the tool-call syntax already given to you, with tool name "uniagent_command". Do not explain what you are doing first.
 
 Arguments:
-- command: the slash command to execute, e.g. "/model bedrock haiku",
-           "/history", "/stop".
+- command: the slash command to execute, e.g. "/workspace pi", "/model bedrock
+           haiku", "/history", "/stop".
 
 Supported commands:
+- /workspace - list the workspaces and show which one this chat is in
+- /workspace <name> - move this chat to that workspace (its id or its name)
+- /workspace default - move it back to the default workspace
 - /model [provider] [model] - switch model
 - /history - show chat history
 - /chats - list saved chats
@@ -30,6 +60,51 @@ Supported commands:
 - /new - start new chat
 - /stop - stop current turn
 - /help - show help
+
+WHAT A WORKSPACE IS - READ THIS, IT DECIDES WHERE YOUR TOOLS ACT.
+
+A workspace is one saved place to work: A DEVICE and A DIRECTORY on it. This
+chat is in exactly one of them at a time, and that one workspace decides, for
+every tool call you make:
+- WHICH COMPUTER read_file, write_file, edit_file and ask_file read and write
+  on, and
+- WHICH COMPUTER the terminal's commands actually run on, and
+- WHICH DIRECTORY a relative path like "notes.md" or "src/" means.
+
+A workspace on another device is reached over ssh and is completely real: with
+this chat in it, `ls` lists that device's files, a file you write lands on that
+device's disk, and a process you start runs on that device. Nothing you do
+touches the machine Uniagent itself is running on. The reverse is just as true -
+while this chat is on another device, Uniagent's own folder (memories/,
+context/, skills/, tools/) is NOT reachable, because that folder is on the
+Uniagent machine. To read or write a memory from elsewhere, move to the Uniagent
+folder workspace, do it, and move back.
+
+You are told at the top of every turn which workspace this chat is in and which
+others exist - names, devices and paths. Read that before assuming where you
+are. If you are unsure, run "/workspace" with no name and it lists them.
+
+WHEN TO MOVE. Whenever the user means another one of their devices, move there
+first and then do the work. "What's in my downloads on the phone", "check the
+logs on the Pi", "is the server still running on the NAS", "build the site in my
+projects folder" - each of those is a workspace, and the user does NOT have to
+say the word "workspace" for it to be one. Naming any device they have saved is
+the request to work on it. Do not answer such a question from the device you
+happen to be on, do not guess what is on the other machine, and do not tell the
+user to go and look themselves - move and find out.
+
+HOW MOVING BEHAVES. It takes effect from your very next tool call, it affects
+this chat only, and it stays until changed again - so move once, do the work
+there, and move back when the work is genuinely somewhere else again. Do not
+flip back and forth mid-task. The terminal gets a fresh shell in the new place,
+so anything open in the old one (a running process, an activated venv, a
+directory you had cd'd into) is left behind there. The reply tells you whether
+the device is actually reachable; if it is not, say so plainly rather than
+retrying blindly.
+
+IT CANNOT CREATE ONE. Only the workspaces already saved exist. If the place the
+user means is not in the list, say so and let them add it on the settings page -
+it needs a path and, for another device, ssh access already set up.
 """
 
 # For native provider tool-calling.
@@ -37,7 +112,11 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "command": {"type": "string", "description":
-            "The slash command to execute, e.g. \"/model bedrock haiku\", \"/history\", \"/stop\"."},
+            "The slash command to execute. \"/workspace <id>\" moves this chat to "
+            "another saved device and directory - every file tool and the terminal "
+            "then act THERE, so use it whenever the user means another of their "
+            "machines; bare \"/workspace\" lists them. Also e.g. \"/model bedrock "
+            "haiku\", \"/history\", \"/stop\"."},
     },
     "required": ["command"],
 }
@@ -57,9 +136,15 @@ def run(command):
     
     # Against THIS turn's own chat, not whatever the terminal is sitting in:
     # turn_chat() is the conversation the model calling this tool is having, so
-    # /model and /stop here mean the chat the model is actually in. Commands
-    # answer as (reply, goto); nothing can navigate from inside a tool call -
-    # there is no window here to move - so only the reply is passed back.
+    # /model, /workspace and /stop here mean the chat the model is actually in.
+    # Commands answer as (reply, goto); nothing can navigate from inside a tool
+    # call - there is no window here to move - so only the reply is passed back.
+    #
+    # by_user=False because this IS the model, not a person typing. The only
+    # thing it changes is /workspace: a move the user makes is written into the
+    # history as a note for the model to read, and a move made here needs no
+    # such note - the reply below is already coming back to it as the result of
+    # its own call.
     chat = main.chat(main.turn_chat())
-    reply, _ = command_processor.process(command, chat)
+    reply, _ = command_processor.process(command, chat, by_user=False)
     return reply

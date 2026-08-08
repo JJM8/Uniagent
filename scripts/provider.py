@@ -2775,7 +2775,7 @@ def builtin_workspace(is_default=True):
     return {"id": BUILTIN_WORKSPACE_ID,
             "name": "Uniagent folder",
             "path": str(Path(__file__).resolve().parent.parent),
-            "ssh": "", "port": 0,
+            "ssh": "", "port": 0, "key": "",
             "default": bool(is_default),
             # The one flag the others never carry. The settings page reads it
             # to know this row has no remove button and nothing to edit.
@@ -2823,6 +2823,10 @@ def _normalize_workspace(entry):
         port = int(entry.get("port") or 0)
     except (TypeError, ValueError):
         port = 0
+    # The private key file, on THIS machine - it is what this end logs in with,
+    # so unlike "path" it is expanded here whether the workspace is remote or
+    # not. Empty means "work it out", which is the usual case.
+    key = str(entry.get("key") or "").strip()
     return {
         "id": wsid,
         "name": name or wsid,
@@ -2832,6 +2836,7 @@ def _normalize_workspace(entry):
         "path": str(Path(path).expanduser()) if not ssh else path,
         "ssh": ssh,
         "port": port if 1 <= port <= 65535 else 0,
+        "key": str(Path(key).expanduser()) if key else "",
         "default": bool(entry.get("default")),
     }
 
@@ -2920,11 +2925,15 @@ def save_workspaces(entries):
                 "ssh": w.get("ssh", ""), "default": is_default}
         if w.get("port"):
             item["port"] = int(w["port"])
+        # Only written when set, so an .env that never needed one stays as
+        # short as it was.
+        if w.get("key"):
+            item["key"] = w["key"]
         clean.append(item)
     set_env(WORKSPACE_VAR, json.dumps(clean, separators=(",", ":")) if clean else "")
 
 
-def save_workspace(name, path, ssh="", port=0, wsid=None, default=False):
+def save_workspace(name, path, ssh="", port=0, wsid=None, default=False, key=""):
     """Add a workspace, or update the one with this id.
 
     Raises ValueError with a sentence worth showing on anything the settings
@@ -2934,6 +2943,7 @@ def save_workspace(name, path, ssh="", port=0, wsid=None, default=False):
     name = (name or "").strip()
     path = (path or "").strip()
     ssh = (ssh or "").strip()
+    key = (key or "").strip()
     if not name:
         raise ValueError("a workspace needs a name.")
     if not path:
@@ -2949,6 +2959,19 @@ def save_workspace(name, path, ssh="", port=0, wsid=None, default=False):
         raise ValueError("a port has to be between 1 and 65535.")
     if port and not ssh:
         raise ValueError("a port only means something with an ssh destination.")
+    if key and not ssh:
+        raise ValueError("an ssh key only means something with an ssh destination.")
+    if key:
+        key = str(Path(key).expanduser())
+        # Caught here rather than at connection time: a typo in a key path
+        # otherwise surfaces as "permission denied" on the next turn, which
+        # sends you looking at the far machine for a problem that is on this
+        # one.
+        if not Path(key).is_file():
+            raise ValueError("there is no key file at " + key + ".")
+        if key.endswith(".pub"):
+            raise ValueError("that is the public half - Uniagent needs the private key, "
+                             "which is the same path without the .pub.")
 
     entries = _saved_workspaces()
     wsid = (wsid or "").strip().lower()
@@ -2971,6 +2994,7 @@ def save_workspace(name, path, ssh="", port=0, wsid=None, default=False):
     target["path"] = str(Path(path).expanduser()) if not ssh else path
     target["ssh"] = ssh
     target["port"] = port
+    target["key"] = key
     if default:
         for w in entries:
             w["default"] = (w is target)
@@ -3012,65 +3036,10 @@ def delete_workspace(wsid):
     save_workspaces(left)
 
 
-# --- Model I/O log. A debugging aid: every request that goes through
-# stream_response writes its full prompt and full reply here, one block per
-# call, separated so each input/output pair is readable on its own. Set
-# UNIAGENT_IO_LOG=0 to turn it off. ---
-IO_LOG_FILE = Path(__file__).parent.parent / "model_io.log"
-_SEP = "=" * 100
-
-
-def _prompt_text(prompt):
-    """`prompt` as readable text for the I/O log. A plain string passes
-    through; a messages list is shown one message per line, tagged with its
-    role (and flagged if it carries tool_calls) - readable at a glance instead
-    of one giant list-of-dicts repr."""
-    if isinstance(prompt, str):
-        return prompt
-    lines = []
-    for m in prompt:
-        tag = m.get("role", "?")
-        if m.get("tool_calls"):
-            tag += "+tool_calls"
-        lines.append("[" + tag + "] " + (m.get("content") or ""))
-    return "\n".join(lines)
-
-
-def _io_log(provider, model, temperature, prompt, output, error=None):
-    """Append one request/response block to the model I/O log. Never raises -
-    a logging failure must not take down a real request."""
-    if os.environ.get("UNIAGENT_IO_LOG") == "0":
-        return
-    try:
-        prompt_text = _prompt_text(prompt)
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        with IO_LOG_FILE.open("a", encoding="utf-8") as f:
-            f.write(_SEP + "\n")
-            f.write(f"[{ts}] provider={provider} model={model} "
-                    f"temperature={temperature}\n")
-            f.write(f"prompt: {len(prompt_text)} chars | output: {len(output)} chars"
-                    + (f" | ERROR: {error}" if error else "") + "\n")
-            f.write("-" * 40 + " INPUT (full prompt sent to model) " + "-" * 25 + "\n")
-            f.write(prompt_text + "\n")
-            f.write("-" * 40 + " OUTPUT (full reply from model) " + "-" * 28 + "\n")
-            f.write(output + "\n")
-            f.write(_SEP + "\n\n")
-    except OSError:
-        pass
-
-
-def _logged(provider, model, prompt, temperature, call, usage=None, tools=None, tool_call=None,
-            reasoning=None, on_call_delta=None):
-    """Wrap a provider's streaming generator so the whole exchange lands in the
-    I/O log. yields the pieces through untouched; the finally runs on every
-    exit - normal end, an exception, or the consumer breaking early (which
-    main.py does at the first tool call) - so the output captured is whatever
-    actually reached the caller. `usage`, if given, is the same dict handed
-    to `call` - it fills in as the provider's own real events report it, so
-    it's readable by the caller once the generator is done (or even partway
-    through, for whichever field has arrived so far). `tool_call` works the
-    same way, for a native provider tool-call instead of token counts, as does
-    `reasoning` for a thinking model's reasoning_content.
+def _guarded(model, prompt, temperature, call, usage=None, tools=None, tool_call=None,
+             reasoning=None, on_call_delta=None):
+    """Wrap a provider's streaming generator so a stopped turn stops it. Yields
+    the pieces through untouched.
 
     Every provider's stream passes through here, which makes it the one place
     that can guarantee a stopped turn produces nothing further no matter WHICH
@@ -3078,22 +3047,17 @@ def _logged(provider, model, prompt, temperature, call, usage=None, tools=None, 
     cancellation to the wires that don't go through _sse (Bedrock's boto3
     stream, claude-subscription's SDK), and it holds for any provider added
     later. _stream_post is what makes it immediate on top of that; this is the
-    floor underneath it."""
-    pieces = []
-    error = None
-    try:
-        for piece in call(model, prompt, temperature, usage=usage, tools=tools,
-                          tool_call=tool_call, reasoning=reasoning,
-                          on_call_delta=on_call_delta):
-            turnctx.check()
-            pieces.append(piece)
-            yield piece
+    floor underneath it.
+
+    `usage`, `tool_call` and `reasoning` are passed straight through to the
+    provider function, which fills them in place as its own events report them
+    - token counts, a native tool call, a thinking model's reasoning_content."""
+    for piece in call(model, prompt, temperature, usage=usage, tools=tools,
+                      tool_call=tool_call, reasoning=reasoning,
+                      on_call_delta=on_call_delta):
         turnctx.check()
-    except Exception as e:
-        error = e
-        raise
-    finally:
-        _io_log(provider, model, temperature, prompt, "".join(pieces), error)
+        yield piece
+    turnctx.check()
 
 
 def stream_response(prompt, provider=PROVIDER, model=MODEL, temperature=TEMPERATURE,
@@ -3128,9 +3092,9 @@ def stream_response(prompt, provider=PROVIDER, model=MODEL, temperature=TEMPERAT
     require of any turn that made a tool call - see _REASONING_KEY."""
     for p in providers():
         if p["name"] == provider:
-            return _logged(provider, model, prompt, temperature, p["call"],
-                           usage=usage, tools=tools, tool_call=tool_call,
-                           reasoning=reasoning, on_call_delta=on_call_delta)
+            return _guarded(model, prompt, temperature, p["call"],
+                            usage=usage, tools=tools, tool_call=tool_call,
+                            reasoning=reasoning, on_call_delta=on_call_delta)
     raise ValueError(f"Unknown provider: {provider}")
 
 

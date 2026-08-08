@@ -165,7 +165,7 @@ again after moving the folder, and it points at the new location. `./attach.sh
 --remove` unhooks it, leaving the folder alone.
 
 Two things worth knowing when the folder lives on a stick: everything it writes
-(chats, `model_io.log`) is written to the stick, which is slow on cheap flash;
+(chats, logs) is written to the stick, which is slow on cheap flash;
 and `.env` holds your API keys in plain text, so a lost stick is lost keys. If
 the stick isn't plugged in at boot, the services skip themselves quietly rather
 than restart-looping — plug it in and `systemctl --user start uniagent-server`.

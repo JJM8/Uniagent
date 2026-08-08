@@ -2247,9 +2247,20 @@
           server never types a password, because a password prompt inside a
           background service is a question nobody can answer and a turn that
           hangs forever. Run <b>ssh-copy-id you@machine</b> once from the machine
-          Uniagent is on, and that is the whole setup. The connection is then
-          held open and reused between calls, so reading five files is one
-          handshake rather than five.
+          Uniagent is on, and that is the whole setup. On Linux and macOS the
+          connection is then held open and reused between calls, so reading five
+          files is one handshake rather than five; Windows ssh cannot do that,
+          so it reconnects each time and simply runs a little slower.
+          <br><br>
+          <b>ssh key</b> is almost always best left blank: Uniagent offers the
+          keys in your <b>~/.ssh</b> by name, so a key called something other
+          than <b>id_ed25519</b> is still found. Fill it in when there are
+          several keys and you want a particular one used - then that key is the
+          only one tried. Note that a key loaded into your terminal's
+          <b>ssh-agent</b> is <i>not</i> available to Uniagent: a background
+          service does not share your terminal's agent, which is why a login you
+          can do by hand can still be refused here. A key file on disk always
+          works; an agent is not relied on anywhere.
           <br><br>
           <b>test</b> says whether it can be reached right now - and saving runs
           the same check, so a wrong hostname is caught here rather than in the
@@ -3104,6 +3115,12 @@ function render(text, box = messages, vals = null) {
         // there's no tool_call_id here to match a validation against, so no
         // safety dropdown, same as before.
         toolLine(t.content.slice(13), box);
+      } else if (t.content.startsWith("Workspace changed: ")) {
+        // The chat was moved to another folder or another machine. It is kept
+        // as a user turn so the model reads it the way it reads a tool result
+        // (see main.note_turn) - but nobody typed it, so it is drawn as the
+        // note it is rather than as a message.
+        line("system", t.content, box);
       } else {
         line("user", t.content, box);
       }
@@ -4560,6 +4577,13 @@ events.onmessage = (e) => {
   } else if (ev.type === "report") {
     turnBusy = true;
     line("report", ev.text);
+  } else if (ev.type === "note") {
+    // Something that happened TO this chat rather than in it - it was moved to
+    // another workspace. It is already in the history (the model reads it as a
+    // turn), so this only puts it on screen at the moment it happens instead of
+    // waiting for the next redraw. Not turnBusy: nothing is running because of
+    // it.
+    line("system", ev.text);
   } else if (ev.type === "chunk") {
     if (!streaming) {
       streaming = line("agent", "");
@@ -6507,7 +6531,8 @@ function wsRow(w, pending) {
   const path = rowInput(w.path, "/home/you/projects");
   const ssh = rowInput(w.ssh, "empty for this computer, or you@192.168.1.50");
   const port = rowInput(w.port || "", "22");
-  if (builtin) for (const f of [name, path, ssh, port]) f.disabled = true;
+  const key = rowInput(w.key || "", "usually blank - ~/.ssh/id_ed25519");
+  if (builtin) for (const f of [name, path, ssh, port, key]) f.disabled = true;
   // Which workspace a chat gets when it has never been given one. Same control
   // the email tab uses for its default account, and disabled on the one that
   // already is: there is no "no default", because a chat that follows nothing
@@ -6573,7 +6598,7 @@ function wsRow(w, pending) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id: pending ? "" : w.id, name: name.value, path: path.value,
-          ssh: ssh.value, port: Number(port.value) || 0,
+          ssh: ssh.value, port: Number(port.value) || 0, key: key.value,
           // Already the default, or being made one here. save_workspace()
           // clears it off whichever one held it, so there is only ever one.
           default: isDefault || preferred.value === "yes",
@@ -6612,7 +6637,8 @@ function wsRow(w, pending) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: name.value, path: path.value,
-                               ssh: ssh.value, port: Number(port.value) || 0 }),
+                               ssh: ssh.value, port: Number(port.value) || 0,
+                               key: key.value }),
       });
       const out = await r.json();
       say(out.message, !out.ok);
@@ -6707,11 +6733,13 @@ function wsRow(w, pending) {
   const ssh_row = document.createElement("div");
   ssh_row.className = "cron-grid";
   const portField = rowField("ssh port", port);
-  ssh_row.append(rowField("ssh (blank = this computer)", ssh), portField);
-  // A port only means something with an ssh destination, and on a local
-  // workspace it is a box that cannot do anything. It appears when it can.
+  const keyField = rowField("ssh key (blank = find it)", key);
+  ssh_row.append(rowField("ssh (blank = this computer)", ssh), portField, keyField);
+  // A port and a key only mean something with an ssh destination, and on a
+  // local workspace they are boxes that cannot do anything. They appear when
+  // they can.
   function syncPortField() {
-    portField.hidden = !ssh.value.trim();
+    portField.hidden = keyField.hidden = !ssh.value.trim();
   }
   ssh.addEventListener("input", syncPortField);
   syncPortField();
@@ -6746,7 +6774,7 @@ async function loadWorkspaces() {
 }
 
 document.getElementById("ws-add").addEventListener("click", () => {
-  wsPending.push({ id: "", name: "", path: "", ssh: "", port: 0 });
+  wsPending.push({ id: "", name: "", path: "", ssh: "", port: 0, key: "" });
   drawWorkspaces();
   const rows = wsList.querySelectorAll(".email-account");
   const last = rows[rows.length - 1];

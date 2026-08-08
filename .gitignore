@@ -90,9 +90,8 @@ experiments/
 # running, and it is about THIS install's switched-off bundles. See update.py.
 update_state.json
 
-# Logs. model_io.log in particular is every prompt and reply, in full.
+# Logs.
 *.log
-model_io.log
 nohup.out
 scripts/nohup.out
 

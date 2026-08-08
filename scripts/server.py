@@ -644,8 +644,12 @@ def _label_from(path):
         if not isinstance(t, dict) or t.get("role") != "user":
             continue
         content = t.get("content") or ""
+        # Three kinds of user turn nobody typed: a subagent's report, a tool
+        # result kept as one, and a note about the chat itself (a workspace
+        # move). None of them is what this chat is about.
         if content and not content.startswith("Subagent ") \
-                and not content.startswith("Tool result: "):
+                and not content.startswith("Tool result: ") \
+                and not content.startswith(main.WORKSPACE_NOTE):
             return content[:80]
     return ""
 
@@ -1062,8 +1066,9 @@ def _workspaces():
     with nothing set falls back to.
 
     No secrets here to withhold, unlike the email and provider tabs - a
-    workspace is a path and a hostname. The ssh key it uses is the user's own,
-    already on this machine, and Uniagent neither stores nor sees it."""
+    workspace is a path, a hostname, and at most the path to a key file. The
+    key itself is the user's own, already on this machine; Uniagent records
+    where it is and never reads or copies the thing."""
     all_ws = provider.workspaces()
     default = provider.default_workspace()
     return {"workspaces": all_ws,
@@ -1913,8 +1918,8 @@ class Handler(BaseHTTPRequestHandler):
         GET /email. That's the entire reason this is an endpoint the settings
         page posts to, rather than a tool the agent could call: a tool's
         arguments are part of the conversation, so setting an account up that
-        way would copy the password into the history file on disk, into
-        model_io.log, and into a request to whichever provider is configured.
+        way would copy the password into the history file on disk and into a
+        request to whichever provider is configured.
 
         Answers with the refreshed account list and the result of actually
         signing in, so a typo in an app password is caught here and now.
@@ -2049,6 +2054,7 @@ class Handler(BaseHTTPRequestHandler):
                 path=str(body.get("path", "")),
                 ssh=str(body.get("ssh", "")),
                 port=body.get("port") or 0,
+                key=str(body.get("key", "")),
                 wsid=str(body.get("id", "")).strip(),
                 default=bool(body.get("default")))
         except ValueError as e:
@@ -2082,7 +2088,8 @@ class Handler(BaseHTTPRequestHandler):
             ws = workspace.Workspace({"id": "", "name": str(body.get("name") or "this one"),
                                       "path": str(body.get("path", "")),
                                       "ssh": str(body.get("ssh", "")),
-                                      "port": body.get("port") or 0})
+                                      "port": body.get("port") or 0,
+                                      "key": str(body.get("key", ""))})
         ok, message = ws.check()
         self._send(json.dumps({"ok": ok, "message": message}), "application/json")
 
@@ -2127,7 +2134,13 @@ class Handler(BaseHTTPRequestHandler):
         Written to the chat's own settings.json, not to any global: two chats
         open side by side can be working on two different machines, which is
         most of the point. An empty id means "follow the default", which is
-        how a chat goes back to being unpinned."""
+        how a chat goes back to being unpinned.
+
+        The move is also written into the chat's history as a note the model
+        reads on its next pass (main.workspace_note) - the same thing
+        /workspace does, because it is the same event. Without it the agent
+        carries on believing it is where it was, mid-turn most of all, which is
+        exactly when the picker gets used."""
         body = self._body()
         if not isinstance(body, dict):
             self._send("expected a JSON object", code=400)
@@ -2140,14 +2153,25 @@ class Handler(BaseHTTPRequestHandler):
         if c is None:
             self._send("no chat to set a workspace on", code=400)
             return
-        c.workspace = wsid or None
+        # Where it was working, resolved BEFORE the write - a chat that was
+        # following the default was already working somewhere, and pinning it
+        # to that same workspace moves nothing.
+        was = workspace.get(c.workspace)
         try:
-            c._write_settings()
+            c.set_workspace(wsid)
         except OSError as e:
             self._send("could not save: " + str(e), code=500)
             return
         ws = workspace.get(wsid)
         ok, message = ws.check()
+        # Only when it actually moved: re-picking the workspace a chat is
+        # already in is not an event, and a note for it would be noise in the
+        # transcript and a wasted turn in the next request.
+        if ws.id != was.id:
+            note = main.workspace_note(c, ws, ok, message, following_default=not wsid)
+            # So the window that switched - and any other watching this chat -
+            # draws the note now, rather than only on its next redraw.
+            _broadcast({"type": "note", "chat": c.route, "text": note})
         # The page redraws its dropdown from this rather than from what it
         # sent, so a chat that was minted by this very request comes back with
         # the id it was given.

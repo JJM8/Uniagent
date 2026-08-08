@@ -118,7 +118,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 def _install_provider(url):
     """Wire the stand-in in the way a real provider is wired, so every layer
-    stays under test: _logged wraps the generator, _openai_style makes the
+    stays under test: _guarded wraps the generator, _openai_style makes the
     request through _stream_post, _sse reads it under the turn's watch."""
 
     def call(model, prompt, temperature=0, usage=None, tools=None, tool_call=None,
@@ -273,7 +273,7 @@ def run():
     #    thrown away, so the chat comes free just as fast.
     at_tool = threading.Event()
 
-    def slow_tool(call, chat_id=None):
+    def slow_tool(call, chat_id=None, workspace_id=None):
         at_tool.set()
         time.sleep(600)
         return "unreachable"

@@ -736,7 +736,8 @@ def _chat_label(path):
             said = json.loads('"' + m.group(1) + '"')
         except json.JSONDecodeError:
             continue
-        if said and not said.startswith(("Subagent ", "Tool result: ", main.MID_TURN)):
+        if said and not said.startswith(("Subagent ", "Tool result: ", main.MID_TURN,
+                                         main.WORKSPACE_NOTE)):
             return " ".join(said.split())[:90]
     return ""
 
@@ -816,6 +817,12 @@ def transcript(chat, keep=30):
             said = content[len(main.MID_TURN):] if content.startswith(main.MID_TURN) else content
             if said.startswith("Tool result: "):
                 continue  # an older chat's tool result, kept as a user turn
+            if said.startswith(main.WORKSPACE_NOTE):
+                # The chat being moved to another workspace: a user turn so the
+                # model reads it (see main.note_turn), but not a line anybody
+                # typed - drawn as the aside it is.
+                out += [DIM + ITAL + "  " + " ".join(said.split()) + RESET, ""]
+                continue
             out += user_line(said) + [""]
         elif role == "tool":
             out += _result_block(content) + [""]

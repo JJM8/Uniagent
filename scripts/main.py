@@ -164,6 +164,13 @@ MAX_BAD_JSON = 5       # how many times to ask the model to fix a broken tool ca
 # question the model never asked.
 MID_TURN = "The user sent this while you were working, mid-task: "
 
+# What labels a note about something that HAPPENED to the conversation rather
+# than something anybody said in it - today, the chat being moved to another
+# workspace. It goes into the history as a user turn (see note_turn), so the
+# prefix is what lets the front-ends draw it as a note instead of as a line the
+# user typed, and what keeps it out of a chat's sidebar label.
+WORKSPACE_NOTE = "Workspace changed: "
+
 # Function/arrow keys reach the terminal as escape sequences (F2 is \x1bOQ or
 # \x1b[12~). pynput watches keys globally but doesn't swallow them, so holding
 # F2 to talk also drops its escape sequence into whatever you were typing.
@@ -444,6 +451,19 @@ class Agent:
         self.safety_prompt = prompt
         self._write_settings()
 
+    def set_workspace(self, wsid):
+        """Move this agent to a workspace - the id of one out of WORKSPACES in
+        .env, or None to follow whichever is the default. Written into its own
+        settings .json like every other per-chat setting, so it sticks to the
+        chat and survives a restart, and read back by reload_model() at the top
+        of every turn.
+
+        Only the id is stored - never the root or the ssh destination behind it.
+        Those are config that can change under a chat filed here months ago (see
+        the SETTINGS_KEYS note on `workspace`)."""
+        self.workspace = wsid or None
+        self._write_settings()
+
     def set_started(self, when):
         """Record when this chat's cron run fired, in its settings .json. Only
         cron.new_run() calls it, once, on a chat it has just created."""
@@ -570,8 +590,9 @@ def open_agent(cid):
 def live_workspace(chat_id, fallback=None):
     """The workspace this chat is in RIGHT NOW, not when its turn started.
 
-    A turn is not an instant: set_workspace can move the chat half way through
-    one, and every tool call after that has to land in the new place. Reading
+    A turn is not an instant: /workspace, or the picker in the corner of the
+    chat window, can move the chat half way through one, and every tool call
+    after that has to land in the new place. Reading
     the id once at the top of run() meant the move was written, reported, and
     then ignored until the next message - so the model would say "moved to the
     Pi", run the next command on the machine it had just left, and be telling
@@ -579,7 +600,7 @@ def live_workspace(chat_id, fallback=None):
     have: everything says it worked.
 
     Off the open Agent rather than off its .json, because that object IS the
-    chat while a turn is running and set_workspace writes through it. `_open`
+    chat while a turn is running and every mover writes through it. `_open`
     is keyed by the same flat id tools are handed, so no path juggling here -
     and a chat that somehow isn't open falls back to what the turn began with.
     """
@@ -1750,9 +1771,24 @@ def memories_text():
         # project fact goes - said only once there is already a file here, it
         # can never write the first one, and every project fact it learns
         # either lands in the always-injected memory file or is lost.
+        # The path is qualified by the WORKSPACE it is in, not left as a bare
+        # absolute path. A bare one reads as "on the computer you are working
+        # on", which is only true while the chat happens to be in the Uniagent
+        # folder: a chat moved to a phone or a Pi would look for memories over
+        # THERE, find nothing, and quietly conclude it had none. The memories
+        # live with Uniagent itself, and saying which workspace that is also
+        # says how to get to them from anywhere else.
         text = (
-            "Memories: individual topic files, one per file, living in "
-            + str(MEMORIES) + " - NOT loaded automatically, unlike context/. "
+            "Memories: individual topic files, one per file, kept with Uniagent "
+            "itself - in the '" + provider.BUILTIN_WORKSPACE_ID + "' workspace, at "
+            + str(MEMORIES) + " on the machine running Uniagent. That is NOT "
+            "necessarily the workspace this chat is in: if it is working "
+            "somewhere else - another folder, or another device - that path does "
+            "not exist there, so move this chat to '"
+            + provider.BUILTIN_WORKSPACE_ID + "' first with the uniagent_command "
+            "tool (/workspace " + provider.BUILTIN_WORKSPACE_ID + "), read or "
+            "write the memory, then move back to where you were working. "
+            "Memories are NOT loaded automatically, unlike context/. "
             "If what's being discussed matches one below, or reading it would "
             "help, read that file in full FIRST (read_file or ask_file) before "
             "answering - don't wait to be asked. If something worth keeping "
@@ -1761,8 +1797,9 @@ def memories_text():
             "specific to a project, person, or topic none of these cover - not "
             "a general fact about the user, their computer or this environment, "
             "which belongs in the memory file in context/ - create a new "
-            "file here with write_file: " + str(MEMORIES) + "/<topic>.md, first "
-            "line a short one-line description, so it's listed here next turn."
+            "file with write_file, in that same workspace: " + str(MEMORIES)
+            + "/<topic>.md, first line a short one-line description, so it's "
+            "listed here next turn."
         )
         text += ("\n" + "\n".join(lines)) if lines \
             else "\nThere are no memory files yet - write the first one when a " \
@@ -2150,6 +2187,75 @@ def append_error(c, msg):
     turns.append({"role": "assistant", "content": text})
     c.history = json.dumps(turns, indent=2)
     c.save()
+
+
+def note_turn(c, text):
+    """Record something that happened TO chat `c` into its history, as a user
+    turn the model reads on its next pass.
+
+    A workspace change is the case this exists for. It is not a tool result and
+    nobody typed it, but the model has to be told the same way it is told a
+    tool's result: in the conversation, in a turn that goes back to the provider
+    on every request after it, and kept in the chat file so it is still there
+    tomorrow. A message flashed on the page instead would leave the model
+    working in a place it has no idea it moved to.
+
+    Filed as a "user" turn rather than "system" for the same reason
+    append_error() is an assistant one - provider.py's _compat() strips system
+    turns before anything reaches a provider, so a system turn would be visible
+    on the page and invisible to the model, which is exactly backwards here.
+
+    MID-TURN IS THE NORMAL CASE, not the exception: the workspace is usually
+    changed while the agent is working, which is the whole reason it is worth
+    telling it about. A running turn owns the history - it holds its turns list
+    in memory and rewrites the file after every step (run()'s sync) - so the
+    note is appended to THAT list. Writing the file instead would be overwritten
+    by the turn's next save, and the model would never see it."""
+    ctx = c.slot.context()
+    live = getattr(ctx, "turns", None) if ctx is not None else None
+    if live is not None:
+        # The same list object run() is appending to, published for exactly
+        # this kind of reach-in (see turnctx.TurnContext). The turn writes it
+        # out at its next step and hands it to the model on its next pass.
+        live.append({"role": "user", "content": text})
+        return
+    # Nothing running (or a turn in the instant before it has built its list -
+    # a /compact, which owns the chat but has no turns list of its own, lands
+    # here too and then replaces the history with its summary, so a note left
+    # in that gap is lost. It is a gap of milliseconds against a change made by
+    # hand, and the alternative is holding the chat's slot to write one line).
+    try:
+        turns = json.loads(c.history) if c.history else []
+    except json.JSONDecodeError:
+        # A pre-JSON flat-text chat: no structure to preserve, so append as
+        # text, the same fallback append_error() takes.
+        c.history += text + "\n"
+        c.save()
+        return
+    turns.append({"role": "user", "content": text})
+    c.history = json.dumps(turns, indent=2)
+    c.save()
+
+
+def workspace_note(c, ws, ok=True, message="", following_default=False):
+    """Tell chat `c` - and so the model - that the user has moved it to `ws`.
+    Returns the line written, so the caller can show the same words on screen.
+
+    Said as plainly as possible, because the model has to act on it: every file
+    path and every terminal command from here on lands somewhere else, and if
+    that somewhere else is another machine then what it knows about this one no
+    longer applies. `ok`/`message` are workspace.check()'s answer - an
+    unreachable workspace is worth saying outright rather than leaving the next
+    tool call to discover it."""
+    text = (WORKSPACE_NOTE + "the user moved this chat to " + ws.name
+            + (" (the default workspace)" if following_default else "")
+            + " - " + ws.where + ". Every file tool and the terminal work there "
+            "now, and relative paths are resolved from that root.")
+    if not ok:
+        text += (" It is not reachable at the moment: " + message
+                 + " Say so rather than retrying blindly.")
+    note_turn(c, text)
+    return text
 
 
 def run(text, history, provider_name=None, model=None, temperature=0, approve=_approve,

@@ -32,6 +32,7 @@ import cron
 import main
 import provider
 import settings
+import workspace as workspace_mod
 
 HELP = """commands:
 /help - this list
@@ -48,6 +49,9 @@ HELP = """commands:
 /temperature - show this chat's temperature, and the default
 /temperature <0-2> - set this chat's temperature (0 = most predictable)
 /temperature default - unpin, follow the settings default temperature
+/workspace - show where this chat's files and terminal work, and the alternatives
+/workspace <name> - move this chat to that workspace (its id or its name)
+/workspace default - move it back to the default workspace
 /approve y|n - answer this chat's pending safety check
 /cronsafety - show whether each cron job's tool calls are safety-checked
 /cronsafety <job> on|off - check that job's calls, or don't (writes cron.json)
@@ -410,6 +414,113 @@ def _temperature(arg, chat):
     return "this chat's temperature is now " + _fmt_temp(value) + "."
 
 
+def _workspace_listing(current):
+    """Every configured workspace, with the one this chat is in marked. The
+    list is provider.workspaces() - what the settings page writes and what the
+    picker in the corner of the chat window is filled from - and it is never
+    empty: the Uniagent folder itself is always the first entry."""
+    lines = []
+    for w in provider.workspaces():
+        marks = []
+        if w["id"] == current:
+            marks.append("current")
+        elif not current and w["default"]:
+            marks.append("current - the default")
+        elif w["default"]:
+            marks.append("default")
+        if w["ssh"]:
+            marks.append("on " + w["ssh"])
+        lines.append("  " + w["id"] + " (" + w["name"] + ") - " + w["path"]
+                     + (("  [" + ", ".join(marks) + "]") if marks else ""))
+    return ("workspaces:\n" + "\n".join(lines)
+            + "\n\nmove this chat with /workspace <id or name>.\n"
+            "'/workspace default' moves it back to the default one.\n"
+            "New ones are added on the settings page - this only moves between "
+            "the ones above.")
+
+
+def _workspace(arg, chat, by_user=True):
+    """Show or change WHERE this chat's tools do their work - which folder, and
+    which machine.
+
+    This is a command rather than a tool because it is a thing done TO the
+    conversation, like /model: it changes what the next tool call means instead
+    of being one. The agent still reaches it, through uniagent_command, which is
+    what `by_user` is about - see below.
+
+    Every file tool (read_file, write_file, edit_file, ask_file) and the
+    terminal work inside whichever workspace this chat is in. A remote one means
+    they genuinely run on that machine over ssh: `pwd` in the terminal is a
+    directory over there, and a file written lands on that computer. It takes
+    effect from the very next tool call, in this chat only, mid-turn included -
+    the terminal gets a fresh shell in the new place, so a process left running
+    or a venv activated in the old one stays behind there.
+
+    Bare, it lists the workspaces and marks the one this chat is in. A name or
+    an id moves it; 'default' moves it back to whichever is the default. It
+    cannot CREATE one - that is the settings page's job, since a new workspace
+    needs a path and, for another machine, ssh that is already set up.
+
+    `by_user` is who is doing the moving, and it decides one thing: whether the
+    move is written into the chat's history as a note the model reads (see
+    main.workspace_note). True - the user typed /workspace, so the model has to
+    be told, exactly as it is told a tool's result. False - the model moved
+    itself with uniagent_command, and the reply below IS its tool result, so
+    writing "the user moved this chat" alongside it would be a plain lie."""
+    current = chat.workspace or ""
+
+    if not arg:
+        return _workspace_listing(current)
+
+    wanted = arg.strip().lower()
+    if wanted in ("default", "clear", "unpin"):
+        target = ""
+    else:
+        entries = provider.workspaces()
+        match = next((w for w in entries if w["id"] == wanted), None)
+        if match is None:
+            match = next((w for w in entries if w["name"].strip().lower() == wanted), None)
+        if match is None:
+            return ("there is no workspace called " + arg + ".\n\n"
+                    + _workspace_listing(current))
+        target = match["id"]
+
+    ws = workspace_mod.get(target)
+    was = workspace_mod.get(current)
+    if (target or "") == current:
+        return ("this chat is already in " + ws.name + " - " + ws.where
+                + ". Nothing to do.")
+
+    try:
+        chat.set_workspace(target)
+    except OSError as e:
+        return "could not save the workspace onto this chat: " + str(e)
+
+    # Naming the workspace a chat was already FOLLOWING (or dropping back onto
+    # the very one it was pinned to) changes what it is filed under, not where
+    # the work happens. Saved, but nothing said to the model and nothing
+    # written into the history: a note there would be a lie by implication,
+    # since nothing has moved. No reachability check either - it is the same
+    # machine it was already working on.
+    if was.id == ws.id:
+        return ("this chat " + ("now follows the default workspace, "
+                                if not target else "is now pinned to ")
+                + ws.name + " - which is where it was already working. "
+                "Nothing has moved.")
+
+    # Whether it can actually be reached, said now rather than leaving the next
+    # tool call to be the thing that discovers the machine is off.
+    ok, message = ws.check()
+    if by_user:
+        main.workspace_note(chat, ws, ok, message, following_default=not target)
+    head = ("this chat now works in " + ws.name + " - " + ws.where
+            + ". Files and terminal commands happen there from the next one on.")
+    if not ok:
+        return (head + "\n\nit is NOT reachable at the moment:\n" + message
+                + "\nthe chat has been moved anyway.")
+    return head + "\n" + message
+
+
 def _name(arg, chat):
     """Show or set the title of THE CHAT THIS RAN IN - just this chat.
     Written into its own .json settings file, same as /model and
@@ -529,6 +640,7 @@ COMMANDS = {
     "model": _model,
     "name": _name,
     "temperature": _temperature,
+    "workspace": _workspace,
     "approve": _approve,
     "cronsafety": _cronsafety,
     "stop": _stop,
@@ -543,8 +655,16 @@ COMMANDS = {
 # and every other handler stays a plain function of (arg, chat) -> str.
 NAVIGATION = {"load", "new", "delete"}
 
+# The commands that care WHO ran them, and so take a third argument - the
+# `by_user` process() was given. Only /workspace does today: a move the user
+# made has to be written into the history for the model to read, and a move the
+# model made itself already comes back to it as its own tool result. Kept as a
+# set for the same reason as NAVIGATION - one place normalises the shapes, and
+# every other handler stays a plain function of (arg, chat) -> str.
+ACTOR_AWARE = {"workspace"}
 
-def process(text, chat=None):
+
+def process(text, chat=None, by_user=True):
     """Run a /command against `chat` and return (reply, goto), or None if
     `text` isn't a command at all.
 
@@ -557,14 +677,23 @@ def process(text, chat=None):
     means "there is nowhere left to go", which /delete answers with when it
     has just removed the last chat on disk. The CALLER decides what switching
     means: cli.py moves main.current, server.py hands the id back to the one
-    browser window that asked, and no other window is disturbed."""
+    browser window that asked, and no other window is disturbed.
+
+    `by_user` is whether a person typed this, which is the default and true of
+    every front-end. The one caller that passes False is the uniagent_command
+    tool, where the model is running the command on itself - see ACTOR_AWARE
+    below for the only thing that changes."""
     if not text.startswith("/"):
         return None
     name, _, arg = text[1:].partition(" ")
     handler = COMMANDS.get(name.lower())
     if handler is None:
         return "unknown command /" + name + "\n" + HELP, None
-    result = handler(arg.strip(), chat if chat is not None else main.current)
+    target = chat if chat is not None else main.current
+    if name.lower() in ACTOR_AWARE:
+        result = handler(arg.strip(), target, by_user)
+    else:
+        result = handler(arg.strip(), target)
     # Only the NAVIGATION handlers return the pair; everything else returns the
     # reply on its own and never moves anyone.
     return result if name.lower() in NAVIGATION else (result, None)

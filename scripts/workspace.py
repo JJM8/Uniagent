@@ -20,12 +20,28 @@ BatchMode=yes, which means ssh never prompts. A password prompt in the server
 process would hang a turn forever with nobody able to see the question, so a
 workspace that would need one fails immediately with a message saying so
 instead. Set up `ssh-copy-id` once and it is not thought about again.
+
+AND THE KEY HAS TO BE FOUND WITHOUT AN AGENT. This is the part that bites.
+Uniagent runs as a background service, and a service does not inherit the
+ssh-agent your terminal is talking to - on a desktop Linux session it commonly
+inherits a *different*, empty one. So a key that your shell uses without a
+thought is invisible here, and ssh falls back to the handful of default
+filenames it tries on its own (id_rsa, id_ed25519, ...). A key called anything
+else - id_ed25519_josh, work_key - is then never offered at all, and the far
+end says "Permission denied (publickey)" for a login that plainly works when
+you type it yourself. That is not a broken key, it is a key nobody handed over.
+
+So identities are named explicitly on every command line rather than left to
+the agent: the file on the workspace if one is set, otherwise whatever keys are
+actually sitting in ~/.ssh. Nothing here depends on the environment the service
+happened to start in.
 """
 
 import os
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,6 +66,29 @@ RUN_TIMEOUT = 120
 # workspace usable for a tool that reads five files in a turn.
 SSH_PERSIST = 300
 
+# The identity filenames ssh already tries by itself. Naming these again would
+# only make it attempt the same key twice, so discovery skips them - they are
+# the ones that were never the problem.
+SSH_DEFAULT_KEYS = ("id_rsa", "id_ecdsa", "id_ecdsa_sk", "id_ed25519",
+                    "id_ed25519_sk", "id_xmss", "id_dsa")
+
+# Newest and smallest first when there is a choice, purely so the likeliest key
+# is offered before the others.
+KEY_PREFERENCE = ("ed25519", "ecdsa", "rsa")
+
+# How many discovered keys are offered at most. Every key offered is an
+# authentication attempt, and sshd cuts the connection off after MaxAuthTries
+# (6 by default) - so a drawer full of old keys must not be allowed to burn the
+# budget before the right one is reached.
+MAX_KEYS = 3
+
+# Whether ssh here can multiplex. Win32 OpenSSH has no ControlMaster: the
+# feature is built on unix sockets and simply is not implemented, so passing
+# ControlPath there produces an error on every single connection rather than a
+# faster second one. Windows pays a fresh handshake per call instead, which is
+# slower but works - and working is the requirement.
+CAN_MULTIPLEX = os.name != "nt"
+
 
 class WorkspaceError(RuntimeError):
     """Something went wrong reaching the workspace itself - the host is down,
@@ -69,6 +108,7 @@ class Workspace:
         self.name = cfg.get("name") or "install folder"
         self.ssh = cfg.get("ssh", "")
         self.port = cfg.get("port", 0)
+        self.key = str(cfg.get("key") or "").strip()
         self.root = str(cfg.get("path") or INSTALL_ROOT)
 
     # --- the shape of it ---------------------------------------------------
@@ -76,6 +116,19 @@ class Workspace:
     @property
     def is_remote(self):
         return bool(self.ssh)
+
+    def identities(self):
+        """The private keys this workspace offers, in the order ssh will try
+        them. The key named on the workspace if there is one, otherwise what is
+        actually in ~/.ssh.
+
+        Named rather than left to an agent on purpose - see the module
+        docstring. The service's agent is not your terminal's agent, and a key
+        whose filename is not one of ssh's defaults is invisible without
+        this."""
+        if self.key:
+            return [str(Path(self.key).expanduser())]
+        return _discovered_keys()
 
     @property
     def where(self):
@@ -122,18 +175,34 @@ class Workspace:
             # Never prompt. See the module docstring: an unanswerable prompt in
             # a background service is worse than a clean failure.
             "-o", "BatchMode=yes",
-            # Connection reuse. %C is ssh's own hash of user/host/port, which
-            # keeps the socket path short - a unix socket path is capped near
-            # 104 characters, and a workspace name in there would blow it.
-            "-o", "ControlMaster=auto",
-            "-o", "ControlPath=" + str(_control_dir() / "uniagent-%C"),
-            "-o", "ControlPersist=" + str(SSH_PERSIST),
             "-o", "ConnectTimeout=10",
             # A first connection to a new machine should work without someone
             # having to go and type "yes" at a prompt nobody can see. The key
             # is still pinned from then on, so a later change still fails loudly.
             "-o", "StrictHostKeyChecking=accept-new",
         ]
+        if CAN_MULTIPLEX:
+            # Connection reuse. %C is ssh's own hash of user/host/port, which
+            # keeps the socket path short - a unix socket path is capped near
+            # 104 characters, and a workspace name in there would blow it.
+            argv += [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=" + str(_control_dir() / "uniagent-%C"),
+                "-o", "ControlPersist=" + str(SSH_PERSIST),
+            ]
+        # The keys, named outright. A workspace that sets one means it, so
+        # IdentitiesOnly keeps the agent's keys out of the way rather than
+        # letting them be offered first and spend sshd's attempt budget ahead
+        # of the one that was asked for. It does not silence ~/.ssh/config -
+        # an IdentityFile configured for this host is still a configured
+        # identity and still gets tried, which is the right call: someone who
+        # wrote that line meant it too. Discovered keys get no IdentitiesOnly
+        # at all; they are a guess, so the agent and ssh's defaults stay
+        # welcome alongside them.
+        for identity in self.identities():
+            argv += ["-i", identity]
+        if self.key:
+            argv += ["-o", "IdentitiesOnly=yes"]
         if self.port:
             argv += ["-p", str(self.port)]
         argv += list(options)
@@ -267,15 +336,85 @@ class Workspace:
         return True, "connected to " + self.ssh + " - " + self.root + " is there"
 
 
+def _ssh_dir():
+    return Path.home() / ".ssh"
+
+
+# The discovered key list, kept against the mtime of ~/.ssh so that adding a
+# key is picked up on the next call without re-reading the directory on every
+# one. Scanning a directory per ssh command would be a silly thing to pay for
+# when the answer changes about once a year.
+_keys_cache = (None, [])
+
+
+def _discovered_keys():
+    """Private keys sitting in ~/.ssh, best guess first.
+
+    A private key is identified by its public half being next to it, which is
+    what ssh-keygen always writes and what avoids mistaking config, known_hosts
+    or a stray note for a key. The names ssh already tries by itself are left
+    out - they are found with or without us, and naming them again would just
+    spend an authentication attempt twice."""
+    global _keys_cache
+    directory = _ssh_dir()
+    try:
+        stamp = directory.stat().st_mtime
+    except OSError:
+        # No ~/.ssh at all. Not an error worth raising here: ssh will say so
+        # far more precisely when the connection is actually attempted.
+        return []
+    if _keys_cache[0] == stamp:
+        return _keys_cache[1]
+    found = []
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError:
+        entries = []
+    for pub in entries:
+        if pub.suffix != ".pub":
+            continue
+        private = pub.with_suffix("")
+        if private.name in SSH_DEFAULT_KEYS or not private.is_file():
+            continue
+        found.append(private)
+    found.sort(key=_key_rank)
+    keys = [str(p) for p in found[:MAX_KEYS]]
+    _keys_cache = (stamp, keys)
+    return keys
+
+
+def _key_rank(path):
+    """Sort order for discovered keys: by algorithm, newest family first, then
+    by name so the order is at least stable between runs."""
+    name = path.name.lower()
+    for i, algorithm in enumerate(KEY_PREFERENCE):
+        if algorithm in name:
+            return (i, name)
+    return (len(KEY_PREFERENCE), name)
+
+
 def _ssh_hint(ws, output):
     """An ssh failure turned into something worth reading. The raw text is kept
     on the end, because the specific line ssh printed is usually the answer."""
     text = (output or "").strip()
     low = text.lower()
     if "permission denied" in low or "publickey" in low:
-        hint = ("ssh to " + ws.ssh + " was refused. Uniagent never types a password, "
-                "so this needs key-based login: run  ssh-copy-id " + ws.ssh
-                + "  once from this machine.")
+        offered = ws.identities()
+        if offered:
+            hint = (ws.ssh + " refused the keys Uniagent offered ("
+                    + ", ".join(offered) + "). The public half of one of them has to "
+                    "be in ~/.ssh/authorized_keys over there: run  ssh-copy-id -i "
+                    + offered[0] + ".pub " + ws.ssh + "  once from this machine.")
+        else:
+            hint = ("ssh to " + ws.ssh + " was refused, and Uniagent found no key in "
+                    "~/.ssh to offer. Make one with  ssh-keygen -t ed25519  and send it "
+                    "over with  ssh-copy-id " + ws.ssh + ".")
+        # The case that looks like witchcraft and is worth naming outright,
+        # because the obvious conclusion - "but it works when I type it!" - is
+        # the one that leads nowhere.
+        hint += ("\nIf this same login works in your own terminal, the key is only in "
+                 "your terminal's ssh-agent, which this service does not share. Set "
+                 "the key file on the workspace and it stops depending on that.")
     elif "could not resolve" in low or "name or service not known" in low:
         hint = "cannot find the host " + ws.ssh + " - check the name or use its IP."
     elif "connection refused" in low or "connection timed out" in low or "no route" in low:
@@ -290,13 +429,15 @@ def _ssh_hint(ws, output):
 
 def _control_dir():
     """Somewhere to keep the ssh multiplexing sockets. The runtime dir when
-    there is one - it is already per-user and cleaned at logout - and /tmp
-    otherwise, which is where a service without a session lands."""
-    base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    there is one - it is already per-user and cleaned at logout - and the
+    system temp directory otherwise, which is where a service without a session
+    lands. Asked for rather than hardcoded to /tmp, which on Windows would mean
+    creating C:\\tmp; only ever reached where multiplexing exists at all."""
+    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
     try:
         Path(base).mkdir(parents=True, exist_ok=True)
     except OSError:
-        base = "/tmp"
+        base = tempfile.gettempdir()
     return Path(base)
 
 
@@ -317,7 +458,8 @@ def get(wsid=None):
     workspace rooted at the install folder, which is exactly what the tools did
     before any of this existed."""
     cfg = provider.workspace(wsid)
-    key = (cfg["id"], cfg["path"], cfg["ssh"], cfg["port"]) if cfg else None
+    key = ((cfg["id"], cfg["path"], cfg["ssh"], cfg["port"], cfg.get("key", ""))
+           if cfg else None)
     if key not in _cache:
         # A config edit makes a new key rather than replacing an old one, so
         # without this the dict would grow by one every time a path is retyped
@@ -329,12 +471,47 @@ def get(wsid=None):
 
 
 def describe(wsid=None):
-    """One line naming the workspace, for the system prompt. The model has to
-    know where it is working - especially that it may not be this machine -
-    or it will confidently give you paths from the wrong computer."""
+    """The workspace part of the system prompt: which device and directory this
+    chat is working in, which others it can be moved to, and how to move.
+
+    The model has to know where it is working - especially that it may not be
+    the machine Uniagent runs on - or it will confidently give you paths from
+    the wrong computer.
+
+    THE OTHERS ARE LISTED FOR THE SAME REASON. "Check the logs on the Pi" is
+    only actionable if the Pi is a name the model has already been given: a list
+    it would have to call a tool to see is a list it never thinks to ask for, so
+    it answers from the machine it is on and is wrong without ever knowing there
+    was a choice. They cost a line each, and they are what turns "another
+    device" from a thing the user has to explain into a thing the model can
+    simply do."""
     ws = get(wsid)
+    lines = []
     if ws.is_remote:
-        return ("Workspace: " + ws.name + " - files and terminal commands run on "
-                + ws.ssh + ", rooted at " + ws.root
-                + ". Relative paths are on THAT machine, not this one.")
-    return "Workspace: " + ws.name + " - rooted at " + ws.root + " on this machine."
+        lines.append(
+            "Workspace: this chat is working in " + ws.name + " - the file tools "
+            "(read_file, write_file, edit_file, ask_file) and the terminal RUN ON "
+            + ws.ssh + " over ssh, rooted at " + ws.root + ". Relative paths, and "
+            "anything the terminal does, are on THAT device - not on the machine "
+            "running Uniagent, and Uniagent's own folder (memories/, context/, "
+            "skills/, tools/) is not there either.")
+    else:
+        lines.append(
+            "Workspace: this chat is working in " + ws.name + " - the file tools "
+            "(read_file, write_file, edit_file, ask_file) and the terminal work in "
+            + ws.root + ", on the machine running Uniagent. Relative paths are "
+            "resolved from there.")
+    others = [w for w in provider.workspaces() if w["id"] != ws.id]
+    if others:
+        lines.append(
+            "Other workspaces this chat can be moved to: "
+            + "; ".join(w["id"] + " (" + w["name"] + " - "
+                        + (("on " + w["ssh"] + ", ") if w["ssh"] else "")
+                        + w["path"] + ")" for w in others)
+            + ". A workspace is a device and a directory: moving to one is how you "
+            "work somewhere else. When the user talks about another device they "
+            "have - its files, its logs, running something on it - move this chat "
+            "to that device's workspace with the uniagent_command tool "
+            "(/workspace <id>) and carry on there, rather than answering from "
+            "where you happen to be. Only these exist; you cannot invent one.")
+    return "\n".join(lines)
