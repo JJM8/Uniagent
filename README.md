@@ -195,6 +195,10 @@ thing:
 powershell -ExecutionPolicy Bypass -File scripts\update.ps1
 ```
 
+An update that cannot fast-forward stops rather than merging: local commits of
+your own, or an edit to a file the update also changes, are both reported by
+name and nothing is written. Commit them or revert them, then update again.
+
 **Nothing of yours is touched.** Your `.env` and API keys, chats, system prompt,
 memories, settings, model lists, cron jobs, MCP servers and workspaces all stay
 as they are — an update only ever fast-forwards, and git only writes the files
