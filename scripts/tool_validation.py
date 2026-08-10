@@ -1,27 +1,72 @@
 """Safety check for tool calls.
 
-main.py hands every tool call to validate_tool_use() before running it. If the
-verification model calls it safe the tool runs straight away; if not, main.py
-falls back to a human y/n. The verification model is chosen separately from the
-main agent's model - both on the settings page - so the two can differ, and the
-whole layer can be switched off there too. The prompt itself lives in
-settings.py's DEFAULTS (key "safety_prompt"), editable from the settings page -
-not here - so this file has no prompt text of its own to fall out of sync with it.
+main.py hands every tool call to check() before running it, along with the
+THRESHOLD the chat is on. What comes back is one of three words - run, ask,
+skip - and main.py does that.
 
-A caller can pass its own prompt instead (validate_tool_use's `prompt`): a cron
-job's "safety_prompt" in cron.json, or an agent's own settings .json. That
-only changes the wording of the question - the verification model, and the two
-lists, stay global.
+## The threshold
 
-The lists live in settings.py's DEFAULTS too ("safety_whitelist",
-"safety_blacklist"), edited on the same tab, and are read per call so a rule
-added there applies to the very next tool call without a restart. They bracket
-the model check on both sides: a whitelisted TOOL NAME runs without being
-asked about, a blacklisted PHRASE anywhere in the call is refused without being
-asked about, and everything else goes to the model.
+One number, 0 to 10: the highest danger rating a call can be given and still
+run unattended.
+
+  0     ask about every call. No model is asked - there is nothing to ask it,
+        because no rating would clear the bar.
+  1-9   send the call to the checking model for a 0-10 rating, run it if the
+        rating is at or under the number, otherwise ask the human.
+  10    run everything. No model is asked, for the same reason as 0.
+
+The scale the prompt asks the model for IS the setting. There is no table of
+named levels in between, so nothing to map, nothing to keep in sync, and no
+level wording to drift away from what the prompt actually says.
+
+## Who picks the number
+
+threshold_for() resolves it, most specific first: the chat's own (its settings
+.json, written by the slider in the corner), then the old True/False `safety`
+flag that predates it, then the settings page's default. See its docstring -
+the back-compatibility there is load-bearing, since every chat and cron job on
+disk was written before thresholds existed.
+
+## The prompt, and the chat's own additions
+
+The prompt lives in settings.py's DEFAULTS ("safety_prompt"), editable on the
+settings page - not here, so this file has no prompt text of its own to fall
+out of sync with it. It carries two placeholders, both substituted with a
+plain string replace so a stray { or } elsewhere is harmless:
+
+  {call}   the call being judged. Required; a prompt without it would ask
+           about nothing, so one that lacks it falls back to the global prompt.
+  {extra}  the chat's own extra rules ("anything touching Google Drive is
+           fine"), appended at the end if the prompt has no {extra} of its own.
+
+A caller can also replace the prompt outright (check's `prompt`): a cron job's
+"safety_prompt" in cron.json, or a chat that wanted to rewrite the whole thing.
+The checking model and the two lists stay global either way - only the wording
+of the question changes, never who answers it.
+
+## Old prompts still work
+
+A prompt written before ratings existed asked for a "{true}" marker instead of
+a number, and plenty are stored in chats and cron.json. is_rating_prompt()
+tells the two apart and _legacy_verdict() reads the old kind exactly as it was
+always read, so nothing that worked yesterday stops working. Such a prompt
+cannot express a threshold, though, so on one every setting from 1 to 9
+behaves identically - the settings page says so where it can be seen.
+
+## The two lists
+
+"safety_whitelist" and "safety_blacklist" in settings.py, edited on the same
+tab, read per call so a rule added there applies to the very next tool call
+without a restart. They bracket everything above, at EVERY threshold: a
+whitelisted TOOL NAME runs without being asked about, a blacklisted PHRASE
+anywhere in the call goes to the human without being asked about, and only
+then does the number get a say. The blacklist applying at 10 too is the point
+of it - a safety net that the loosest setting is the only one to skip would be
+no net at all.
 """
 
 import json
+import re
 
 import provider
 import settings
@@ -30,11 +75,30 @@ import turnctx
 PINK = "\033[95m"
 RESET = "\033[0m"
 
+# What check() returns, and what main.py does with each.
+RUN = "run"     # vetted and allowed - run it
+ASK = "ask"     # stop and put it to the human
+SKIP = "skip"   # not checked at all - run it, and say it was not checked
+
 # Set by a front-end that shows the verdict itself. The server wants these
 # lines - they are its journal - but cli.py draws the check into the turn it is
 # rendering (main.py's on_safety), and the same text arriving a second time as
 # a raw print lands in the middle of a half-drawn tool block.
 quiet = False
+
+# Introduces the chat's own extra rules inside the prompt. They are stated as
+# beating the scale rather than sitting beside it, because that is what they
+# are for: the scale calls sending a file somewhere a 4, and the whole reason
+# to type a rule is that in THIS chat it isn't.
+_EXTRA_HEAD = ("\nThis chat's owner has given extra rules for this chat. They "
+               "override the scale above wherever they disagree:\n\n")
+
+# "DANGER: 7 - ..." is what the prompt asks for; the [:\-=]* tolerates a model
+# that writes "DANGER 7", "DANGER = 7" or "DANGER:7".
+_RATED = re.compile(r"danger\s*[:\-=]*\s*(\d{1,2})", re.I)
+# Fallback for a model that answered with the number and nothing else, or put
+# its prose first. Any 1-2 digit run will do - it is clamped below.
+_ANY_NUMBER = re.compile(r"\b(\d{1,2})\b")
 
 
 def _note(text):
@@ -74,28 +138,137 @@ def _entries(values):
     return [v.strip().lower() for v in values if v and v.strip()]
 
 
-def validate_tool_use(call, prompt=None):
-    """(safe, reasoning) - the verification model's verdict on the call and its
-    one-line why, so the verdict can be shown with its reasoning. Any error is
-    treated as unsafe so a broken check fails closed, not open.
+# ---- the threshold ----------------------------------------------------------
 
-    `prompt` is the caller's own vetting prompt - a cron job's `safety_prompt:`,
-    an agent's own settings .json - and must contain "{call}", which
-    is where the call itself is substituted in. None (the default) uses the
-    settings page's "safety_prompt", which is what every ordinary chat turn
-    does. A prompt WITHOUT "{call}" would ask the model to judge a call it was
-    never shown, and whatever came back would be meaningless, so that falls
-    back to the global prompt rather than being run. The verification model
-    and the two lists are global either way: only the wording of the question
-    changes, never who answers it.
+def clamp(value, fallback=None):
+    """`value` as a usable threshold, or `fallback` if it isn't one. bool is
+    refused explicitly because bool is an int in Python and True would
+    otherwise sail in as the threshold 1."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(settings.SAFETY_MIN, min(settings.SAFETY_MAX, value))
+    return fallback
+
+
+def threshold_for(threshold=None, safety=None, chosen=None):
+    """The threshold a turn actually runs under, most specific answer first.
+
+    1. `threshold` - what the chat (or a cron job) was set to. The normal path
+       once anything has touched the slider.
+    2. `safety` - the True/False flag that predates the number and is still
+       what cron.json carries and what every chat folder on disk was written
+       with. False meant "never check this one", which is exactly 10. True
+       meant "do check this one", which is the settings default unless that
+       default is itself 10 - a chat that explicitly asked to be checked must
+       not resolve to "check nothing", so it lands on the strictest setting
+       instead of being quietly ignored.
+    3. The settings page's own "safety_threshold".
+
+    "safety_validation" - the old global on/off switch - is honoured at step 3
+    only: off means an install that had checking disabled keeps it disabled,
+    while a chat that has since been given a number of its own still gets it.
+    That ordering is what lets the old switch and the new slider coexist
+    without either surprising the other."""
+    chosen = chosen or settings.load()
+
+    named = clamp(threshold)
+    if named is not None:
+        return named
+
+    if safety is False:
+        return settings.SAFETY_MAX
+    if safety is True:
+        stored = clamp(chosen["safety_threshold"], 3)
+        return stored if stored < settings.SAFETY_MAX else settings.SAFETY_MIN
+
+    if not chosen["safety_validation"]:
+        return settings.SAFETY_MAX
+    return clamp(chosen["safety_threshold"], 3)
+
+
+# ---- reading the checking model's answer ------------------------------------
+
+def is_rating_prompt(text):
+    """Whether `text` is a prompt that asks for a 0-10 rating (the current
+    kind) rather than a "{true}" marker (the kind that predates levels).
+
+    Asked of the prompt, not of the answer, because it decides how the answer
+    is read - and because the settings page wants to say "this prompt can't
+    drive the thresholds" while it is being edited, not after a tool call has
+    already been judged by it."""
+    if not text:
+        return False
+    lowered = text.lower()
+    # A prompt that says {true} anywhere is asking for the marker, whatever
+    # else it also mentions. Only when it doesn't is a mention of the rating
+    # taken as the format it is asking for.
+    if "{true}" in lowered:
+        return False
+    return "danger" in lowered or "0-10" in lowered or "0 to 10" in lowered
+
+
+def _rating(reply):
+    """The 0-10 danger rating out of the checking model's reply, or None if it
+    said no number at all.
+
+    Clamped rather than rejected at the top end: a model that answers "12" has
+    understood the question and overshot the scale, and reading that as "no
+    rating" would fail it closed as if it had answered nothing. Clamping to 10
+    fails it closed in the direction it actually meant."""
+    match = _RATED.search(reply) or _ANY_NUMBER.search(reply)
+    if not match:
+        return None
+    return min(int(match.group(1)), 10)
+
+
+def _legacy_verdict(reply):
+    """A pre-levels prompt's answer: safe if it wrote the "{true}" marker.
+
+    Kept exactly as it always was, because prompts written against it are
+    sitting in cron.json and in chat folders and must not change meaning under
+    their authors - with one narrowing that can only ever make it safer. Those
+    prompts ask for "{false}" when the call is dangerous, and a reply carrying
+    that marker is now unsafe whatever else it says. Without it, "not {true},
+    this is {false}" read as SAFE, because the test was only ever whether the
+    substring appeared anywhere."""
+    lowered = reply.lower()
+    if "{false}" in lowered:
+        return False
+    return "{true}" in lowered
+
+
+def _compose(prompt, call_text, extra):
+    """The prompt as it goes on the wire: the call substituted in, and the
+    chat's own extra rules placed where the prompt asks for them.
+
+    A prompt with no {extra} of its own still gets them - appended at the end -
+    rather than having them silently dropped. Dropping would be the worse
+    failure by far: the rule would be typed, saved, shown in the dropdown as
+    active, and do nothing."""
+    body = prompt.replace("{call}", call_text)
+    block = _EXTRA_HEAD + extra.strip() + "\n" if (extra or "").strip() else ""
+    if "{extra}" in body:
+        return body.replace("{extra}", block)
+    return body + "\n" + block if block else body
+
+
+# ---- the check itself -------------------------------------------------------
+
+def check(call, threshold, prompt=None, extra=None):
+    """(outcome, reason) for one tool call - outcome being RUN, ASK or SKIP,
+    and reason the one line to show beside it.
 
     `call` is the PARSED {"tool", "args"} dict - the same shape
     tool_processor.process() runs, not the model's raw call text - so this
     works identically whether the call was regexed out of generated text or
-    arrived as a provider's native structured tool_call, and so the
-    whitelist below matches the actual tool name rather than a substring of
-    the whole call (a command whose ARGUMENT happened to contain
-    "screenshot_tool" used to false-positive the old text-substring check)."""
+    arrived as a provider's native structured tool_call, and so the whitelist
+    below matches the actual tool name rather than a substring of the whole
+    call (a command whose ARGUMENT happened to contain "screenshot_tool" used
+    to false-positive the old text-substring check).
+
+    `threshold` is the 0-10 number out of threshold_for(). `prompt` replaces
+    the global prompt entirely; `extra` is added to whichever prompt is used.
+
+    Any error is ASK, so a broken check fails closed rather than open."""
     # A stopped turn asks nothing. This check is a whole extra model round-trip
     # on the way to a call that is no longer going to be run, and it used to be
     # one of the longest stretches of a turn with no way to interrupt it - the
@@ -108,42 +281,86 @@ def validate_tool_use(call, prompt=None):
     call_lower = text.lower()
     tool_name = (call.get("tool") or "").lower()
 
-    # One read for all three: the lists and the prompt below all come out of
-    # the same settings file, and this runs on every single tool call.
+    # One read for all of it: the lists and the prompt come out of the same
+    # settings file, and this runs on every single tool call.
     chosen = settings.load()
 
-    # Whitelist check - trusted tools skip the model check entirely and run.
+    # Whitelist - trusted tools run at any threshold, without being asked about.
     # Matched on the parsed tool name exactly, not a substring of the call.
     if tool_name in _entries(chosen["safety_whitelist"]):
-        _note("WHITELISTED TOOL DETECTED: " + tool_name + " - marking SAFE")
-        return True, "whitelisted tool (" + tool_name + ")"
+        _note("whitelisted tool: " + tool_name + " - allowed")
+        return RUN, "whitelisted tool (" + tool_name + ")"
 
-    # Blacklist check - automatically mark as unsafe if the call names one of
-    # the blocked phrases. Scanned across the whole canonical text (tool +
-    # args), not just the tool name - what this is meant to catch is usually a
-    # path ARGUMENT naming a core file, not the tool itself.
+    # Blacklist - at every threshold, 10 included. Scanned across the whole
+    # canonical text (tool + args), not just the tool name: what this is meant
+    # to catch is usually a path ARGUMENT naming a core file, not the tool.
     for phrase in _entries(chosen["safety_blacklist"]):
         if phrase in call_lower:
-            _note("BLACKLISTED PHRASE DETECTED: " + phrase + " - marking UNSAFE")
-            return False, ("This tool call names a blocked phrase (" + phrase
-                           + ") and has been stopped by the blacklist on the "
-                             "safety tab.")
+            _note("blacklisted phrase: " + phrase + " - asking")
+            return ASK, ("This call names a blocked phrase (" + phrase
+                         + ") from the safety tab.")
+
+    # The two ends never reach the checking model. There is no rating it could
+    # give that would change the answer, so asking for one would be a paid
+    # round-trip to be ignored - and, at 0, a model told to always refuse
+    # would sometimes not.
+    if threshold >= settings.SAFETY_MAX:
+        return SKIP, ""
+    if threshold <= settings.SAFETY_MIN:
+        _note("threshold 0 - asking")
+        return ASK, "this chat asks about every tool call (safety 0)"
 
     if prompt and "{call}" not in prompt:
         _note("custom safety prompt has no {call} placeholder - using the global one")
         prompt = None
+    prompt = prompt or chosen["safety_prompt"]
+
     try:
         reply = provider.get_response(
-            (prompt or chosen["safety_prompt"]).replace("{call}", text),
+            _compose(prompt, text, extra),
             provider=chosen["verify_provider"],
             model=chosen["verify_model"],
         )
     except Exception as e:
-        _note("check failed (" + type(e).__name__ + ": " + str(e) + ") - treating as UNSAFE")
-        return False, "the safety check itself failed (" + type(e).__name__ + "), so this fails closed."
+        _note("check failed (" + type(e).__name__ + ": " + str(e) + ") - asking")
+        return ASK, ("the safety check itself failed (" + type(e).__name__
+                     + "), so this fails closed.")
 
     _note("model said: " + reply.strip())
-    safe = "{true}" in reply.lower()
-    _note("decision: " + ("SAFE" if safe else "UNSAFE"))
-    reason = reply.replace("{true}", "").replace("{TRUE}", "").strip()
-    return safe, reason or "(no reasoning given)"
+
+    if not is_rating_prompt(prompt):
+        # An old marker-style prompt. It cannot express a threshold, so every
+        # setting from 1 to 9 behaves the same on one - said out loud in the
+        # log rather than left to be noticed as "the number does nothing".
+        safe = _legacy_verdict(reply)
+        _note("marker-style prompt (no 0-10 rating) - " + ("allowed" if safe else "asking"))
+        reason = reply.replace("{true}", "").replace("{TRUE}", "").strip()
+        return (RUN if safe else ASK), reason or "(no reasoning given)"
+
+    rating = _rating(reply)
+    if rating is None:
+        _note("no rating in the reply - asking")
+        return ASK, ("the safety check gave no danger rating, so this fails "
+                     "closed: " + reply.strip()[:200])
+
+    # The number leads the line wherever the reply put it, so the row reads
+    # "4/10, this chat allows 3 - ..." and the verdict needs no explaining.
+    reason = (str(rating) + "/10, this chat allows " + str(threshold) + " - "
+              + _RATED.sub("", reply.strip(), count=1).lstrip(" -:").strip())
+    safe = rating <= threshold
+    _note("rated " + str(rating) + " against threshold " + str(threshold)
+          + " - " + ("allowed" if safe else "asking"))
+    return (RUN if safe else ASK), reason
+
+
+def validate_tool_use(call, prompt=None):
+    """(safe, reasoning) for one call at the settings page's own threshold.
+
+    The shape check() replaced, kept because it is the simple question - "is
+    this call all right?" - and there are callers that only want that: the
+    stop-path test harness patches it, and anything vetting a call outside a
+    chat has no threshold to pass. Inside a turn, use check(): a turn HAS a
+    threshold, and flattening three outcomes into two loses the difference
+    between "not checked" and "checked and allowed"."""
+    outcome, reason = check(call, threshold_for(), prompt=prompt)
+    return outcome != ASK, reason

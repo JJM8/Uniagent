@@ -58,6 +58,7 @@ import provider_refs
 import settings
 import tokens
 import tool_processor
+import tool_validation
 import update
 import workspace
 import turnctx
@@ -402,6 +403,260 @@ def _approve(question):
     return command_processor.wait_approval(stem, question)
 
 
+# The replies the page has been told to read out, by id. A finished turn puts
+# its text here and broadcasts the id; the page fetches GET /speak?id=<n> and
+# plays what comes back.
+#
+# The audio is made on that fetch rather than when the turn ends, so an install
+# with nobody watching never pays to synthesise anything - a cron run at 4am,
+# or a phone that has been shut since morning, costs nothing. It is made ONCE
+# and kept here because several windows can be open on the same chat, and each
+# of them asks: without this, the desktop and the phone would each buy their
+# own copy of the same sentence.
+#
+# A summary, when the voice tab asks for one, is written on that same fetch and
+# for the same reason - it is another model call, and a turn nobody is
+# listening to shouldn't pay for one.
+#
+# One entry per MESSAGE, not per turn. A turn of tool work is several things
+# said, and both the reading and the summarising happen a message at a time -
+# so the page gets a list of ids and plays them one after another.
+_speak_lock = threading.Lock()
+_speak_said = {}          # id -> {"route", "batch", "text", "summarise", "audio", "mime", "error"}
+_speak_id = 0
+# How many messages stay readable before the oldest are dropped. Generous
+# because a reading is never interrupted by anything except stop: the queue on
+# the page runs across turns, so the speaker can be a long way behind a chat
+# that has kept working - and an id dropped out from under it is the end of
+# that reading, mid-sentence, with an error where the rest of the words were.
+SPEAK_KEEP = 48
+# Readings that have already complained about the summarising model, by batch -
+# the turn the message came from, since in the per-message modes each message
+# is registered on its own as it lands. A dead summariser fails once per
+# message, and six lines saying the same thing about the same turn is not six
+# times as informative as one.
+_speak_moaned = set()
+_speak_batch_id = 0
+
+
+def _speak_batch():
+    """A tag for one turn's worth of reading, unique in this process. Its own
+    counter rather than the message ids, because a turn's tag has to be settled
+    before any of its messages exist."""
+    global _speak_batch_id
+    with _speak_lock:
+        _speak_batch_id += 1
+        return "turn-" + str(_speak_batch_id)
+
+
+def _speak_offer(route, texts, summarise=False, batch=None):
+    """Register each of `texts` as something to read out for chat `route`, in
+    order, and tell every open page about the lot. `summarise` puts each
+    message through the summarising model first, when the page comes to ask for
+    its audio. `batch` ties them to the turn they came from - only used to keep
+    one turn's complaints down to one. Does nothing at all when the voice tab
+    names no speaker, which is the default and means the page stays silent."""
+    global _speak_id
+    if not texts:
+        return
+    try:
+        chosen = settings.load()
+    except Exception as e:
+        _speak_note(route, "nothing was read out: " + type(e).__name__ + ": " + str(e))
+        return
+    # No speaker named is not a failure - it is the voice tab's own default,
+    # and an install that has never opened it stays silent without being told
+    # so after every single turn.
+    if not chosen.get("speak_provider"):
+        return
+    ids = []
+    with _speak_lock:
+        batch = batch or "msg-" + str(_speak_id + 1)
+        for text in texts:
+            _speak_id += 1
+            ids.append(_speak_id)
+            _speak_said[_speak_id] = {"route": route, "batch": batch, "text": text,
+                                      "summarise": summarise, "lock": threading.Lock(),
+                                      "audio": None, "mime": "", "error": ""}
+        # SPEAK_KEEP is counted in messages, so it has to be big enough to hold
+        # a whole turn's worth of them and the turn before it - dropping an id
+        # the page is still working through would silence the end of a reading
+        # that had already started.
+        for old in sorted(_speak_said)[:-SPEAK_KEEP]:
+            _speak_moaned.discard(_speak_said[old]["batch"])
+            del _speak_said[old]
+    _broadcast({"type": "speak", "chat": route, "ids": ids})
+
+
+def _moan_once(batch):
+    """True the first time this turn's reading has something to complain about,
+    False every time after - checked and claimed under the one lock, since the
+    messages of a turn are synthesised on whichever threads ask for them."""
+    with _speak_lock:
+        if batch in _speak_moaned:
+            return False
+        _speak_moaned.add(batch)
+        return True
+
+
+def _speak_note(route, text):
+    """Tell chat `route`'s open windows something went wrong with reading a
+    reply out, without ending the reading. Its own event type rather than an
+    "error": that one means the TURN blew up, and the page tears down the live
+    reply when it sees one."""
+    _broadcast({"type": "speaknote", "chat": route, "text": text})
+
+
+# The voice tab's speak_mode, as two questions this file actually asks (see
+# settings.SPEAK_MODES): does THIS message get read, and is it summarised
+# first. Everything but "summary" is decided a message at a time, the moment
+# the message exists - which is what makes the speaking start while the tool it
+# just asked for is still running, instead of after the whole turn is over.
+#
+# The mode's kinds, against main.run's on_message: "answer" is a message that
+# ended the turn, "call" is one that ended in a tool call.
+SPEAK_KINDS = {
+    "final": ("answer",),
+    "summary_final": ("answer",),
+    "all": ("answer", "call"),
+    "summary_each": ("answer", "call"),
+}
+
+
+def _speak_message(route, text, kind, batch=None):
+    """Read one finished message out, if the voice tab's mode wants that one.
+    Called from inside the turn, as each message lands.
+
+    "summary" is the one mode not handled here: a single account of the whole
+    turn cannot be written until there IS a whole turn, so it waits for
+    _speak_turn below. Every other mode speaks from here, as early as the words
+    exist."""
+    try:
+        mode = settings.load().get("speak_mode", "final")
+    except Exception as e:
+        _speak_note(route, "nothing was read out: " + type(e).__name__ + ": " + str(e))
+        return
+    if kind not in SPEAK_KINDS.get(mode, ()):
+        return
+    _speak_offer(route, [text], mode.startswith("summary"), batch)
+
+
+def _speak_turn(agent, mark):
+    """What to read out once the whole turn is over, as (messages, summarise) -
+    ([], False) in every mode that has already read it out message by message.
+    `mark` is where the turn started in the history, from main.turn_count().
+
+    Only "summary" ends up here, because only it needs the turn entire: every
+    message the agent wrote, joined into one thing for the summarising model,
+    so what you hear is a single account of the turn rather than a sentence
+    about each step of it. The joining is blank-line separated, the way the
+    messages already sit apart from each other in the transcript.
+
+    It doesn't summarise here either: it says that it needs doing, and
+    _speak_audio does it if and when the audio is actually asked for."""
+    if settings.load().get("speak_mode", "final") != "summary":
+        return [], False
+    said = main.said_since(agent.history, mark)
+    return (["\n\n".join(said)] if said else []), True
+
+
+def _speak_summary(chosen, text):
+    """One message boiled down to a sentence or two to be read out, by the
+    model the voice tab names for the job.
+
+    The instruction goes over as the system message and the message underneath
+    it as a user message, so the prompt on the settings page reaches the model
+    verbatim - there is no placeholder to substitute into, the same arrangement
+    compaction.py uses.
+
+    Raises RuntimeError when there is no summary to be had - the model refused,
+    the provider is misconfigured, or it answered with nothing at all. The
+    caller says so and reads the message as written; what it must not do is
+    quietly become a different setting than the one on the voice tab."""
+    prompt = (str(chosen.get("speak_summary_prompt") or "").strip()
+              or settings.DEFAULTS["speak_summary_prompt"])
+    try:
+        summary = "".join(provider.stream_response(
+            [{"role": "system", "content": prompt},
+             {"role": "user", "content": text}],
+            provider=chosen.get("speak_summary_provider", ""),
+            model=chosen.get("speak_summary_model", ""),
+            temperature=chosen.get("speak_summary_temperature", 0))).strip()
+    except Exception as e:
+        raise RuntimeError(str(e) if isinstance(e, RuntimeError)
+                           else type(e).__name__ + ": " + str(e))
+    if not summary:
+        raise RuntimeError(str(chosen.get("speak_summary_model", ""))
+                           + " answered with nothing")
+    return summary
+
+
+def _speak_audio(said_id):
+    """The audio for a registered reply, as (bytes, mime) - synthesised on the
+    first ask and kept for the rest. Raises RuntimeError with a readable
+    sentence when it can't be made, the same one provider.speak() raised.
+
+    The synthesis happens under that ENTRY'S OWN lock, so a second window
+    asking for the same message waits for the first one's audio instead of
+    buying its own. That wait is the point; it is bounded by provider.
+    TTS_TIMEOUT (and, when the voice tab asks for summaries, by the summarising
+    model's own reply).
+
+    Its own lock rather than the registry's, because a turn is now several
+    messages and the page fetches the next one while the current one is still
+    playing: on a single lock that fetch would queue behind everything else
+    being made anywhere in the process - the next message of this turn, another
+    chat's reply - and the gap between two spoken sentences would be however
+    long all of that took."""
+    with _speak_lock:
+        said = _speak_said.get(said_id)
+    if said is None:
+        # Aged out of the cache, or from before a restart. Not an error
+        # worth shouting about - the reply it belonged to is long read.
+        raise RuntimeError("that reply is no longer waiting to be read out")
+    with said["lock"]:
+        if said["audio"] is not None:
+            return said["audio"], said["mime"]
+        if said["error"]:
+            # A failure is remembered too: three windows open on a chat whose
+            # speech model is wrong should say so once each, not retry it
+            # three times over a fresh network round trip apiece.
+            raise RuntimeError(said["error"])
+        chosen = settings.load()
+        if said["summarise"]:
+            # Settled once per entry either way, so a second window - or a
+            # retry after a speech failure - reads the summary that was already
+            # written rather than paying for another one that says the same
+            # thing in different words, and doesn't repeat the complaint below
+            # if there wasn't one.
+            said["summarise"] = False
+            try:
+                said["text"] = _speak_summary(chosen, said["text"])
+            except Exception as e:
+                # Read as written instead - the words are there and silence
+                # would be worse - but SAY that this is not the setting the
+                # voice tab is on. A summariser that has been quietly bypassed
+                # for a week is the thing to avoid here: the reading gets long
+                # and nothing anywhere explains why.
+                #
+                # Once per turn's reading, not once per message of it: the
+                # complaint is about a setting, and it is the same complaint
+                # every time whichever message hit it.
+                if _moan_once(said["batch"]):
+                    _speak_note(said["route"],
+                                "no summary to read (" + str(e) + ") - reading "
+                                "the reply as written instead")
+        try:
+            audio, mime = provider.speak(chosen.get("speak_provider", ""),
+                                         chosen.get("speak_model", ""), said["text"])
+        except Exception as e:
+            said["error"] = str(e) if isinstance(e, RuntimeError) else \
+                            type(e).__name__ + ": " + str(e)
+            raise RuntimeError(said["error"])
+        said["audio"], said["mime"] = audio, mime
+        return audio, mime
+
+
 def _run_turn(text, kind="user", target=None):
     """One turn of `target` on a worker thread, streamed to every open page
     tagged with its chat. Typed input arrives here from POST /input carrying
@@ -431,10 +686,25 @@ def _run_turn(text, kind="user", target=None):
     def stream_chunk(chunk):
         _broadcast({"type": "chunk", "text": chunk, "chat": route})
 
+    # Where this turn starts in the chat's history. The "read everything out"
+    # modes need to tell what this turn said from what the conversation already
+    # contained, and afterwards nothing in the history marks the boundary.
+    #
+    # Filled in by main.turn the moment it owns the chat, not here: a message
+    # sent while another turn is still running waits inside turn() for the slot,
+    # and a mark taken now would be from before that turn had written anything -
+    # so its whole reply would be read out a second time on the back of this one.
+    mark = [main.turn_count(c.history)]
+    # One tag for everything this turn has read out, however many messages that
+    # turns out to be - so a summarising model that is down says so once for
+    # the turn instead of once per message of it.
+    batch = _speak_batch()
+
     def worker():
         try:
             main.turn(c, text,
                       on_text=stream_chunk,
+                      on_begin=lambda history: mark.__setitem__(0, main.turn_count(history)),
                       on_tool_call=lambda shown: _broadcast({"type": "toolcall",
                                                         "text": shown, "chat": route}),
                       on_tool_result=lambda result: _broadcast({"type": "toolresult",
@@ -446,6 +716,11 @@ def _run_turn(text, kind="user", target=None):
                                                         "safe": safe, "reason": reason,
                                                         "checked": checked,
                                                         "chat": route}),
+                      # Each finished message, read out as it lands rather than
+                      # at the end of the turn - so a long turn talks its way
+                      # through the work instead of going quiet for a minute
+                      # and then saying everything at once.
+                      on_message=lambda said, kind: _speak_message(route, said, kind, batch),
                       approve=_approve)
         except Exception as e:
             if turnctx.cancelled():
@@ -479,6 +754,21 @@ def _run_turn(text, kind="user", target=None):
             # Always tell the page the turn is over, even if the provider blew
             # up - otherwise the input would look stuck mid-reply forever.
             _broadcast({"type": "done", "chat": route})
+            # And, for the one mode that summarises the turn as a whole, read
+            # it out now that there is a whole turn to summarise. Every other
+            # mode has been reading each message out since it landed (see
+            # on_message above) and _speak_turn hands back nothing here.
+            # A voice tab that can't be read - a mode that isn't one, a
+            # settings file that won't parse - is said out loud rather than
+            # swallowed into "the speaker has gone quiet again", which is the
+            # one failure here nobody would ever think to look for.
+            try:
+                said, summarise = _speak_turn(c, mark[0])
+            except Exception as e:
+                said, summarise = [], False
+                _speak_note(route, "nothing was read out: " + type(e).__name__
+                            + ": " + str(e))
+            _speak_offer(route, said, summarise, batch)
             # A turn moves the token count and may have read files into the
             # conversation (read_skill), so the context panel is stale now.
             _broadcast_context(c)
@@ -487,7 +777,12 @@ def _run_turn(text, kind="user", target=None):
             # it only just appeared on disk at all.
             _broadcast_chats()
 
-    _broadcast({"type": kind, "text": text, "chat": route})
+    # `at` so the bubble carries its time the moment it appears, rather than
+    # being undated until the end-of-turn redraw pulls the real stamp back off
+    # disk (see main.stamp_history). The SERVER's clock, not the browser's:
+    # the two disagree, and the time shown while the reply is still coming has
+    # to be the one that stays there afterwards.
+    _broadcast({"type": kind, "text": text, "chat": route, "at": int(time.time())})
     # Before the work starts, so the busy dot lights immediately and a chat
     # being talked to for the first time shows up in the list right away.
     _broadcast_chats()
@@ -528,7 +823,9 @@ def _status(c):
                 "provider": default["provider"], "model": default["model"],
                 "temperature": default["temperature"],
                 "pinned": False, "temperature_pinned": False,
-                "approval": None}
+                "approval": None,
+                "safety_threshold": tool_validation.threshold_for(chosen=default),
+                "safety_own": False}
     cur = c.id
     tag = "subagent-" + cur + "/"
     subs = [t.name[len(tag):] for t in threading.enumerate()
@@ -536,6 +833,13 @@ def _status(c):
     # This chat's own model (its settings, or the default it follows), so the
     # corner switcher shows what THIS chat runs on, not a global setting.
     prov, mod, temp = c.models()
+    # Which safety number THIS chat runs at, for the same reason the model and
+    # the workspace ride along here: the corner control has to show the chat
+    # you just opened, and this is the request the page already makes the
+    # instant you switch chats. Just the id and whether it is the chat's own -
+    # the rest of the dropdown's contents are behind GET /safety, which is
+    # fetched when it is actually opened rather than every two seconds.
+    safety_threshold, safety_own = c.safety_state()
     # "chat" is the ROUTE, because the page matches it against the id it holds
     # and against the chat an approval bubble came from; `busy` is bare ids, so
     # the background list is mapped over to match (see main.route_of).
@@ -546,6 +850,7 @@ def _status(c):
             "pinned": bool(c.provider or c.model),
             "temperature_pinned": c.temperature is not None,
             "approval": command_processor.pending_question(cur),
+            "safety_threshold": safety_threshold, "safety_own": safety_own,
             # Which workspace THIS chat's tools work in. Rides along here for
             # the same reason the model does: the corner dropdown has to show
             # the chat you just opened, and this is the request the page
@@ -987,6 +1292,51 @@ def _context():
             "is_default": main.is_default_preset()}
 
 
+def _safety(c):
+    """Everything the safety dropdown in the corner of the chat window draws,
+    for chat `c`.
+
+    Its own route rather than more fields on /status, because /status is
+    polled every two seconds by every open page and this is only looked at
+    when the dropdown is opened. The one thing that DOES ride on /status is
+    which level is current, since the corner button has to relabel itself the
+    instant you switch chats - see _status.
+
+    "prompt_is_rating" is the awkward truth this has to tell. A prompt written
+    before the slider existed asks the checking model for a "{true}" marker
+    rather than a 0-10 rating, and a marker cannot be compared against a
+    number - so on one of those, every setting from 1 to 9 behaves the same.
+    Rather than let that be discovered by the slider appearing to do nothing,
+    the page says it, and offers the rating prompt as a one-click
+    replacement."""
+    chosen = settings.load()
+    shared = chosen["safety_prompt"]
+    if c is None:
+        # A window whose chat doesn't exist yet: it can still open the dropdown
+        # and read what a message sent now would run under, which is whatever
+        # the settings page says. Nothing of its own to report.
+        level, own, extra, custom = tool_validation.threshold_for(chosen=chosen), False, "", ""
+    else:
+        level, own = c.safety_state()
+        extra, custom = c.safety_extra or "", c.safety_prompt or ""
+    return {"chat": None if c is None else c.route,
+            "threshold": level,
+            # Whether that number is this chat's own or the settings default it
+            # happens to be following - the page says which, and only offers
+            # "follow the default again" when there is something to clear.
+            "own": own,
+            "default_threshold": tool_validation.threshold_for(chosen=chosen),
+            "extra": extra,
+            "prompt": custom,
+            "shared_prompt": shared,
+            "prompt_is_rating": tool_validation.is_rating_prompt(custom or shared),
+            "rating_prompt": settings.DEFAULTS["safety_prompt"],
+            # So the panel can say what still applies at every level without
+            # the user having to go and look at the safety tab.
+            "whitelist": chosen["safety_whitelist"],
+            "blacklist": chosen["safety_blacklist"]}
+
+
 def _settings():
     """The settings, plus what the page needs to offer choices: only the
     providers actually usable right now (a working key/credentials), and every
@@ -1027,6 +1377,32 @@ def _stt(name):
                 "Claude takes no audio at all, and Bedrock's transcriber is a "
                 "separate AWS service. Pick a provider on the "
                 + ", ".join(sorted(provider.STT_WIRES)) + " wires.")
+    elif not models:
+        note = ("nothing speech-shaped in " + name + "'s catalogue - if you know "
+                "a model id it serves, type it in anyway; the box is free text.")
+    else:
+        note = ""
+    return {"provider": name, "wire": p["wire"], "supported": supported,
+            "models": models, "note": note}
+
+
+def _tts(name):
+    """The text-to-speech models provider `name` can be asked for, for the
+    voice tab's other model box. The same shape and the same reasoning as _stt
+    above, asked of the endpoint that runs the other way."""
+    name = (name or "").strip()
+    p = provider.custom_provider(name)
+    if not p:
+        return {"provider": name, "wire": "", "supported": False, "models": [],
+                "note": "there is no provider called " + name + " - it may have "
+                        "been renamed or deleted on the providers tab."}
+    supported = p["wire"] in provider.TTS_WIRES
+    models = provider.tts_models(name) if supported else []
+    if not supported:
+        note = (name + " speaks " + p["wire"] + ", which has no text-to-speech - "
+                "Claude produces no audio, and Polly is a separate AWS service. "
+                "Pick a provider on the "
+                + ", ".join(sorted(provider.TTS_WIRES)) + " wires.")
     elif not models:
         note = ("nothing speech-shaped in " + name + "'s catalogue - if you know "
                 "a model id it serves, type it in anyway; the box is free text.")
@@ -1241,19 +1617,160 @@ def _env():
 
 UPDATE_LOG = ROOT / "update.log"
 
+# The last answer the remote gave, so the page can say "up to date" or "3 new
+# commits" the moment it opens instead of only after someone presses a button.
+# An update nobody knows about is an update nobody installs.
+UPDATE_CHECK = ROOT / "update_check.json"
+
+# How old that answer may be before it is quietly fetched again. Long, because
+# nothing here is urgent and the refresh costs a git fetch; short enough that a
+# page opened tomorrow is not repeating yesterday's news.
+UPDATE_CHECK_MAX_AGE = 6 * 3600
+
+# One refresh at a time. Set while the background thread is out at the remote,
+# so a second page load joins the first rather than starting its own fetch.
+_update_checking = False
+_update_check_lock = threading.Lock()
+
+# Why the last background check came back empty-handed, if it did. Kept beside
+# the cached answer rather than replacing it - see _refresh_check.
+_update_check_error = None
+
+
+def _trim_survey(s):
+    """The survey, minus the parts a page has no use for. The commit list on a
+    checkout that has been left alone for months can be hundreds of lines, and
+    the file list longer still - both are read as "how big is this update", and
+    the first few answer that as well as all of them."""
+    if not s.get("ok"):
+        return {"ok": False, "error": s.get("error", "the check failed")}
+    return {
+        "ok": True,
+        "ref": s.get("ref"),
+        "behind": s.get("behind", 0),
+        "ahead": s.get("ahead", 0),
+        "up_to_date": s.get("up_to_date", True),
+        "diverged": s.get("diverged", False),
+        "deps_changed": s.get("deps_changed", False),
+        "blocked": s.get("blocked", []),
+        "latest": s.get("latest"),
+        "commits": s.get("commits", [])[:40],
+        "file_count": len(s.get("files", [])),
+        "files": s.get("files", [])[:60],
+    }
+
+
+def _write_check(survey):
+    """Remember what the remote said, and against WHICH commit it said it.
+
+    The head matters: after an update this file still reads "3 commits behind",
+    which was true of the install that no longer exists. Stamping the commit it
+    was measured from is what lets _read_check throw it away rather than
+    cheerfully offer an update that has already been installed."""
+    head = update._commit("HEAD") or {}
+    try:
+        UPDATE_CHECK.write_text(json.dumps({
+            "at": time.time(),
+            "head": head.get("sha", ""),
+            "survey": _trim_survey(survey),
+        }, indent=2))
+    except OSError:
+        pass
+
+
+def _read_check():
+    """The remembered check, or None if there isn't one worth having: never
+    checked, unreadable, or measured against a commit this install has since
+    moved off."""
+    try:
+        c = json.loads(UPDATE_CHECK.read_text())
+    except (OSError, ValueError):
+        return None
+    head = update._commit("HEAD") or {}
+    if c.get("head") and head.get("sha") and c["head"] != head["sha"]:
+        return None
+    return c
+
+
+def _refresh_check():
+    """Ask the remote, in a thread, and write down what it says. Nothing waits
+    on this - the page has already been answered with whatever was known at the
+    time, and picks the new answer up on its next look.
+
+    A check that fails is remembered but not written: an unreachable remote for
+    ten seconds should not replace "3 new commits" with "could not check", which
+    is both less useful and less true. The last good answer stands and the page
+    is told the last attempt failed alongside it."""
+    global _update_checking, _update_check_error
+    try:
+        s = update.survey(update.target_ref())
+        if s.get("ok"):
+            _write_check(s)
+            _update_check_error = None
+        else:
+            _update_check_error = s.get("error") or "the check failed"
+    except Exception as e:
+        _update_check_error = type(e).__name__
+    finally:
+        with _update_check_lock:
+            _update_checking = False
+
+
+def _update_running(info):
+    """Is an update going on right now? A log that was written to seconds ago
+    and has not yet said it finished. Worth knowing because a background fetch
+    across a merge in the same checkout is a race for git's ref locks, and the
+    answer it would bring back is about to be wrong anyway."""
+    if not info.get("log") or not info.get("log_at"):
+        return False
+    return (time.time() - info["log_at"] < 120
+            and update.DONE not in info["log"])
+
+
+def _maybe_refresh_check(cached):
+    """Start a refresh if what we have is missing or stale. Returns whether one
+    is now running, which the page shows as "checking..." rather than as a
+    silence it has to guess about."""
+    global _update_checking
+    fresh = cached and (time.time() - cached.get("at", 0)) < UPDATE_CHECK_MAX_AGE
+    with _update_check_lock:
+        if _update_checking:
+            return True
+        if fresh:
+            return False
+        _update_checking = True
+    threading.Thread(target=_refresh_check, daemon=True).start()
+    return True
+
 
 def _update_local():
-    """Which commit this install is on, WITHOUT going to the network. The
-    settings page draws this on open, and an update check is a click - see
-    _post_update_check. Nothing here is worth making the page wait on a remote
-    that might be slow or unreachable."""
+    """Everything the settings page needs to draw the updater, WITHOUT making
+    it wait on the network: which commit this install is on, whatever the last
+    update wrote, and the last answer the remote gave. If that answer is stale
+    a fresh one is fetched in the background, so the page is never blocked on a
+    remote that might be slow or unreachable - see _maybe_refresh_check."""
     info = {"ref": update.target_ref(), "current": update._commit("HEAD"), "log": ""}
     try:
         # The tail only: a long update writes plenty and the page redraws this
         # every second while one is running.
         info["log"] = UPDATE_LOG.read_text(errors="replace")[-20000:]
+        # When it was written, so the page can tell the update happening right
+        # now from the one that happened in March. A log with no age to it has
+        # to be shown always or never, and neither is right.
+        info["log_at"] = UPDATE_LOG.stat().st_mtime
     except OSError:
         pass
+    if info["current"]:
+        cached = _read_check()
+        # An update in flight is polling this route every second. Staying off
+        # the remote while it runs keeps two gits out of one checkout.
+        info["checking"] = (False if _update_running(info)
+                            else _maybe_refresh_check(cached))
+        if cached:
+            info["check"] = cached.get("survey")
+            info["checked_at"] = cached.get("at")
+        if _update_check_error:
+            info["check_error"] = _update_check_error
     return info
 
 
@@ -1326,6 +1843,37 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_bytes(self, data, ctype):
+        """Bytes that came from somewhere other than a file - _send() takes a
+        str and _send_file() reads from disk, and synthesised audio is neither.
+        Uncached for the same reason everything else here is: an id is used
+        once and the page never asks for it twice."""
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _get_speak(self):
+        """The audio for a reply the page was told to read out, by the id it
+        was told. Made on this request the first time it is asked for - see
+        _speak_audio - so this can take as long as the speech model does."""
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            said_id = int(q.get("id", [""])[0])
+        except ValueError:
+            self._send("expected ?id=<number>", code=400)
+            return
+        try:
+            audio, mime = _speak_audio(said_id)
+        except RuntimeError as e:
+            # 502, like POST /voice: what failed is the speech provider, not
+            # this server, and the page shows the message as it stands.
+            self._send(str(e), code=502)
+            return
+        self._send_bytes(audio, mime)
 
     def _send_file(self, path, ctype):
         """A file straight off disk, as bytes - _send() above takes a str and
@@ -1515,6 +2063,19 @@ class Handler(BaseHTTPRequestHandler):
                 path = main.VALIDATIONS / (stem + ".jsonl")
                 lines = path.read_text().splitlines() if path.exists() else []
                 self._send("[" + ",".join(lines) + "]", "application/json")
+        elif self.path.startswith("/stamps?"):
+            # When each turn was written - one entry per history turn, in the
+            # same order (see main.stamp_history). Kept out of the transcript
+            # for the same reason the validation log above it is: the history
+            # is what the provider gets, and this is for the person reading
+            # the page. A chat with no stamps answers [], and the page simply
+            # draws no times rather than inventing any.
+            q = parse_qs(urlparse(self.path).query)
+            stem = _stem_of(q.get("chat", [""])[0])
+            if stem is None:
+                self._send("not found", code=404)
+            else:
+                self._send(json.dumps(main.read_stamps(stem)), "application/json")
         elif self.path.startswith("/context/preset?"):
             # One preset's files, fetched only when a row is expanded to be
             # read - the tab's own payload lists presets without their bodies,
@@ -1526,6 +2087,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(str(e), code=404)
             else:
                 self._send(json.dumps(files), "application/json")
+        elif self.path == "/safety" or self.path.startswith("/safety?"):
+            # create=True, not mint: opening the dropdown in a window that has
+            # not sent anything yet is reading, and reading must not bring a
+            # chat folder into existence. _safety() answers for None.
+            self._send(json.dumps(_safety(_chat_of(self, create=True))),
+                       "application/json")
         elif self.path == "/settings":
             self._send(json.dumps(_settings()), "application/json")
         elif self.path == "/providers":
@@ -1536,6 +2103,12 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query)
             self._send(json.dumps(_stt(q.get("provider", [""])[0])),
                        "application/json")
+        elif self.path.startswith("/speak/models"):
+            q = parse_qs(urlparse(self.path).query)
+            self._send(json.dumps(_tts(q.get("provider", [""])[0])),
+                       "application/json")
+        elif self.path.startswith("/speak"):
+            self._get_speak()
         elif self.path == "/email":
             self._send(json.dumps(_email_accounts()), "application/json")
         elif self.path == "/workspaces":
@@ -1692,6 +2265,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/workspace" or self.path.startswith("/workspace?"):
             self._post_chat_workspace()
+            return
+        if self.path == "/safety" or self.path.startswith("/safety?"):
+            self._post_chat_safety()
             return
         if self.path != "/input" and not self.path.startswith("/input?"):
             self._send("not found", code=404)
@@ -2180,6 +2756,80 @@ class Handler(BaseHTTPRequestHandler):
                                "ok": ok, "message": message}),
                    "application/json")
 
+    def _post_chat_safety(self):
+        """Set THIS chat's safety gate - the slider in the corner of the chat
+        window. Written to the chat's own settings.json, never to any global:
+        two chats open side by side can be running at two different numbers,
+        which is the whole point of the control being there rather than on the
+        settings page.
+
+        The body says only what it is changing. "threshold" moves the number;
+        "extra" and "prompt" are the chat's own words for the check, and are
+        saved together because the panel edits them together. A key that isn't
+        in the body is left alone, so the level buttons and the text boxes can
+        save independently without either wiping the other."""
+        body = self._body()
+        if not isinstance(body, dict):
+            self._send("expected a JSON object", code=400)
+            return
+        c = _chat_of(self, create=True, mint=True)
+        if c is None:
+            self._send("no chat to set a safety number on", code=400)
+            return
+
+        if "threshold" in body:
+            raw = body.get("threshold")
+            # None is a real value and means "follow the settings default
+            # again", which is how a chat is un-pinned. Anything else must be a
+            # number in range - a typo silently becoming "follow the default"
+            # would read as the control not working.
+            # Range-checked, not clamped. clamp() exists to make a stored
+            # value usable, and silently turning a mistyped 42 into 10 would
+            # be the one clamp that matters: 10 is "check nothing". A request
+            # that asks for a number off the scale is wrong, and says so.
+            in_range = (isinstance(raw, int) and not isinstance(raw, bool)
+                        and settings.SAFETY_MIN <= raw <= settings.SAFETY_MAX)
+            if raw is not None and not in_range:
+                self._send("a safety number has to be a whole number from "
+                           + str(settings.SAFETY_MIN) + " to "
+                           + str(settings.SAFETY_MAX), code=400)
+                return
+            try:
+                c.set_safety_threshold(raw)
+            except OSError as e:
+                self._send("could not save: " + str(e), code=500)
+                return
+
+        if "extra" in body or "prompt" in body:
+            extra = body.get("extra", c.safety_extra)
+            prompt = body.get("prompt", c.safety_prompt)
+            if not isinstance(extra, (str, type(None))) \
+                    or not isinstance(prompt, (str, type(None))):
+                self._send("extra and prompt must be text", code=400)
+                return
+            # A whole-prompt override with no {call} in it would ask the
+            # checking model about nothing. tool_validation falls back to the
+            # shared prompt in that case rather than running it, so this can't
+            # be unsafe - but a box that silently does nothing is worse than
+            # one that says why, and this is the moment there is somebody
+            # there to read it.
+            if (prompt or "").strip() and "{call}" not in prompt:
+                self._send("a custom prompt has to contain {call} - that is "
+                           "where the tool call gets substituted in.", code=400)
+                return
+            try:
+                c.set_safety_text(extra=extra, prompt=prompt)
+            except OSError as e:
+                self._send("could not save: " + str(e), code=500)
+                return
+
+        # The whole state back, not just what changed: the page redraws the
+        # panel from this rather than from what it sent, so a chat minted by
+        # this very request comes back with the id it was given, and a number
+        # that resolved differently from what was asked (cleared back to the
+        # default, say) shows what it actually is.
+        self._send(json.dumps(_safety(c)), "application/json")
+
     def _post_context(self):
         """Write one context or memory file. The next turn picks it up on its
         own - both are re-read whenever their files change."""
@@ -2464,8 +3114,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(json.dumps({"text": text}), "application/json")
 
     def _post_update_check(self):
-        """Ask the remote what is new. This is the one route here that waits on
-        the network, and it only ever runs because someone pressed the button."""
+        """Ask the remote what is new, now, because someone pressed the button
+        and is watching. The answer is written to the cache on the way out, so
+        the "last checked" line and the update marker on the settings button
+        agree with what the button just said - see _write_check."""
+        global _update_check_error
         py = update._python()
         try:
             r = subprocess.run([py, str(ROOT / "scripts" / "update.py"),
@@ -2479,7 +3132,13 @@ class Handler(BaseHTTPRequestHandler):
         # worth keeping out of the JSON parse but worth showing if it failed.
         line = (r.stdout.strip().splitlines() or [""])[-1]
         try:
-            self._send(json.dumps(json.loads(line)), "application/json")
+            survey = json.loads(line)
+            if survey.get("ok"):
+                _write_check(survey)
+                _update_check_error = None
+            else:
+                _update_check_error = survey.get("error") or "the check failed"
+            self._send(json.dumps(survey), "application/json")
         except ValueError:
             self._send(json.dumps({"ok": False, "error":
                                    (r.stderr.strip() or line or "the check said nothing")[:400]}),

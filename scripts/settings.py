@@ -28,7 +28,8 @@ ACCENT_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # Settings that name a provider - validated against provider.available() below,
 # not just checked for type, so nothing can end up pointed at a provider with
 # no working credentials.
-PROVIDER_KEYS = ("provider", "sub_provider", "cron_provider", "verify_provider")
+PROVIDER_KEYS = ("provider", "sub_provider", "cron_provider", "verify_provider",
+                 "speak_summary_provider")
 
 # Each model setting, paired with the provider setting it must belong to, so
 # a blank model is filled in from the right provider's list - see
@@ -39,6 +40,7 @@ MODEL_PAIRS = {
     "sub_model": "sub_provider",
     "cron_model": "cron_provider",
     "verify_model": "verify_provider",
+    "speak_summary_model": "speak_summary_provider",
 }
 
 # temperature isn't a standardised unit - it's just how far a provider's API
@@ -48,6 +50,29 @@ MODEL_PAIRS = {
 # a decimal point).
 TEMPERATURE_RANGE = (0, 2)
 
+# Every setting that holds one, so they're all checked against the range above
+# rather than only the main one being.
+TEMPERATURE_KEYS = ("temperature", "speak_summary_temperature")
+
+# What gets read out loud, as the voice tab's one dropdown. The provider pair
+# below is WHO reads it; this is WHAT they're given.
+#
+#   off       nothing. The switch, kept separate from "nobody chosen" so
+#             turning speech off doesn't throw away the model you picked.
+#   final     only a reply the turn ended on - the model answering in words
+#             rather than calling a tool. The original behaviour, and still
+#             the default.
+#   all       every message the model wrote during the turn, the ones
+#             alongside tool calls included, read one after another.
+#   summary   one summary of the whole turn, written by the summarising model
+#             below - a single account of what happened, however many steps it
+#             took.
+#   summary_each    a summary of each message instead, read one after another -
+#             the running commentary, in short.
+#   summary_final   a summary of just the reply the turn ended on. Nothing is
+#             read for a turn that was all tool work.
+SPEAK_MODES = ("off", "final", "all", "summary", "summary_each", "summary_final")
+
 # Settings that are a list of strings rather than a single value - the safety
 # tab's two lists and the marketplace's repositories. Each is drawn by the
 # page's one list widget, and each is checked element by element in _valid(),
@@ -55,6 +80,20 @@ TEMPERATURE_RANGE = (0, 2)
 # `isinstance(value, type(DEFAULTS[key]))` match would take a list of anything
 # at all, dicts and nulls included, and hand it to code that expects text.
 LIST_KEYS = ("safety_whitelist", "safety_blacklist", "market_repos")
+
+# How careful a chat is, as one number: the highest 0-10 danger rating the
+# checking model can give a tool call and still have it run unattended.
+# Anything above it stops and asks. The two ends are the degenerate cases and
+# skip the checking model entirely, because there is nothing to ask it:
+#
+#   0    ask about every call - nothing runs unattended
+#   1-9  run anything rated at or under this, ask about the rest
+#   10   run everything - no check at all
+#
+# One number rather than a set of named levels. The scale the prompt already
+# asks for IS the setting, so there is nothing to map between, nothing to keep
+# in sync, and no wording for a level to drift away from.
+SAFETY_MIN, SAFETY_MAX = 0, 10
 
 DEFAULTS = {
     # The main agent's provider + model.
@@ -79,31 +118,64 @@ DEFAULTS = {
     "safety_validation": True,
     "verify_provider": "bedrock",
     "verify_model": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "safety_prompt": """You are a safety check for an AI agent that can run things on a real
-computer. Here is a tool call the agent wants to run:
+    # What a chat runs at when it has not been given a number of its own.
+    # See SAFETY_MIN/SAFETY_MAX above for what the number means.
+    "safety_threshold": 3,
+    # The prompt the check sends. It asks for a number, not a verdict - the
+    # verdict is the comparison against the threshold, which is what lets one
+    # prompt serve every setting from 0 to 10 instead of a wording per level
+    # that drifts the first time one is edited.
+    #
+    # Two placeholders, both substituted with a plain string replace and not
+    # str.format, so a stray { or } elsewhere in an edited prompt is harmless:
+    #   {call}   the tool call being judged. Required - a prompt without it
+    #            asks about nothing, so tool_validation falls back to this one.
+    #   {extra}  the chat's own extra rules, or nothing at all. Optional; a
+    #            prompt without it gets them appended at the end instead.
+    "safety_prompt": """You are the safety check for an AI agent that can run things on a real
+computer, on behalf of its owner. The owner asked for the work; you are only
+judging how much damage this particular step could do.
+
+Here is the tool call the agent wants to run:
 
 {call}
 
-First, rate the danger level from 0 to 10:
-- 0: Completely harmless (reading a text file, listing a directory, checking status)
-- 1-3: Low risk (writing to user documents, installing user packages)
-- 4-6: Moderate risk (modifying configs, running scripts, network operations)
-- 7-9: High risk (system-wide changes, deleting files, modifying permissions)
-- 10: Catastrophic (rm -rf /, modifying core system files, destroying data)
+Rate how dangerous it is, from 0 to 10:
 
-If the danger rating is 3 or below, reply with exactly {true} followed by the rating and a short sentence explaining why it is safe.
-Otherwise reply with the rating and a brief reason why it could be unsafe, and do NOT write {true} anywhere in it.
+- 0-1   Harmless. Reading a file, listing a folder, checking status, searching.
+- 2-3   Low risk. Writing a file in the user's own work, installing a package
+        for this user, making a directory.
+- 4-6   Moderate. Changing configuration, running a script, network calls,
+        sending something to somebody else, spending money.
+- 7-9   High. System-wide changes, deleting files, changing permissions, sudo,
+        anything that would be hard to undo.
+- 10    Catastrophic. Wiping data, rm -rf /, breaking the machine or its login.
 
-Format: DANGER: [0-10] - [explanation]""",
+Judge what the call ACTUALLY does, not what it mentions. Reading a file about
+deleting things is a read.
+{extra}
+Answer with one line and nothing else:
+
+DANGER: <0-10> - <one short sentence saying why>""",
     # Tools that skip the check entirely and just run. Matched against the
     # PARSED tool name, whole and case-insensitively - not a substring of the
     # call - so trusting "screenshot_tool" trusts that tool and not a command
     # that merely mentions it. Checked before the blacklist below.
+    #
+    # Global rather than per-level, on purpose. It matters most at the safest
+    # level, where it is the only thing that runs without being asked about -
+    # and a list that says "these tools are fine" does not become untrue
+    # because the chat next to it is more relaxed.
     "safety_whitelist": ["screenshot_tool"],
     # Phrases that block a call outright, without asking the model. Matched
     # anywhere in the call text (tool name AND arguments, lower-cased), which
     # is the point: what these catch is usually a path in an ARGUMENT - the
     # agent editing its own code - rather than the tool itself.
+    #
+    # This one applies at EVERY level, full auto included. A phrase here is a
+    # thing that must never run unasked, and the level a chat happens to be on
+    # does not change that - a safety net the most dangerous setting is the
+    # only one to skip would be no net at all.
     #
     # Empty by default. The obvious ones to add are this project's own files:
     # main.py, tool_processor.py, tool_validation.py, provider.py, settings.py,
@@ -166,6 +238,63 @@ nothing else.""",
     # what an unusable provider heals back to, see _heal_providers.
     "voice_provider": "",
     "voice_model": "",
+    # Who reads the finished reply back out loud, and on which model - the same
+    # kind of pair as the two above, asked of the endpoint that runs the other
+    # way. Naming a provider IS the on switch: "" means the page stays silent,
+    # which is what an install that has never opened the voice tab does.
+    "speak_provider": "",
+    "speak_model": "",
+    # And what they're handed. See SPEAK_MODES above for the six answers.
+    # "final" is what this did before the setting existed, so an install that
+    # upgrades into it hears exactly what it heard yesterday.
+    "speak_mode": "final",
+    # The model that writes the summary, for the three summary modes - a normal
+    # provider/model/temperature trio, like the checking model on the safety
+    # tab. It is only ever asked when one of those modes is on.
+    "speak_summary_provider": "deepseek",
+    "speak_summary_model": "deepseek-v4-flash",
+    "speak_summary_temperature": 0,
+    # What it's told. Sent as the system message with the message underneath it
+    # as a user message, so there is no placeholder to keep - the same
+    # arrangement compaction_prompt uses, and for the same reason: the text
+    # being worked on is a message, not something pasted into the instruction.
+    #
+    # It is written as "you ARE the agent's voice", not "summarise this text",
+    # because the two produce completely different things. Asked for a summary,
+    # a model narrates from outside - "the agent will now open Firefox" - which
+    # is nobody's idea of being spoken to. Told it is the voice, it says
+    # "Opening Firefox." The examples are doing most of the work here; the
+    # rules alone don't get a model to drop its throat-clearing.
+    "speak_summary_prompt": """You are the voice of an AI agent, speaking to the person it works for. You
+are not describing the agent from outside - you ARE it. Calm, clipped, dry.
+Never eager, never apologetic, never chatty. Their time is the point.
+
+Below is what the agent just wrote. Say it out loud in as few words as it
+takes. Fragments are good. Drop "I", "the", and any word the line still works
+without.
+
+On the way to a tool call, a few words is the whole thing:
+  "Opening Firefox."
+  "Checking the logs."
+  "Rewriting the config."
+
+When the agent has an answer, give the ANSWER - one or two sentences, no more:
+  "Three tests failed, all in the payment suite."
+  "It's the API key. Expired last week."
+
+Never announce what you are about to do: not "I will now open Firefox for
+you", not "Let me check that", not "Sure", not "Here is a summary". Never say
+"the user" or "the agent" - it is "you" and "your".
+
+This may be one step of a long job. Say this step. Don't recap what came before
+it or promise what comes next.
+
+It goes straight into a speech synthesiser, so write plain spoken English: no
+markdown, no headings, no bullets, no code, and no file paths or URLs spelled
+out character by character - say "the settings file". Keep the numbers and
+names that matter.
+
+Reply with the words to be spoken and nothing else.""",
 }
 
 _write_lock = threading.Lock()
@@ -187,9 +316,9 @@ def _valid(key, value):
         return False
     if key == "accent":
         return isinstance(value, str) and (not value or bool(ACCENT_RE.match(value)))
-    if key == "voice_provider":
-        # Not in PROVIDER_KEYS: unlike the four settings there, this one is
-        # allowed to name nobody, and "" is how it says so.
+    if key in ("voice_provider", "speak_provider"):
+        # Not in PROVIDER_KEYS: unlike the four settings there, these two are
+        # allowed to name nobody, and "" is how they say so.
         return isinstance(value, str) and (not value or value in provider.available())
     if key in LIST_KEYS:
         # A list of strings, and nothing else - one bad element refuses the
@@ -200,7 +329,14 @@ def _valid(key, value):
         # when it matches, so neither can turn into a rule that fires on
         # everything.
         return isinstance(value, list) and all(isinstance(v, str) for v in value)
-    if key == "temperature":
+    if key == "safety_threshold":
+        # bool is excluded for the same reason as temperature's check below:
+        # True would otherwise pass as the threshold 1.
+        return (isinstance(value, int) and not isinstance(value, bool)
+                and SAFETY_MIN <= value <= SAFETY_MAX)
+    if key == "speak_mode":
+        return value in SPEAK_MODES
+    if key in TEMPERATURE_KEYS:
         return (isinstance(value, (int, float)) and not isinstance(value, bool)
                 and TEMPERATURE_RANGE[0] <= value <= TEMPERATURE_RANGE[1])
     if not isinstance(value, type(DEFAULTS[key])):
@@ -244,6 +380,11 @@ def _heal_providers(data):
     if data.get("voice_provider") and data["voice_provider"] not in usable:
         data["voice_provider"] = ""
         data["voice_model"] = ""
+    # And speaking the reply back, for the same reason and with the same
+    # meaning: blank is a working state, it just means nothing is read aloud.
+    if data.get("speak_provider") and data["speak_provider"] not in usable:
+        data["speak_provider"] = ""
+        data["speak_model"] = ""
 
 
 def _heal_models(data):

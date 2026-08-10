@@ -163,3 +163,129 @@ that gets called should have its instructions present (calling loads it).
 - Anything destructive asks for approval with `input()` inside `run()`.
 - Denials return a `DENIED` string, not an exception, so the loop survives.
 - The inner tool loop is capped at 10 iterations - each one is a paid API call.
+
+## Planned: boards - several chats, co-present
+
+Written 2026-08-09. Design notes, nothing built.
+
+### The problem being solved
+
+Uniagent already runs many agents at once. Every chat is its own `Agent` with
+its own `TurnSlot`, so two chats genuinely run in parallel; cron jobs are
+agents; subagents are agents. The web UI shows exactly one of them. `currentChat`
+is a single string, and `events.onmessage` throws away every event whose `chat`
+field isn't it (index.html:4638).
+
+So the shape of the UI contradicts the shape of the system. The sidebar is a
+filing cabinet - one drawer open at a time - for something that behaves like a
+room full of people working. You cannot watch two agents at once, cannot ask
+three the same question, and two chats that both want the same fact each have
+to be told it separately.
+
+A **board** is a named view holding several chats side by side, plus the wiring
+between them. Drag a chat from the sidebar onto the board and it joins; it is
+the same chat, still openable full-screen, still in the sidebar. Nothing is
+copied or moved. A board is a small JSON file: which chats, where they sit,
+what is wired to what.
+
+### Naming - "workspace" is taken
+
+`workspace` already means a directory root plus an optional ssh destination
+(scripts/workspace.py) - *where* a chat's tools do their work, and on which
+machine. Reusing the word for *a group of chats on screen* would collide in the
+settings UI, in `/workspace`, and in every conversation about it afterwards.
+
+Board is the working name here. Room, table and canvas all fit too. Decide
+before writing any code, because the word ends up in the file format, the route
+names and the tool description.
+
+### What makes it unique
+
+Panes side by side is not new - tmux, VS Code, three browser tabs. The part
+nobody has is that these particular agents are **co-present**: they share one
+machine, they can share a workspace in the ssh sense, and they can be wired to
+each other. The board is where that wiring becomes something you can see and
+drag, instead of a config file nobody reads.
+
+Uniagent already does agent-to-agent messaging, but only downward and only
+inside one chat: the `subagent` tool spawns children, and their reports come
+back through `main.notify` under the parent's turn lock. Boards make that
+**lateral** - peer to peer between chats you already have, using the same
+delivery path that is already proven to be safe.
+
+Four things a board can do that the single-chat window structurally cannot:
+
+**Broadcast.** One message box at the bottom of the board sends to every chat
+on it. They all answer in parallel, each on its own model, each with real tools
+on the real machine. Same question to DeepSeek, Claude and Gemini, three live
+panes, no copy-paste. This is the demo that sells the feature.
+
+**@mention routing.** Inside a board, `@researcher` in one chat delivers that
+text into the chat named researcher, which answers in its own pane. Same
+mechanism as a subagent report - hand it to the registered turn runner, it
+waits for that chat's `TurnSlot`, it lands when the chat is idle.
+
+**Wires.** Drag a line from chat A's edge to chat B's: "when A finishes a turn,
+send A's final answer to B as a message." Visible, hoverable, deletable. Chain
+three and you have a pipeline; point two at one and you have a reducer. The
+wiring is the feature - it is a thing you built by dragging, not a workflow
+YAML.
+
+**A shared note.** One markdown file per board, injected into every chat on
+that board, writable by all of them. The blackboard pattern: agents coordinate
+by reading and writing shared state instead of by messaging each other. It fits
+the existing context system exactly - it is one more injected file, just scoped
+to a board rather than global.
+
+Optionally, roles: a board can give each pane a standing instruction (planner /
+critic / builder) without editing that chat's own context, so the same chat is
+a critic on one board and nothing special everywhere else.
+
+### Why this is cheaper to build than it looks
+
+- **The server already broadcasts everything.** `_broadcast` puts each event on
+  every open `/stream` queue, and every event already carries a `chat` field
+  (server.py:432-490). The front end is what narrows it to one. Viewing many
+  chats live needs no server work at all - it needs `currentChat` to become a
+  set and the filter at index.html:4638 to route by `chat` into the right pane.
+- **Parallelism is real already.** `TurnSlot` is per-agent, not global. Six
+  panes running six turns is what the code does today when six clients poke six
+  chats.
+- **Delivery into a busy chat is solved.** `main.notify` + the turn lock is
+  exactly the "message arrives while it is thinking" problem, already handled
+  for subagent reports. Wires and @mentions reuse it rather than inventing a
+  queue.
+- **Boards are additive.** A board file that names chats. Delete the file and
+  nothing else changes; every chat is untouched and still works alone.
+
+### What will bite
+
+- **Approvals.** `terminal` and `write_file` gate on an approval that the UI
+  shows as one modal for the whole window (there is already a comment at
+  index.html:3441 about approving a background chat's question by accident).
+  Six panes means approvals must be per-pane, attached to the pane that asked.
+  This is the first thing to fix and it is not optional - a modal that could
+  approve the wrong agent's `rm` is worse than no board.
+- **Cost, visibly.** Broadcast to six chats is six paid calls, and a wire that
+  fires on every turn is a call the user did not type. The board needs a
+  running count of what it just spent, and wires should be obvious enough that
+  nobody builds an accidental loop. Two chats wired at each other will ping-pong
+  forever - detect the cycle when the wire is drawn, refuse it there.
+- **DOM weight.** index.html is one 8.4k-line file. Six live transcripts
+  streaming markdown at once needs the panes to render only what is on screen,
+  and probably a shorter scrollback per pane than the full-screen view.
+- **Not every agent should be draggable at first.** Cron jobs and subagents are
+  `Agent`s too, so a board could watch a cron run live - which is genuinely
+  useful, and also a much bigger surface. Chats only for v1.
+
+### Build order
+
+1. Panes: `currentChat` becomes a set, events route by `chat`, drag from the
+   sidebar, board JSON persists. Read-only multi-view, no wiring.
+2. Per-pane approvals. Blocks everything after it.
+3. Broadcast box.
+4. @mention routing between panes.
+5. Shared note.
+6. Wires, with cycle refusal at draw time.
+
+Stop after any step and the thing still makes sense on its own.

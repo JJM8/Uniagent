@@ -194,6 +194,14 @@ def _delete(arg, chat):
         destination = deleted_dir / (base + "-" + str(n))
         n += 1
     chat_folder.rename(destination)
+    # The stamps go with it. They live outside the chat folder (see
+    # main.STAMPS), keyed by the chat's id, and a cron job's run numbers come
+    # BACK: delete run 003 and the watcher makes another 003 within 30
+    # seconds. Its first turn is the job's prompt - the same text, so the same
+    # role and the same length - which is exactly what stamp_history reuses a
+    # stamp on, and the new run's first message would quietly wear the old
+    # run's date. Better no date than a confident wrong one.
+    main.clear_stamps(main.chat_id(path))
     # Say so when it's going to come straight back, rather than letting it look
     # like the delete silently failed 30 seconds later.
     note = ""

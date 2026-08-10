@@ -2546,6 +2546,239 @@ def transcribe(name, model, clip, filename):
     return _transcribe_openai(p, model, data, filename)
 
 
+# Speaking the answer back out loud - the same idea as transcription above, run
+# the other way. A provider is a host, a key and a wire; asking it for audio
+# instead of words is a different endpoint on that same host, so this needs no
+# credentials of its own either. Pick a provider on the voice tab and the
+# finished reply is read aloud in the web page.
+#
+# Which wires can do it at all:
+#   openai / deepseek / local  POST /audio/speech, OpenAI's own shape, which is
+#                              what third-party endpoints serving speech copy.
+#                              DeepSeek's own host serves no audio - the wire is
+#                              here because a provider card ON that wire is
+#                              often pointed somewhere else that does.
+#   gemini                     no speech endpoint - its TTS models are asked
+#                              through ordinary generateContent with the answer
+#                              requested as audio instead of text.
+#   anthropic / bedrock /      nothing. Claude produces no audio, and Polly is
+#   claude-subscription        a separate AWS service with its own workflow.
+TTS_WIRES = frozenset({"openai", "deepseek", "local", "gemini"})
+
+# What a provider is offered before its catalogue has been read - and after,
+# for endpoints that don't list their speech models. Suggestions, never a
+# whitelist: the box on the voice tab is free text, so a model newer than this
+# works with no code change. Only used for a provider pointed at its own wire's
+# host, for the same reason STT_FLOOR is - see _at_wire_host.
+TTS_FLOOR = {
+    "openai": ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"],
+    "gemini": ["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"],
+}
+
+# What a text-to-speech model looks like in a catalogue of a hundred others.
+# "speech" alone is deliberately NOT in here: it matches "speech-to-text", which
+# is the opposite job. kokoro and orpheus are the two local TTS models common
+# enough in LM Studio/vLLM catalogues to be worth naming.
+_TTS_WORDS = ("tts", "text-to-speech", "kokoro", "orpheus")
+
+# Which voice reads it. Not a setting: the voice tab is a provider and a model
+# and nothing else, and every endpoint here has a working default anyway - this
+# just has to be a name each one recognises. OpenAI takes it as a plain voice
+# id, Gemini as a prebuilt voice name.
+TTS_VOICE = "alloy"
+TTS_VOICE_GEMINI = "Kore"
+
+# Synthesis is slower than a chat request - a long answer is a minute of audio
+# to generate - but it is not slower than transcription, which has to be waited
+# on before anything happens at all.
+TTS_TIMEOUT = 120
+
+# The most text sent in one go. OpenAI's /audio/speech refuses anything over
+# 4096 characters outright, so this is that limit with room to spare; a reply
+# longer than it is cut at the last sentence that fits (see _speakable). Most
+# replies are nowhere near it.
+TTS_MAX_CHARS = 3800
+
+_tts_cache = {}           # provider id -> (fetched_at, [models])
+
+# Markdown that is punctuation on a screen and noise in your ear: a heading's
+# hashes, the asterisks around bold, a bullet's dash, the backticks around a
+# name. Stripped as SYNTAX only - every word survives, including the contents
+# of code blocks, because what gets read out is meant to be the reply itself
+# and not a summary of it.
+_MD_FENCE = re.compile(r"^\s*```.*$", re.M)
+_MD_HEAD = re.compile(r"^\s{0,3}#{1,6}\s*", re.M)
+_MD_BULLET = re.compile(r"^\s*[-*+]\s+", re.M)
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_MD_EMPH = re.compile(r"(\*\*|__|`)")
+
+
+def _speakable(text):
+    """`text` with its markdown syntax taken off and cut to something an audio
+    endpoint will accept. Words are never dropped, only the characters that
+    mark them up - so what you hear is the reply as written.
+
+    The cut, when there has to be one, is made at the last sentence end that
+    fits rather than mid-word: a reply that stops on a full stop sounds like it
+    finished early, one that stops mid-syllable sounds broken."""
+    out = _MD_LINK.sub(r"\1", text)
+    out = _MD_FENCE.sub("", out)
+    out = _MD_HEAD.sub("", out)
+    out = _MD_BULLET.sub("", out)
+    out = _MD_EMPH.sub("", out)
+    out = out.strip()
+    if len(out) <= TTS_MAX_CHARS:
+        return out
+    cut = out[:TTS_MAX_CHARS]
+    stop = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "), cut.rfind("\n"))
+    return cut[:stop + 1].strip() if stop > TTS_MAX_CHARS // 2 else cut.strip()
+
+
+def _fetch_tts(p):
+    """Provider `p`'s own speech models, off its catalogue. Raises on any
+    failure, exactly like _fetch_stt - the caller treats that as "no live list"
+    rather than an error, because a provider that can't be asked right now
+    still has its floor and still takes a typed model id."""
+    if p["wire"] == "gemini":
+        # No catalogue flag says what a model is for, so the ids are all there
+        # is to go on - and Gemini's TTS models all say so in their name.
+        return [m for m in _fetch_live_custom(p) if _looks_tts(m)]
+    r = requests.get(custom_base_url(p).rstrip("/") + "/models",
+                     headers=_bearer(custom_key(p)), timeout=5)
+    _check(r)
+    return sorted(m["id"] for m in r.json().get("data", []) if _looks_tts(m["id"]))
+
+
+def _looks_tts(model_id):
+    return any(word in model_id.lower() for word in _TTS_WORDS)
+
+
+def tts_models(name):
+    """The text-to-speech models provider `name` can be asked for: its wire's
+    floor (when it is pointed at that wire's own host), anything speech-shaped
+    in its manual model list, then its live catalogue. [] for a provider on a
+    wire that cannot speak at all.
+
+    Cached for the same few minutes chat catalogues are, and never raises - it
+    is drawn on a settings tab, and a provider that is unreachable right now
+    must show its suggestions rather than an error."""
+    p = custom_provider(name)
+    if not p or p["wire"] not in TTS_WIRES:
+        return []
+    out = list(TTS_FLOOR.get(p["wire"], [])) if _at_wire_host(p) else []
+    for m in p["models"]:
+        if _looks_tts(m) and m not in out:
+            out.append(m)
+    key = _models_key(name)
+    now = time.time()
+    cached = _tts_cache.get(key)
+    if cached is None or now - cached[0] > _LIVE_TTL:
+        try:
+            _tts_cache[key] = (now, _fetch_tts(p))
+        except Exception:
+            _tts_cache[key] = (now, [])     # remember the failure too - no hammering
+    for m in _tts_cache[key][1]:
+        if m not in out:
+            out.append(m)
+    return out
+
+
+def _speak_openai(p, model, text):
+    """OpenAI's /audio/speech, which is the shape every endpoint serving TTS
+    copies. Asks for mp3 because that is the one format every browser plays and
+    the smallest thing to send to a phone."""
+    r = requests.post(custom_base_url(p).rstrip("/") + "/audio/speech",
+                      headers=_bearer(custom_key(p)),
+                      json={"model": model, "input": text, "voice": TTS_VOICE,
+                            "response_format": "mp3"},
+                      timeout=TTS_TIMEOUT)
+    _check(r)
+    return r.content, "audio/mpeg"
+
+
+def _speak_gemini(p, model, text):
+    """Gemini has no speech endpoint - audio comes back from an ordinary
+    generateContent turn asked to answer in sound instead of words.
+
+    What arrives is headerless 16-bit PCM, which no browser will play on its
+    own, so it is wrapped in a WAV container here. The sample rate is read off
+    the part's own mime type ("audio/L16;codec=pcm;rate=24000") rather than
+    assumed, since that is the one part of it Google has ever varied."""
+    body = {
+        "contents": [{"parts": [{"text": text}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig":
+                             {"voiceName": TTS_VOICE_GEMINI}}},
+        },
+    }
+    r = requests.post(custom_base_url(p).rstrip("/") + "/models/" + model
+                      + ":generateContent",
+                      headers={"x-goog-api-key": custom_key(p),
+                               "Content-Type": "application/json"},
+                      json=body, timeout=TTS_TIMEOUT)
+    _check(r)
+    parts = ((r.json().get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+    for part in parts:
+        inline = part.get("inlineData") or part.get("inline_data") or {}
+        if not inline.get("data"):
+            continue
+        pcm = base64.b64decode(inline["data"])
+        mime = inline.get("mimeType") or inline.get("mime_type") or ""
+        rate = 24000
+        for bit in mime.split(";"):
+            if bit.strip().startswith("rate="):
+                try:
+                    rate = int(bit.split("=", 1)[1])
+                except ValueError:
+                    pass    # keep the default rather than fail over a header
+        return _wav(pcm, rate), "audio/wav"
+    raise RuntimeError(model + " answered with no audio in it - if it is not a "
+                       "text-to-speech model, pick one that is on the voice tab")
+
+
+def _wav(pcm, rate):
+    """Raw 16-bit mono PCM wrapped in a WAV header, in memory. Written by hand
+    rather than through the wave module because that wants a file object and
+    this is 44 bytes of header in front of bytes we already have."""
+    header = b"RIFF" + (36 + len(pcm)).to_bytes(4, "little") + b"WAVEfmt "
+    header += (16).to_bytes(4, "little")        # size of this fmt chunk
+    header += (1).to_bytes(2, "little")         # 1 = uncompressed PCM
+    header += (1).to_bytes(2, "little")         # mono
+    header += rate.to_bytes(4, "little")
+    header += (rate * 2).to_bytes(4, "little")  # bytes per second, at 2 per sample
+    header += (2).to_bytes(2, "little")         # bytes per frame
+    header += (16).to_bytes(2, "little")        # bits per sample
+    header += b"data" + len(pcm).to_bytes(4, "little")
+    return header + pcm
+
+
+def speak(name, model, text):
+    """`text` read aloud by provider `name` on `model`, as (audio bytes, mime).
+
+    Raises RuntimeError with a sentence meant to be read by a person, exactly
+    like transcribe() above - the server puts that straight in front of whoever
+    turned this on, and it is the only explanation they get when nothing comes
+    out of the speaker."""
+    p = custom_provider(name)
+    if not p:
+        raise RuntimeError("there is no provider called " + name + " any more - "
+                           "pick one on the voice tab")
+    if p["wire"] not in TTS_WIRES:
+        raise RuntimeError(name + " speaks " + p["wire"] + ", which has no "
+                           "text-to-speech at all - pick a provider on the "
+                           + ", ".join(sorted(TTS_WIRES)) + " wires")
+    if not model:
+        raise RuntimeError("no text-to-speech model chosen for " + name
+                           + " - set one on the voice tab")
+    said = _speakable(text)
+    if not said:
+        raise RuntimeError("nothing to read out")
+    if p["wire"] == "gemini":
+        return _speak_gemini(p, model, said)
+    return _speak_openai(p, model, said)
+
+
 # The API-key variables in .env. NOT a provider table any more - a provider's
 # key lives on the provider - but these are still read by the parts of Uniagent
 # that call OpenAI and friends directly rather than through a provider: the

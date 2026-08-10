@@ -40,6 +40,13 @@
     --red-h: 3;
     --red-s: 93%;
     --red-l: 63%;
+    /* How a safety level is lit. Only the HUE changes between the five (see
+       the .lv-* classes further down, green through to red); how saturated
+       and how bright that hue is drawn is a property of the THEME, so the
+       whole scale is re-lit for light mode by these two numbers rather than
+       by five more colours. */
+    --lv-s: 62%;
+    --lv-l: 56%;
   }
   :root[data-theme="light"] {
     --bg: #ffffff;
@@ -55,6 +62,10 @@
     --red-h: 356;
     --red-s: 72%;
     --red-l: 47%;
+    /* Darker and a touch more saturated than the dark theme's, so a yellow
+       and an orange still read as different things on white. */
+    --lv-s: 72%;
+    --lv-l: 36%;
   }
   /* Derived from whichever theme is live above. These sit in their own block
      because the formulas never change - only the numbers they read do. var()
@@ -150,7 +161,10 @@
     flex: 1;
     min-width: 0;
     overflow: hidden;
-    /* What #ws-bar is positioned against - see it, below. */
+    /* What anything absolutely positioned inside the conversation measures
+       itself against. The workspace picker used to be the reason for this and
+       has since moved up to #chat-bar, but the approval bubble and the
+       scroll-to-bottom button still want a positioned ancestor here. */
     position: relative;
   }
   @media (min-width: 721px) and (max-width: 1024px) {
@@ -248,20 +262,38 @@
 
   /* Floats over the top-left corner of the conversation, and only while the
      sidebar is folded away - it is the way back to it. */
-  /* The chat's workspace picker: a small labelled box in the top-left corner
-     of the conversation column, and nothing else - the path and the machine
-     are in its tooltip and on the settings page, not spelled out beside it
-     every second of the day.
 
-     Positioned rather than stacked, because the empty-chat state centres this
-     column vertically and an in-flow bar would drift into the middle of the
-     screen with the splash. Absolute keeps it in the corner in both states,
-     which is the whole point of a thing that says where you are. */
-  #ws-bar {
-    position: absolute;
-    top: 8px;
-    left: 12px;
+  /* The chat bar: the two controls that say how THIS chat runs - which
+     workspace its tools work in, and how carefully it is allowed to use them.
+     Top right of the whole conversation area, spanning the full width between
+     the two sidebars rather than sitting inside the centred text column, so
+     they stay pinned to the corner instead of wandering inward as the column
+     narrows.
+
+     In flow at the top of .main-col, not floating over it. The old workspace
+     picker was absolutely positioned to survive the empty-chat state, which
+     centres the text column vertically - but that was while it lived INSIDE
+     that column. Up here it is a sibling of it, so the ordinary top of a flex
+     column is already the corner in both states, and nothing overlaps the
+     first message on a narrow window. */
+  #chat-bar {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 8px 12px 4px;
+    min-height: 44px;
+    flex: 0 0 auto;
+    min-width: 0;
+    position: relative;
     z-index: 6;
+  }
+  /* Clear of the two floating panel buttons when their panels are folded
+     away, on whichever side that happens. */
+  body.context-hidden #chat-bar { padding-right: 58px; }
+  body.side-hidden #chat-bar { padding-left: 58px; }
+
+  #ws-bar {
     display: flex;
     flex-direction: column;
     gap: 3px;
@@ -269,8 +301,6 @@
     max-width: 45%;
   }
   #ws-bar[hidden] { display: none; }
-  /* Clear of the floating "show chats" button when the sidebar is folded. */
-  body.side-hidden #ws-bar { left: 58px; }
   #ws-bar > label {
     font-size: 10px;
     letter-spacing: 0.6px;
@@ -282,7 +312,12 @@
   }
   #ws-quick {
     width: auto;
-    max-width: 100%;
+    /* A <select> sizes to its LONGEST option, so one long workspace name made
+       the box permanently that wide. It only ever has to show the one that is
+       selected. */
+    max-width: 200px;
+    text-overflow: ellipsis;
+    min-height: 29px;
     font-size: 12px;
     padding: 5px 8px;
     border-radius: 4px;
@@ -295,6 +330,321 @@
      to forget, and a file written in the wrong place is a real mess. */
   #ws-bar.remote > label { color: var(--accent-pop); opacity: 1; }
   #ws-bar.remote #ws-quick { color: var(--accent-pop); border-color: var(--accent-pop); }
+
+  /* ---- the chat's safety number -----------------------------------------
+     One number, 0 to 10: the highest danger rating a tool call can be given
+     and still run without asking. The control is a slider over a green-to-red
+     gradient, so the setting reads as a position on a scale rather than a word
+     that has to be learned.
+
+     --lv-h is written onto the element by JS (hue 140 at 0 through to 0 at
+     10). --level has to be declared on the SAME elements, not on :root: a
+     var() is substituted where it is declared, so a --level defined at the
+     root would resolve against a --lv-h that isn't there yet and stay broken
+     however many descendants set one later. */
+  #safety-btn, #safety-panel, #sp-value, #safety-slider, #s-safety-threshold {
+    --level:     hsl(var(--lv-h, 140) var(--lv-s) var(--lv-l));
+    --level-a12: hsl(var(--lv-h, 140) var(--lv-s) var(--lv-l) / 0.12);
+    --level-a25: hsl(var(--lv-h, 140) var(--lv-s) var(--lv-l) / 0.25);
+    --level-a40: hsl(var(--lv-h, 140) var(--lv-s) var(--lv-l) / 0.40);
+  }
+
+  #safety-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+    position: relative;
+  }
+  #safety-bar > label {
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--dim);
+    opacity: 0.8;
+    padding-left: 2px;
+    user-select: none;
+  }
+  /* The button is the number: its dot, outline and text all take the colour
+     of where it sits on the scale, so the corner says how loose this chat is
+     from across the room. */
+  #safety-btn {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 6px 9px;
+    min-height: 29px;
+    box-sizing: border-box;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    background: var(--panel);
+    color: var(--level);
+    border: 1px solid var(--level-a40);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  #safety-btn:hover { background: var(--level-a12); border-color: var(--level); }
+  #safety-btn .safety-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--level);
+    flex: 0 0 auto;
+  }
+  /* A chat with a number of its own gets a ring, so "deliberate" and "just
+     following the default" are one glance apart. */
+  #safety-btn.own .safety-dot { box-shadow: 0 0 0 3px var(--level-a25); }
+  #safety-btn .safety-caret { width: 9px; height: 9px; opacity: 0.7; flex: 0 0 auto; }
+
+  /* Fixed, and placed against the button by JS: .main-col clips its overflow,
+     and a dropdown is exactly the thing that has to hang outside its parent. */
+  #safety-panel {
+    position: fixed;
+    z-index: 40;
+    width: min(320px, calc(100vw - 24px));
+    max-height: min(80vh, 640px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.34);
+    padding: 16px 16px 14px;
+    font-size: 13px;
+  }
+  #safety-panel[hidden] { display: none; }
+
+  /* The reading: the number itself, big and in its own colour, with the one
+     line that says what it does. */
+  #sp-value {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    margin-bottom: 12px;
+  }
+  #sp-number {
+    font-size: 30px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--level);
+    font-variant-numeric: tabular-nums;
+  }
+  #sp-says { font-size: 12px; color: var(--dim); }
+
+  /* The slider. The gradient IS the scale, so which way is safe needs no
+     label. The native track is replaced on both engines; the thumb takes the
+     colour of where it currently sits. */
+  #safety-slider, #s-safety-threshold {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 18px;
+    background: none;
+    cursor: pointer;
+    display: block;
+  }
+  #safety-slider:focus, #s-safety-threshold:focus { outline: none; }
+  #safety-slider::-webkit-slider-runnable-track,
+  #s-safety-threshold::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 3px;
+    /* Evenly spaced hues, matching levelHue()'s straight 140-to-0 run exactly
+       - otherwise the thumb's colour and the track under it disagree by a few
+       degrees at the in-between numbers. */
+    background: linear-gradient(to right,
+      hsl(140 var(--lv-s) var(--lv-l)), hsl(105 var(--lv-s) var(--lv-l)),
+      hsl(70 var(--lv-s) var(--lv-l)), hsl(35 var(--lv-s) var(--lv-l)),
+      hsl(0 var(--lv-s) var(--lv-l)));
+  }
+  #safety-slider::-moz-range-track,
+  #s-safety-threshold::-moz-range-track {
+    height: 6px;
+    border-radius: 3px;
+    /* Evenly spaced hues, matching levelHue()'s straight 140-to-0 run exactly
+       - otherwise the thumb's colour and the track under it disagree by a few
+       degrees at the in-between numbers. */
+    background: linear-gradient(to right,
+      hsl(140 var(--lv-s) var(--lv-l)), hsl(105 var(--lv-s) var(--lv-l)),
+      hsl(70 var(--lv-s) var(--lv-l)), hsl(35 var(--lv-s) var(--lv-l)),
+      hsl(0 var(--lv-s) var(--lv-l)));
+  }
+  #safety-slider::-webkit-slider-thumb,
+  #s-safety-threshold::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    margin-top: -5px;
+    border-radius: 50%;
+    background: var(--level);
+    border: 2px solid var(--panel);
+    box-shadow: 0 0 0 1px var(--level);
+  }
+  #safety-slider::-moz-range-thumb,
+  #s-safety-threshold::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--level);
+    border: 2px solid var(--panel);
+    box-shadow: 0 0 0 1px var(--level);
+  }
+  #safety-slider:focus-visible::-webkit-slider-thumb, #s-safety-threshold:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 1px var(--level), 0 0 0 4px var(--level-a25); }
+  #safety-slider:focus-visible::-moz-range-thumb, #s-safety-threshold:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 1px var(--level), 0 0 0 4px var(--level-a25); }
+
+  /* The eleven positions, under the track, so a number can be aimed at
+     directly instead of dragged to. */
+  #safety-ticks {
+    display: flex;
+    justify-content: space-between;
+    margin: 2px 1px 0;
+  }
+  #safety-ticks button {
+    flex: 1;
+    font: inherit;
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    padding: 3px 0;
+    background: none;
+    border: 0;
+    border-radius: 3px;
+    color: var(--dim);
+    opacity: 0.7;
+    cursor: pointer;
+  }
+  #safety-ticks button:hover { opacity: 1; color: var(--text); background: var(--border); }
+  #safety-ticks button.on { opacity: 1; color: var(--text); font-weight: 700; }
+
+  #safety-panel .sp-rule {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 14px 0 12px;
+  }
+  #safety-panel .sp-link {
+    background: none;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    font-size: 11px;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  #safety-panel .sp-link:hover { color: var(--accent-pop); }
+  #safety-panel .sp-link[hidden] { display: none; }
+  #safety-panel .sp-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 12px;
+  }
+  #safety-panel textarea {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 9px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.5;
+    resize: vertical;
+    min-height: 56px;
+  }
+  #safety-panel textarea:focus { outline: none; border-color: var(--accent); }
+  #safety-panel details > summary {
+    cursor: pointer;
+    font-size: 11px;
+    color: var(--dim);
+    margin-top: 10px;
+    user-select: none;
+  }
+  #safety-panel details > summary:hover { color: var(--text); }
+  #safety-panel details[open] > summary { margin-bottom: 8px; }
+  #safety-panel .sp-said {
+    font-size: 11px;
+    color: var(--dim);
+    min-height: 1em;
+  }
+  #safety-panel .sp-said.bad { color: var(--red); }
+  #safety-panel .sp-save {
+    font: inherit;
+    font-size: 12px;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    background: var(--accent);
+    color: var(--on-accent);
+    border: 1px solid var(--accent);
+  }
+  #safety-panel .sp-save:hover { background: var(--accent-pop); border-color: var(--accent-pop); }
+
+  /* A prompt that predates the rating scale can't be compared against a
+     number, so the slider would silently do nothing between 1 and 9. Toned as
+     a notice, impossible to miss. */
+  #safety-legacy {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+    background: var(--red-a08);
+    border: 1px solid var(--red-a15);
+    border-radius: 6px;
+    padding: 9px 10px;
+    margin-top: 12px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--text);
+  }
+  #safety-legacy[hidden] { display: none; }
+  #safety-legacy button {
+    font: inherit;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    background: none;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  #safety-legacy button:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* The number beside the settings tab's slider, in its own colour. */
+  .range-out {
+    --level: hsl(var(--lv-h, 140) var(--lv-s) var(--lv-l));
+    font-size: 12px;
+    color: var(--level);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  /* A note that only appears when something is actually wrong, so it is not
+     standing text - the reason it survived the cull. */
+  .warn-note {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--red);
+    margin-top: 6px;
+  }
+  .warn-note[hidden] { display: none; }
+
+  /* Text a script writes at runtime - a state, not an explanation. What the
+     .note class used to look like, kept only for the handful of places that
+     actually say something that changes. */
+  .live-note {
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--dim);
+    margin-top: 6px;
+  }
+  .live-note[hidden] { display: none; }
+
   #side-show {
     position: fixed;
     top: 8px;
@@ -314,8 +664,9 @@
   }
   #side-show:hover { opacity: 1; color: var(--accent-pop); border-color: var(--accent-pop); }
   body.side-hidden #side-show { display: block; }
-  /* Keep the first message clear of it, since there is no header to sit under. */
-  body.side-hidden #messages { padding-top: 46px; }
+  /* This used to pad the messages down to clear the floating button. It no
+     longer has to: #chat-bar is a real 44px row above them now, and that is
+     what the button floats over. */
 
   @media (min-width: 721px) {
     body.side-hidden #side { display: none; }
@@ -476,9 +827,9 @@
   }
   #context-show:hover { opacity: 1; color: var(--accent-pop); border-color: var(--accent-pop); }
   body.context-hidden #context-show { display: block; }
-  /* Same reason the folded chat list pads the messages down - there is no
-     header for the floating button to sit under. */
-  body.context-hidden #messages { padding-top: 46px; }
+  /* Same as its mirror on the left: #chat-bar is what this floats over now,
+     so the messages need no strip reserved for it. #chat-bar does gain some
+     right padding to stay clear of it - see body.context-hidden #chat-bar. */
 
   #context-panel {
     position: fixed;
@@ -879,9 +1230,11 @@
   #messages {
     flex: 1;
     overflow-y: auto;
-    /* Top padding leaves room for the workspace picker floating over the
-       corner; without it the first message of a chat sits underneath it. */
-    padding: 48px 16px 16px;
+    /* No reserved strip at the top any more: the workspace and safety
+       controls used to float over this corner, and now sit in #chat-bar above
+       it, in flow. Nothing overlaps the first message, so this is ordinary
+       breathing room. */
+    padding: 8px 16px 16px;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -928,12 +1281,47 @@
      stands out against the agent bubble's own --panel background. Reused
      wherever setBody()/renderText() gets wired in, not just chat bubbles. */
   .msg pre {
-    margin: 6px 0;
+    margin: 0;
     padding: 8px 10px;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
     overflow-x: auto;
+  }
+  /* The <pre> above sits in this wrapper so the copy button has something
+     positioned to hang off - the margin that used to be on the <pre> moves
+     out here, so spacing between blocks is unchanged. */
+  .code-wrap {
+    position: relative;
+    margin: 6px 0;
+  }
+  .code-copy {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-family: inherit;
+    color: var(--dim);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    cursor: pointer;
+    /* Kept out of the selection, so dragging over a block and hitting Ctrl+C
+       copies the code and not the word "copy" along with it. */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .code-copy:hover { color: var(--text); border-color: var(--dim); }
+  .code-copy.copied { color: var(--accent); border-color: var(--accent); }
+  /* On a mouse the button only shows when the block is under the pointer, so
+     it stays out of the way while reading. On touch there is no hover to wait
+     for, so it is simply always there. */
+  @media (hover: hover) {
+    .code-copy { opacity: 0; transition: opacity 0.12s; }
+    .code-wrap:hover .code-copy,
+    .code-copy:focus-visible,
+    .code-copy.copied { opacity: 1; }
   }
   .msg pre code {
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -1178,6 +1566,22 @@
     outline: none;
   }
   input:focus { border-color: var(--accent-pop); }
+  /* A range is an input, so without this it inherits the text box above: a
+     1px border, a 24px pill radius and 9x16 of padding. Native rendering hid
+     all three; the moment a slider is drawn by hand they show up as a pill
+     outline around the track that turns accent-green on focus. Reset once
+     here rather than in each slider's own rules. */
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    border: 0;
+    padding: 0;
+    border-radius: 0;
+    background: none;
+    height: 18px;
+    cursor: pointer;
+  }
+  input[type="range"]:focus { border-color: transparent; outline: none; }
   #model-quick {
     flex: 0 0 auto;
     width: auto;
@@ -1317,7 +1721,55 @@
   textarea { resize: vertical; min-height: 320px; line-height: 1.5; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .row > * { flex: 1 1 160px; }
-  .temp-row input[type="range"] { accent-color: var(--accent); }
+  /* Drawn rather than left native, because the browser's own range widget
+     fills the track from its start to the THUMB'S CENTRE - so at the minimum
+     it still paints a half-thumb stub of colour to the left of the thumb, and
+     0 reads as "not quite at the bottom". There is no way to switch that fill
+     off, only to replace the whole control. Same shape as the safety slider,
+     so the two ranges in this app behave identically. */
+  .temp-row input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    background: none;
+    height: 18px;
+    cursor: pointer;
+  }
+  .temp-row input[type="range"]:focus { outline: none; }
+  .temp-row input[type="range"]::-webkit-slider-runnable-track {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+  }
+  .temp-row input[type="range"]::-moz-range-track {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--border);
+  }
+  .temp-row input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    margin-top: -5px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--panel);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .temp-row input[type="range"]::-moz-range-thumb {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--panel);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+  .temp-row input[type="range"]:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-a35);
+  }
+  .temp-row input[type="range"]:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-a35);
+  }
   .temp-value {
     flex: 0 0 auto;
     min-width: 2.5em;
@@ -1359,6 +1811,79 @@
   .danger { background: none; border: 1px solid var(--red); color: var(--red); flex: 0 0 auto; }
   .set-note { color: var(--dim); font-size: 12px; line-height: 1.5; }
   .set-note b { color: var(--text); font-weight: 600; }
+  /* The updater's box. Boxed because it is the one control on this tab that
+     has a state worth reading before you press anything - "up to date" and
+     "3 new commits" are different situations and it should take a glance, not
+     a paragraph, to tell which one you are in. */
+  .up-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel);
+  }
+  .up-state { display: flex; gap: 10px; align-items: flex-start; }
+  .up-said { min-width: 0; }
+  /* The headline is the answer in one line; the dim line under it is the
+     detail nobody needs unless they went looking - which commit, which branch,
+     when it was last checked. */
+  .up-head { color: var(--text); font-size: 13px; font-weight: 600; line-height: 1.4; }
+  .up-card .note { margin-top: 3px; }
+  /* Same answer as the headline, in a colour, for the glance that doesn't
+     read. Amber is the only one that asks for anything. */
+  .up-dot {
+    flex: 0 0 auto;
+    width: 9px;
+    height: 9px;
+    margin-top: 5px;
+    border-radius: 50%;
+    background: var(--dim);
+  }
+  /* Nothing to do is deliberately the quiet one: the accent is spent on the
+     one state that wants a press, and the headline next to it says the word
+     anyway. It also cannot clash with a user-chosen accent, which is free to
+     be any hue including this one. */
+  .up-dot.ok { background: var(--dim); }
+  .up-dot.new { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-a35); }
+  .up-dot.stop { background: var(--red); }
+  .up-dot.busy { animation: up-pulse 1.2s ease-in-out infinite; background: var(--accent); }
+  @keyframes up-pulse { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+  /* The doing button first and filled, the rest outlined beside it: on a tab
+     of ghost buttons the one that changes the install should be the one your
+     eye lands on. */
+  .up-actions { gap: 8px; }
+  .up-actions > * { flex: 0 0 auto; }
+  .up-actions button { padding: 7px 14px; font-size: 12.5px; }
+  /* "what's new" - a disclosure, not an action, so it looks like neither of
+     the two buttons next to it. */
+  .link-btn {
+    background: none;
+    border: none;
+    color: var(--dim);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 7px 4px;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+  }
+  .link-btn:hover { color: var(--accent-pop); opacity: 1; }
+  /* An update waiting is worth knowing from the chat, not only from inside the
+     tab that holds the button - so the way in wears a dot until it is dealt
+     with. Same mark in both places, because it means the same thing. */
+  .up-mark::after {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-left: 5px;
+    border-radius: 50%;
+    background: var(--accent);
+    vertical-align: 1px;
+  }
   /* What an update would bring, and then what it is doing. Both are capped and
      scrolled rather than allowed to grow: a checkout that is fifty commits
      behind would otherwise push the buttons off the bottom of the panel while
@@ -1893,10 +2418,14 @@
   @media (max-width: 720px) {
     #side-foot .hint { display: none; }
     #side-toggle, #context-fold { padding: 6px 10px; font-size: 18px; }
-    /* Still room at the top for the workspace picker in the corner. */
-    #messages { padding: 46px 10px 10px; gap: 8px; }
-    body.side-hidden #messages { padding-top: 48px; }
-    body.context-hidden #messages { padding-top: 48px; }
+    #messages { padding: 8px 10px 10px; gap: 8px; }
+    /* Both corner controls still fit on a phone, but only just - the labels
+       above them go, since a workspace name and a level name each say what
+       they are without one. */
+    #chat-bar { gap: 8px; padding: 6px 8px 2px; min-height: 36px; }
+    #chat-bar label { display: none; }
+    body.side-hidden #chat-bar { padding-left: 54px; }
+    #ws-bar { max-width: 46%; }
     .msg { max-width: 95%; font-size: 15px; line-height: 1.5; }
     .chat-item { padding: 14px 28px 14px 16px; min-height: 65px; }
     .sub-item { padding: 10px 0 10px 14px; }
@@ -1953,16 +2482,31 @@
 <button id="context-show" title="show context">&laquo;</button>
 
 <div class="main-col">
-<div class="content-centre empty-chat">
 
-<!-- Which workspace THIS chat's files and terminal are in. Top left of the
-     conversation column, above everything, because it is context for
-     everything below it - and there is always one, so this is always here.
-     "Where does this land?" should never need looking up. -->
-<div id="ws-bar">
-  <label for="ws-quick">workspace</label>
-  <select id="ws-quick" title="where this chat's files and terminal work"></select>
+<!-- The two things that say how THIS chat runs: where its work lands (left)
+     and how much of it the agent may do without asking (right). Both are per
+     chat, both are context for everything below them, and both are always
+     there - so neither should ever need looking up. -->
+<div id="chat-bar">
+  <div id="ws-bar">
+    <label for="ws-quick">workspace</label>
+    <select id="ws-quick" title="where this chat's files and terminal work"></select>
+  </div>
+  <div id="safety-bar">
+    <label for="safety-btn">safety</label>
+    <button id="safety-btn" type="button" aria-haspopup="dialog" aria-expanded="false"
+            title="how carefully this chat uses its tools">
+      <span class="safety-dot"></span>
+      <span id="safety-name">—</span>
+      <svg class="safety-caret" viewBox="0 0 10 10" fill="none" stroke="currentColor"
+           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M2 4l3 3 3-3"></path>
+      </svg>
+    </button>
+  </div>
 </div>
+
+<div class="content-centre empty-chat">
 
 <div class="splash">UNIAGENT</div>
 <div id="messages"></div>
@@ -1986,6 +2530,58 @@
 </form>
 
 </div>
+</div>
+
+<!-- The safety dropdown. Everything about how carefully THIS chat runs is in
+     here: which of the five levels it is on, the rules it adds to the shared
+     prompt, and - behind a fold, because it is the rare case - a prompt of its
+     own instead of the shared one.
+
+     A sibling of .main-col rather than a child of the button, because
+     .main-col clips its overflow and a dropdown is precisely the thing that
+     has to hang outside its parent. It is placed against the button by JS
+     (see placeSafetyPanel). -->
+<div id="safety-panel" role="dialog" aria-label="safety for this chat" hidden>
+
+  <div id="sp-value">
+    <span id="sp-number">3</span>
+    <span id="sp-says"></span>
+  </div>
+
+  <input type="range" id="safety-slider" min="0" max="10" step="1" value="3"
+         aria-label="highest danger rating that runs without asking">
+  <div id="safety-ticks"></div>
+
+  <div class="sp-foot">
+    <button type="button" class="sp-link" id="sp-unset" hidden>follow the default</button>
+  </div>
+
+  <div id="safety-legacy" hidden>
+    <div>The checking prompt asks for a yes/no marker, not a 0-10 rating, so
+      everything from 1 to 9 behaves the same.</div>
+    <button type="button" id="sp-fix-prompt">use the rating prompt</button>
+  </div>
+
+  <hr class="sp-rule">
+
+  <textarea id="sp-extra" spellcheck="false" rows="2"
+            placeholder="extra rules for this chat, e.g. Google Drive is always fine"></textarea>
+
+  <details id="sp-custom-wrap">
+    <summary>replace the whole prompt for this chat</summary>
+    <textarea id="sp-prompt" spellcheck="false" rows="7"
+              placeholder="must contain {call}"></textarea>
+  </details>
+
+  <div class="sp-foot">
+    <button type="button" class="sp-save" id="sp-save">save</button>
+    <span class="sp-said" id="sp-said"></span>
+  </div>
+
+  <div class="sp-foot">
+    <button type="button" class="sp-link" id="sp-to-settings">safety settings</button>
+  </div>
+
 </div>
 
 <div id="context-panel">
@@ -2077,7 +2673,6 @@
             <input id="s-model" list="s-model-list" autocomplete="off" placeholder="model id"><datalist id="s-model-list"></datalist>
           </div>
           <div class="model-hint" id="s-model-hint"></div>
-          <div class="note">Takes effect on your next message. Only providers with a working key (see the providers tab) are listed.</div>
         </div>
         <div class="field">
           <label>subagents - the default for a new one spawned without a model</label>
@@ -2086,7 +2681,6 @@
             <input id="s-sub-model" list="s-sub-model-list" autocomplete="off" placeholder="model id"><datalist id="s-sub-model-list"></datalist>
           </div>
           <div class="model-hint" id="s-sub-model-hint"></div>
-          <div class="note">A subagent that already exists keeps whatever it last ran on.</div>
         </div>
         <div class="field">
           <label>cron jobs - the default for a job that names no model of its own</label>
@@ -2095,7 +2689,6 @@
             <input id="s-cron-model" list="s-cron-model-list" autocomplete="off" placeholder="model id"><datalist id="s-cron-model-list"></datalist>
           </div>
           <div class="model-hint" id="s-cron-model-hint"></div>
-          <div class="note">Picked up by the watcher on its next tick - no restart.</div>
         </div>
         <div class="field">
           <label>temperature - what a new chat, subagent or cron job runs at by default</label>
@@ -2103,10 +2696,6 @@
             <input type="range" id="s-temperature" min="0" max="2" step="0.1">
             <span id="s-temperature-value" class="temp-value"></span>
           </div>
-          <div class="note">0 = most predictable, higher = more random - not a standardised
-          unit, just how far this scales each provider's own randomness knob. A chat pinned
-          with <b>/temperature</b>, or a cron job with its own <b>temperature:</b> line,
-          ignores this.</div>
         </div>
       </div>
 
@@ -2116,50 +2705,8 @@
              provider you're on, and everything below the grid is reference for
              when you're setting one up - it must not be what you have to
              scroll past to get at them. -->
-        <div class="set-note">
-          Every provider there is - click one to change it. Nothing here is
-          built in, protected, or created for you.
-        </div>
         <div id="prov-error" class="set-note" hidden></div>
         <div id="prov-grid"></div>
-        <div class="set-note">
-          This list is exactly the objects in <b>LLM_PROVIDERS</b> in
-          <b>.env</b> and nothing else, so an empty list stays empty. Any of
-          them can be renamed, repointed, re-keyed, re-wired, re-pictured or
-          deleted, and what a provider says here is what the next request uses.
-          <br><br>
-          A provider's <b>name</b> is what you pick on the <b>models</b> tab,
-          what <b>/model</b> takes, and what a cron job or a subagent can be
-          pointed at - so renaming one here renames it everywhere, and anything
-          still pinned to the old name falls back to the default. The same
-          company can appear as many times as you like: two DeepSeek keys, a
-          work one and a personal one, are simply two providers.
-          <br><br>
-          <b>wire</b> is the protocol the endpoint speaks, not the company
-          running it. Nearly everything third-party serves OpenAI's
-          <b>/chat/completions</b>, so <b>openai</b> is the answer unless you
-          know otherwise. Pick <b>deepseek</b> rather than <b>openai</b> for
-          DeepSeek itself: it adds the two things DeepSeek's own models need,
-          without which its thinking models reject any turn that calls a tool.
-          <b>bedrock</b> and <b>claude-subscription</b> are wires too, and they
-          ignore what's in their key box - the first signs with your AWS
-          credentials (and reads its URL box as a region), the second drives the
-          Claude Code CLI's own login.
-          <br><br>
-          A provider's <b>picture</b> follows its wire unless you give it one of
-          its own, so a DeepSeek key looks like DeepSeek without anyone choosing
-          anything. Give it a path - to one of the bundled pictures or to any
-          image file on this machine - and that wins instead. A wire with no
-          picture of its own shows a question mark.
-          <br><br>
-          Keys are shown here, not hidden - a value you can only overwrite is
-          one you can't check. That is safe to the extent this page is: it is
-          behind the login and only ever served over https. The
-          <b>OPENAI_API_KEY</b>-style variables in .env are a different thing
-          now - the vision and token-counting code still reads them, but nothing
-          here calls with them, and they are edited in the file itself.
-          Everything here is live on the next message; nothing needs restarting.
-        </div>
       </div>
 
       <!-- email -->
@@ -2170,43 +2717,11 @@
              past to reach it. One row per account, shut to a single line
              saying what it is and whether it can sign in; open, it is the
              whole form. -->
-        <div class="set-note">
-          The mail accounts the agent can read and send from. It signs in to your
-          own mailbox directly - there is no shared account and nothing is relayed
-          through anyone else.
-        </div>
         <div id="email-error" class="set-note" hidden></div>
         <div id="email-list"></div>
         <div class="row">
           <button id="email-add" class="ghost">+ add an account</button>
           <span id="email-status" class="set-note"></span>
-        </div>
-        <div class="set-note">
-          The password is sent from this page straight to the server and written
-          to <b>.env</b>. It never passes through the chat, so it is never written
-          into a conversation, a log, or a request to a model provider - and the
-          agent cannot read it back, which is why this is a page and not a tool it
-          can call. Never type a password to the agent in the message box; that is
-          not the same thing. Nothing ever comes back down: an account's password
-          box is blank however many times it has been saved, and leaving it blank
-          keeps the one already there.
-          <br><br>
-          Most providers refuse your normal password here and want an
-          <b>app password</b> made for this - each row says which, once it knows
-          the address.
-          <br><br>
-          <b>name</b> is what the agent calls the account in a tool call
-          (<b>work</b>, <b>personal</b>), so renaming one here renames it
-          everywhere. The <b>default</b> account is the one a tool call gets when
-          it names none. The <b>hosts</b> are worked out from the address - from
-          the provider itself, then Thunderbird's database, then the usual
-          hostnames - so they are only worth filling in when that has failed, or
-          when the mailbox is behind a bridge.
-          <br><br>
-          Saving a row signs in to it there and then, and says what happened, so
-          a wrong app password is caught here rather than in the middle of a turn
-          that was trying to do something else. <b>remove</b> forgets the saved
-          password; the mailbox itself is never touched.
         </div>
       </div>
 
@@ -2215,58 +2730,11 @@
         <!-- Same shape as the email tab above: the list first, the prose
              underneath. One row per workspace, shut to a line saying where it
              is and whether it can be reached; open, it is the form. -->
-        <div class="set-note">
-          Where the agent's files and terminal actually are. A workspace is a
-          folder - and, if you give it an ssh destination, a folder on another
-          computer, where the file tools and the terminal genuinely run.
-        </div>
         <div id="ws-error" class="set-note" hidden></div>
         <div id="ws-list"></div>
         <div class="row">
           <button id="ws-add" class="ghost">+ add a workspace</button>
           <span id="ws-status" class="set-note"></span>
-        </div>
-        <div class="set-note">
-          Each chat picks one from the dropdown in the corner of the chat window,
-          so two conversations can be working in two places at once. A chat that
-          has never been given one uses whichever is set to <b>the default</b>.
-          <br><br>
-          <b>Uniagent folder</b> is always in the list and cannot be removed or
-          edited. It is the floor: what a chat falls back to when the workspace
-          it was in has been deleted, and where everything happens on a setup
-          that never adds one - exactly as it did before this tab existed.
-          <br><br>
-          <b>root</b> is what a relative path means: <b>notes/todo.md</b> is
-          resolved from there. An absolute path is still absolute - a workspace
-          is a working directory, not a cage, and the safety system is what
-          decides whether a call is allowed to happen at all.
-          <br><br>
-          <b>ssh</b> turns it into another machine: <b>you@192.168.1.50</b>, or a
-          Host alias out of your <b>~/.ssh/config</b>. Leave it empty for a folder
-          on this computer. Remote workspaces need <b>key-based login</b> - the
-          server never types a password, because a password prompt inside a
-          background service is a question nobody can answer and a turn that
-          hangs forever. Run <b>ssh-copy-id you@machine</b> once from the machine
-          Uniagent is on, and that is the whole setup. On Linux and macOS the
-          connection is then held open and reused between calls, so reading five
-          files is one handshake rather than five; Windows ssh cannot do that,
-          so it reconnects each time and simply runs a little slower.
-          <br><br>
-          <b>ssh key</b> is almost always best left blank: Uniagent offers the
-          keys in your <b>~/.ssh</b> by name, so a key called something other
-          than <b>id_ed25519</b> is still found. Fill it in when there are
-          several keys and you want a particular one used - then that key is the
-          only one tried. Note that a key loaded into your terminal's
-          <b>ssh-agent</b> is <i>not</i> available to Uniagent: a background
-          service does not share your terminal's agent, which is why a login you
-          can do by hand can still be refused here. A key file on disk always
-          works; an agent is not relied on anywhere.
-          <br><br>
-          <b>test</b> says whether it can be reached right now - and saving runs
-          the same check, so a wrong hostname is caught here rather than in the
-          middle of a turn that was trying to do something else. <b>remove</b>
-          only forgets the workspace; nothing on either machine is touched, and
-          any chat still pointing at it quietly falls back to the default.
         </div>
       </div>
 
@@ -2280,7 +2748,6 @@
               <option value="light">light</option>
             </select>
           </div>
-          <div class="note">Saved on the server, so every device you open this on follows it.</div>
         </div>
         <div class="field">
           <label>accent colour</label>
@@ -2289,24 +2756,11 @@
             <input id="s-accent-hex" autocomplete="off" spellcheck="false" placeholder="#4bbd5f">
             <button id="s-accent-reset" type="button" class="ghost">the theme's own</button>
           </div>
-          <div class="note">The one colour the page is built out of: every button
-          outline, every highlight, the chat you are in, the send arrow. It moves
-          the moment you pick it, and saving is what makes it stick - so a colour
-          you decide against is undone by closing settings without saving. Every
-          lighter and darker tone is worked out from this one, so there is only
-          ever this to choose. <b>the theme's own</b> puts it back to the green
-          each theme ships with.</div>
         </div>
       </div>
 
       <!-- voice -->
       <div class="tab-panel" data-panel="voice" hidden>
-        <div class="set-note">
-          Hold the microphone button next to the message box - or the key
-          below - speak, and let go: the clip is transcribed and sent to the
-          chat you have open, exactly as if you had typed it. On a phone the
-          button is the way; the key is for the desktop.
-        </div>
         <div class="field">
           <label>who transcribes it</label>
           <div class="row">
@@ -2314,62 +2768,73 @@
             <input id="s-voice-model" list="s-voice-model-list" autocomplete="off" placeholder="model id"><datalist id="s-voice-model-list"></datalist>
           </div>
           <div class="model-hint" id="s-voice-model-hint"></div>
-          <div class="note">One of your own providers, off the providers tab, and
-          a speech model on it - so the microphone is keyed, priced and pointed
-          the same way the chat is. This is global: the button on this page, the
-          hold-to-talk key on the machine running the server, and the terminal all
-          go to whatever is chosen here, on the very next thing you say.
-          <br><br>
-          Not every provider can do it. The <b>openai</b>, <b>deepseek</b> and
-          <b>local</b> wires speak OpenAI's transcription endpoint (Whisper,
-          gpt-4o-transcribe, and whatever a local server is serving);
-          <b>gemini</b> has no such endpoint, so its ordinary models are handed
-          the audio and asked to write down what they hear. Claude takes no audio
-          at all, and Bedrock's transcriber is a separate AWS service - a
-          provider on those wires says so instead of offering models.</div>
         </div>
+        <div class="field">
+          <label>who reads it back</label>
+          <div class="row">
+            <select id="s-speak-provider"></select>
+            <input id="s-speak-model" list="s-speak-model-list" autocomplete="off" placeholder="model id"><datalist id="s-speak-model-list"></datalist>
+          </div>
+          <div class="model-hint" id="s-speak-model-hint"></div>
+        </div>
+
+        <!-- What they're given to read. The four readings, plus off - see
+             settings.py's SPEAK_MODES. The summarising model below only
+             appears for the two that need one. -->
+        <div class="field">
+          <label for="s-speak-mode">what gets read out</label>
+          <div class="row">
+            <select id="s-speak-mode">
+              <option value="off">nothing - speech off</option>
+              <option value="final">replies - not the working-out alongside tool calls</option>
+              <option value="all">everything the agent says, tool calls included</option>
+              <option value="summary">one summary of the whole turn</option>
+              <option value="summary_each">a summary of each message the agent sends</option>
+              <option value="summary_final">a summary of replies only, not the tool-call ones</option>
+            </select>
+          </div>
+          <div class="model-hint" id="s-speak-mode-hint"></div>
+        </div>
+
+        <div id="s-speak-summary" hidden>
+          <div class="field">
+            <label>who writes the summary</label>
+            <div class="row">
+              <select id="s-speak-summary-provider"></select>
+              <input id="s-speak-summary-model" list="s-speak-summary-model-list" autocomplete="off" placeholder="model id"><datalist id="s-speak-summary-model-list"></datalist>
+            </div>
+            <div class="model-hint" id="s-speak-summary-model-hint"></div>
+          </div>
+          <div class="field">
+            <label>its temperature</label>
+            <div class="row temp-row">
+              <input type="range" id="s-speak-summary-temperature" min="0" max="2" step="0.1">
+              <span id="s-speak-summary-temperature-value" class="temp-value"></span>
+            </div>
+          </div>
+          <div class="field">
+            <label for="s-speak-summary-prompt">what it's told</label>
+            <textarea id="s-speak-summary-prompt" spellcheck="false"></textarea>
+            <div class="model-hint">
+              Sent as the system message, with the message to be spoken
+              underneath it - so there is no placeholder to keep. Empty restores
+              the shipped prompt.
+            </div>
+            <button type="button" class="ghost" id="s-speak-summary-default">restore the default prompt</button>
+          </div>
+        </div>
+
         <div class="field">
           <label>hold-to-talk key</label>
           <div class="row">
             <button id="s-voice-key" type="button" class="ghost">F9</button>
-            <span class="note">click, then press the key you want to hold (Esc to keep the current one)</span>
+
           </div>
-          <div class="note">Takes effect at once, on this page - saving is what makes it stick.
-          A key that types a character is ignored while you're in the message box, so it can
-          still be typed. Not <b>ScrollLock</b> by default, even though that's the terminal's
-          hold-to-talk key: that listener is a global hook, so on the machine running the
-          server the same hold would record twice and send the sentence twice.</div>
-        </div>
-        <div class="set-note">
-          With no provider chosen above, this falls back to what it always did:
-          Whisper at OpenAI on the <b>OPENAI_API_KEY</b> in <b>.env</b>. With
-          neither, the microphone says so rather than failing quietly.
-          <br><br>
-          Browsers only hand out the microphone in a secure context, so this works
-          on <b>localhost</b> and over https; opened from a phone by plain
-          <b>http://&lt;ip&gt;:8763</b> the button will say the microphone is
-          unavailable.
         </div>
       </div>
 
       <!-- context -->
       <div class="tab-panel" data-panel="context" hidden>
-        <div class="set-note">
-          What the agent knows before you say anything: the <b>context/</b>
-          files, fed to the model in full on every turn, and the
-          <b>memories/</b> files, of which only the names are - it opens one
-          when it looks relevant. Click a file to edit it; both folders reset
-          and archive together as a <b>preset</b>.
-          <br><br>
-          Context files are fed in the order shown. That order is the number
-          each name starts with -
-          <b>1system.md</b>, <b>2memory.md</b>, <b>10tools.md</b> - read as a
-          number, so a tenth file sorts after the ninth rather than after the
-          first. However many digits you like, and the separator after them is
-          yours: <b>1system.md</b>, <b>01-system.md</b> and <b>001_system.md</b>
-          all sit in the same place. A file with no number goes last.
-          Edits apply on the next message; nothing needs restarting.
-        </div>
         <div class="ctx-group-head">context/ <span>injected in full, every turn</span></div>
         <div id="ctx-list"></div>
 
@@ -2377,17 +2842,6 @@
         <div id="ctx-mem-list"></div>
 
         <div class="ctx-group-head">presets <span>a saved copy of both folders together</span></div>
-        <div class="set-note">
-          <b>reset to default</b> puts both folders back to what Uniagent ships
-          with. What was there is saved first as a preset below, so every fact
-          the agent had learned is kept and can be swapped straight back in.
-          Loading a preset saves the current one the same way - unless that is
-          already exactly the default, or already saved as a preset, in which
-          case it just notes the time it went out of use.
-          <br><br>
-          Click a preset to read what is in it before loading it, and click its
-          name to rename it. The date it was taken never changes.
-        </div>
         <div id="ctx-presets"></div>
         <div class="row">
           <button id="ctx-revert" class="ghost danger">reset to default</button>
@@ -2397,16 +2851,6 @@
 
       <!-- tools -->
       <div class="tab-panel" data-panel="tools" hidden>
-        <div class="set-note">
-          Every tool and skill on this machine. A switch here <b>moves the
-          file</b>: switched off, a tool goes to <b>disabled/tools/</b> and a
-          skill to <b>disabled/skills/</b>, where nothing scans for them - so it
-          is not imported, not described in the prompt, not in the tool list
-          sent to the provider, and not callable. Switched back on, it moves
-          home. (Your own <b>unused/</b> folder is left alone - this uses
-          <b>disabled/</b>.) Takes effect on the next message; restart below to
-          make it so this second.
-        </div>
         <div class="row">
           <button type="button" id="inv-restart" class="ghost">restart server now</button>
           <button type="button" id="inv-reload" class="ghost">rescan the folders</button>
@@ -2419,36 +2863,16 @@
 
         <details id="market-box">
           <summary>marketplace - tools and skills from GitHub</summary>
-          <div class="set-note">
-            Read live from the repositories below. What you install is
-            <b>switched on</b> and in the agent from its next message - so it is
-            worth a read first: a tool is code that runs on this machine with
-            everything the agent can reach, and a skill is instructions the
-            model will follow. The switch above takes one back out without
-            deleting it.
-          </div>
           <div class="row">
             <input id="market-search" autocomplete="off" spellcheck="false"
                    placeholder="search the tools and skills below">
             <button type="button" id="market-refresh" class="ghost">ask GitHub again</button>
-          </div>
-          <div class="note">
-            Searches what the repositories below actually offer - name,
-            description and which repo it came from - and nothing else on
-            GitHub. To search somewhere new, add it as a repository first.
           </div>
           <details>
             <summary>which repositories</summary>
             <div class="field">
               <div class="list-edit" id="s-market-repos"></div>
               <button type="button" class="ghost list-add" data-add="s-market-repos">+ add a repository</button>
-              <div class="note">
-                <b>owner/repo</b>, or <b>owner/repo/folder</b> when the skills
-                sit in a subfolder. A skill is any folder holding a
-                <b>SKILL.md</b>; a tool is a <b>.py</b> at the top of the repo
-                (or of that folder) with NAME, DESCRIPTION, INSTRUCTIONS and
-                run() in it. Saving re-reads them.
-              </div>
             </div>
             <div class="row">
               <button type="button" id="market-save" class="ghost">save repositories</button>
@@ -2461,23 +2885,9 @@
 
       <!-- compaction -->
       <div class="tab-panel" data-panel="compaction" hidden>
-        <div class="set-note">
-          <b>/compact</b> hands a chat's whole conversation to that chat's own
-          model and swaps in whatever comes back as the new history. This is the
-          instruction sent after it - the last thing the model reads before it
-          writes the summary. The transcript it replaces is copied to
-          <b>chats/chat_archive/</b> first, every time, so a compaction that
-          drops something can still be read back.
-        </div>
         <div class="field">
           <label>the instruction sent after the conversation</label>
           <textarea id="s-compaction-prompt" spellcheck="false"></textarea>
-          <div class="note">
-            No placeholders - the conversation is the messages before this one,
-            not text pasted into it, so what you write here reaches the model
-            word for word. Empty the box to go back to the default shown in
-            grey. Applies to the next <b>/compact</b>; nothing needs restarting.
-          </div>
         </div>
       </div>
 
@@ -2489,49 +2899,14 @@
              them. One row per job rather than a wall of JSON - the file is
              still there, at the bottom, for the fields this form doesn't
              cover. -->
-        <div class="set-note">
-          The scheduled jobs the cron watcher runs, straight from
-          <b>cron.json</b>. The watcher re-reads that file every ~30s, so a save
-          here needs no restart. Every job appears under <b>cron</b> in the chats
-          panel, and gets a chat as soon as it is written, before it has ever run.
-        </div>
         <div id="cron-error" class="set-note" hidden></div>
         <div id="cron-list"></div>
         <div class="row">
           <button id="cron-add" class="ghost">+ add a job</button>
           <span id="cron-status" class="set-note"></span>
         </div>
-        <div class="set-note">
-          A schedule is two numbers, both unix seconds: <b>start</b>, the moment
-          of the first run, and <b>interval</b>, the gap between runs. Runs land
-          on start, start+interval, start+2&times;interval, and so on. An empty
-          <b>every</b> box means the job happens once, at its start, and never
-          again. A schedule that has already gone past is never caught up, so a
-          daily job written at 9am first fires at its time tomorrow. An interval
-          is a fixed number of seconds, so a daily job lands an hour out after
-          the clocks change until its start is moved back.
-          <br><br>
-          Each RUN is its own chat, kept in
-          chats/cron/&lt;job&gt;/&lt;nnn&gt;/. The job opens on its newest run -
-          that run and anything you have said since - so a follow-up question
-          carries on where the run left off without dragging last week's runs
-          along with it. The runs before it are under <b>history</b> on the
-          job's row, still there to open and read.
-          <br><br>
-          <b>safety</b> per job: <b>off</b> opts that job out of the check, and
-          its own <b>safety prompt</b> (which must contain <b>{call}</b>) puts it
-          under gentler rules than the safety tab's. A job that says neither
-          follows the safety tab, as before. Nobody is watching when a job runs -
-          a flagged call is denied rather than asked about, and an unchecked job
-          runs whatever it decides to, unattended.
-        </div>
         <details id="cron-raw">
           <summary>edit cron.json directly</summary>
-          <div class="set-note">
-            Everything above, as the file itself - and the only way to reach a
-            field this form doesn't have. A save that isn't valid JSON is refused
-            rather than written, so a typo here can't quietly stop every job.
-          </div>
           <div class="field">
             <textarea id="cron-text" spellcheck="false"></textarea>
           </div>
@@ -2544,96 +2919,77 @@
 
       <!-- safety -->
       <div class="tab-panel" data-panel="safety" hidden>
+        <div class="field">
+          <label for="s-safety-threshold">default safety number</label>
+          <div class="row">
+            <input type="range" id="s-safety-threshold" min="0" max="10" step="1">
+            <span id="s-safety-threshold-out" class="range-out"></span>
+          </div>
+        </div>
+
         <div class="field toggle">
           <input type="checkbox" id="s-safety">
-          <label for="s-safety">check every tool call before it runs</label>
+          <label for="s-safety">check tool calls</label>
         </div>
-        <div class="set-note">
-          A second model vets each tool call. Anything it flags stops and waits
-          for you to approve it. Off means every call the agent makes runs
-          straight away, unwatched.
-        </div>
+
         <div class="field">
-          <label>the model doing the checking</label>
+          <label>checking model</label>
           <div class="row">
             <select id="s-verify-provider"></select>
             <input id="s-verify-model" list="s-verify-model-list" autocomplete="off" placeholder="model id"><datalist id="s-verify-model-list"></datalist>
           </div>
           <div class="model-hint" id="s-verify-model-hint"></div>
-          <div class="note">Runs on every single tool call, so cheap and fast matters more than clever.</div>
         </div>
+
         <div class="field">
-          <label>the prompt it checks each call against</label>
+          <label for="s-safety-prompt">checking prompt</label>
           <textarea id="s-safety-prompt" spellcheck="false"></textarea>
-          <div class="note">Must contain <b>{call}</b> - it's swapped for the tool call with a plain text replace (not a template), so any other { or } in here is safe to leave as-is.</div>
+          <div id="s-prompt-warn" class="warn-note" hidden>
+            Asks for a marker, not a <b>DANGER: 0-10</b> line, so every number
+            from 1 to 9 behaves the same.
+          </div>
+          <button type="button" class="ghost" id="s-prompt-default">restore the default prompt</button>
         </div>
-        <div class="set-note">
-          Two lists bracket that check. A tool on the first runs without being
-          asked about; a call naming anything on the second is stopped without
-          being asked about; everything else goes to the model. Both only apply
-          while the check above is <b>on</b> - switched off, nothing is vetted
-          at all. Edits apply to the next tool call; nothing needs restarting.
-        </div>
+
         <div class="field">
-          <label>always allow these tools - never asked about</label>
+          <label>always allowed - tool names</label>
           <div class="list-edit" id="s-whitelist"></div>
           <button type="button" class="ghost list-add" data-add="s-whitelist">+ add a tool</button>
-          <div class="note">
-            One <b>tool name</b> per row - <b>screenshot_tool</b>, not a phrase
-            or a path. Matched whole and case-insensitively against the tool
-            being called, so a call that merely mentions the name in an
-            argument is still checked. This list is looked at first, so a tool
-            here also skips the blocked phrases below.
-          </div>
         </div>
+
         <div class="field">
-          <label>never allow a call containing these - blocked outright</label>
+          <label>always asks - phrases in a call</label>
           <div class="list-edit" id="s-blacklist"></div>
           <button type="button" class="ghost list-add" data-add="s-blacklist">+ add a phrase</button>
-          <div class="note">
-            One <b>phrase</b> per row, matched anywhere in the call - the tool
-            name and its arguments both - so <b>main.py</b> stops any call that
-            so much as names that file. This is how the agent is kept out of
-            its own code: add the files it must not edit by itself
-            (<b>main.py</b>, <b>tool_processor.py</b>, <b>tool_validation.py</b>,
-            <b>provider.py</b>, <b>settings.py</b>, <b>command_processor.py</b>).
-            A blocked call stops and asks you, exactly like one the model
-            flagged - it's not a refusal, it's an approval you have to give in
-            person. Case doesn't matter, and blank rows are ignored.
-          </div>
         </div>
       </div>
 
       <!-- system -->
       <div class="tab-panel" data-panel="system" hidden>
-        <div class="set-note">
-          Python reads its code once when a process starts, so <b>editing a .py
-          file changes nothing until that process is restarted</b>. Settings and
-          everything under context/ are re-read as they change, so those never
-          need this.
-        </div>
         <div class="field">
           <label>update</label>
-          <div class="note" id="up-where">reading this install...</div>
-          <div class="row">
-            <button type="button" id="up-check" class="ghost">check for updates</button>
-            <button type="button" id="up-now" class="ghost" hidden>update now</button>
-          </div>
-          <div class="note" id="up-status" hidden></div>
-          <div class="up-warn" id="up-warn" hidden></div>
-          <div class="up-list" id="up-list" hidden></div>
-          <pre class="up-log" id="up-log" hidden></pre>
-          <div class="note">
-            Fetches the latest code and restarts onto it. <b>Nothing of yours is
-            touched</b>: your .env and API keys, your chats, your system prompt
-            and memories, your settings, model lists, cron jobs, MCP servers and
-            workspaces all stay exactly as they are, because an update only ever
-            fast-forwards and git only writes files it ships. A tool or skill you
-            added yourself is left alone for the same reason - only the ones that
-            came with Uniagent are updated, and they are updated wherever you
-            have them, switched on or off. If you have edited a file that ships
-            with Uniagent and the update changes that same file, it stops and
-            tells you rather than picking a winner.
+          <!-- One box that answers the only two questions there are: is there
+               anything new, and what do I press. The headline is the answer in
+               words, the dot is the same answer at a glance, and the button
+               under them is the whole of the doing. Everything else here -
+               which commits, which files, the log - is detail that stays out
+               of the way until it is asked for. -->
+          <div class="up-card">
+            <div class="up-state">
+              <span class="up-dot" id="up-dot"></span>
+              <div class="up-said">
+                <div class="up-head" id="up-head">reading this install...</div>
+                <div class="live-note" id="up-where"></div>
+              </div>
+            </div>
+            <div class="row up-actions">
+              <button type="button" id="up-now" hidden>update now</button>
+              <button type="button" id="up-check" class="ghost">check for updates</button>
+              <button type="button" id="up-detail" class="link-btn" hidden>what's new</button>
+            </div>
+            <div class="up-warn" id="up-warn" hidden></div>
+            <div class="up-list" id="up-list" hidden></div>
+            <pre class="up-log" id="up-log" hidden></pre>
           </div>
         </div>
         <div class="field">
@@ -2642,12 +2998,6 @@
             <button id="r-server" class="ghost">server</button>
             <button id="r-cron" class="ghost">cron watcher</button>
             <button id="r-both" class="danger">both</button>
-          </div>
-          <div class="note">
-            The server serves this page - restarting it drops any turn running
-            right now, and the page reconnects on its own. The cron watcher is a
-            separate process; restarting it clears each job's remembered
-            conversation. main.py is shared, so an edit to it means both.
           </div>
         </div>
       </div>
@@ -2805,6 +3155,65 @@ function imageHtml(alt, rawSrc) {
        + ' alt="' + attr(unescapeHtml(alt)) + '" title="' + attr(src) + '">';
 }
 
+// The opening <a> for a link target, or "" for one we won't make clickable.
+// A reply is not always the model's own words - it can be quoting a page it
+// just read - so anything with a scheme other than the ordinary web ones
+// (javascript:, data:) is left as plain text instead. A target with no scheme
+// at all is a path, and stays allowed.
+//
+// The href goes through attr() rather than straight in: escapeHtml() has been
+// over the text already but leaves quotes alone, and a " in a target would
+// otherwise close the attribute early and let the rest be read as markup.
+function linkOpen(href) {
+  const raw = unescapeHtml(href).trim();
+  const scheme = raw.match(/^([a-z][a-z0-9+.-]*):/i);
+  if (scheme && !/^(https?|mailto|ftp)$/i.test(scheme[1])) return "";
+  return '<a href="' + attr(raw) + '" target="_blank" rel="noopener">';
+}
+
+// A URL written bare into a reply - "have a look at https://example.com" -
+// rather than in [brackets](...). Matched to the first space, because a URL
+// can hold almost anything; what that overshoots into is put back by
+// trimUrlTail below.
+const BARE_URL = /https?:\/\/\S+/g;
+
+// What a URL gets wrapped in and is not part of it. Angle brackets arrive as
+// entities - escapeHtml() has already run by the time the inline passes see
+// the text - while quotes come through as themselves, since escapeHtml()
+// leaves those alone.
+const URL_WRAPPER = /(?:&gt;|&lt;|["'])$/;
+
+// Splits a matched URL into the URL and the punctuation that turned out to
+// belong to the sentence around it: "see https://example.com." is a link and
+// a full stop, not a link with a full stop in it.
+function trimUrlTail(url) {
+  let tail = "";
+  for (;;) {
+    const wrapper = url.match(URL_WRAPPER);
+    const last = url.slice(-1);
+    let cut = 0;
+    if (wrapper) {
+      cut = wrapper[0].length;
+    } else if (".,;:!?".includes(last)) {
+      // A ";" ending an entity is the URL's own - "?a=1&amp;b=2" - so only a
+      // ";" that isn't one is trailing punctuation.
+      if (/&(?:\w+|#\d+);$/.test(url)) break;
+      cut = 1;
+    } else if (last === ")" || last === "]") {
+      // A closing bracket counts as the URL's only if the URL opened one:
+      // "(see https://x/y)" closes the aside, ".../Foo_(bar)" does not.
+      const open = last === ")" ? "(" : "[";
+      if (url.split(open).length >= url.split(last).length) break;
+      cut = 1;
+    } else {
+      break;
+    }
+    tail = url.slice(-cut) + tail;
+    url = url.slice(0, -cut);
+  }
+  return [url, tail];
+}
+
 // A light, dependency-free Markdown renderer - fenced/inline code, headers,
 // bold/italic/strikethrough, links, and -/* /1. lists. Generic on purpose -
 // not just for chat bubbles, so the same function can be pointed at tool
@@ -2819,12 +3228,19 @@ function renderText(text) {
   const stashed = [];
   const stash = (html) => "\x00" + (stashed.push(html) - 1) + "\x00";
 
+  // A fenced block, plus the copy button that hangs off its wrapper. The
+  // button carries no data of its own - the click handler reads the <pre>
+  // next to it - so a block still streaming in copies whatever has landed.
+  const fenceHtml = (lang, body) =>
+    '<div class="code-wrap"><button class="code-copy" type="button" aria-label="Copy code">copy</button>'
+    + "<pre><code" + (lang ? ' class="language-' + lang + '"' : "") + ">"
+    + body + "</code></pre></div>";
+
   let noFences = "", last = 0, m;
   const FENCE = /```(\w*)\n?([\s\S]*?)```/g;
   while ((m = FENCE.exec(escaped))) {
     noFences += escaped.slice(last, m.index);
-    noFences += stash("<pre><code" + (m[1] ? ' class="language-' + m[1] + '"' : "") + ">"
-                     + m[2] + "</code></pre>");
+    noFences += stash(fenceHtml(m[1], m[2]));
     last = FENCE.lastIndex;
   }
   const rest = escaped.slice(last);
@@ -2837,10 +3253,16 @@ function renderText(text) {
     // the close arrives.
     const nl = rest.indexOf("\n", open);
     const bodyStart = nl === -1 ? open + 3 : nl + 1;
-    noFences += rest.slice(0, open) + stash("<pre><code>" + rest.slice(bodyStart) + "</code></pre>");
+    noFences += rest.slice(0, open) + stash(fenceHtml("", rest.slice(bodyStart)));
   }
 
   const noCode = noFences.replace(/`([^`\n]+)`/g, (_, code) => stash("<code>" + code + "</code>"));
+
+  const autolink = (match) => {
+    const [url, tail] = trimUrlTail(match);
+    const open = linkOpen(url);
+    return (open ? stash(open + url + "</a>") : url) + tail;
+  };
 
   // Images run FIRST - ahead of the link rule below, which would otherwise
   // match the [alt](src) part of a ![alt](src) and leave a stray "!" sitting in
@@ -2854,9 +3276,21 @@ function renderText(text) {
   // it are allowed and stripped, since that's how Markdown normally spells a
   // target with spaces and a model may well write it that way - spelt &lt;/&gt;
   // in the pattern because escapeHtml() has already been over the text by now.
+  //
+  // Then the two kinds of link, in this order: [text](url) first, so that the
+  // URL sitting inside its brackets is already an <a> by the time the bare-URL
+  // pass runs and cannot be linked a second time. Both land ahead of the
+  // emphasis passes, which would otherwise read the * in a URL as italics.
+  // A [text](url) stashes its TAGS and leaves the label in the stream, so a
+  // **bold** word inside a link still renders; a bare URL is stashed whole,
+  // since there is nothing in a URL that wants formatting.
   const inline = (s) => s
     .replace(/!\[([^\]\n]*)\]\(\s*(?:&lt;)?([^)\n]+?)(?:&gt;)?\s*\)/g, (_, alt, src) => stash(imageHtml(alt, src)))
-    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (whole, label, href) => {
+      const open = linkOpen(href);
+      return open ? stash(open) + label + stash("</a>") : whole;
+    })
+    .replace(BARE_URL, autolink)
     .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
     .replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
@@ -2992,6 +3426,31 @@ function appendBody(body, extra) {
   setBody(body, (body.dataset.raw || "") + extra);
 }
 
+// [short, full] for the time under a message bubble, from the epoch seconds
+// stored beside the chat (see main.stamp_history). Returns ["", ""] for a
+// message with no stamp - every one written before stamps existed - which
+// line() below draws as no time at all rather than as a guess.
+//
+// The short form always carries the DATE, not just the clock: a bubble
+// reading "14:32" is undated the moment you scroll up past midnight, and
+// being able to tell when something was said is the entire point. The year
+// is added only when it isn't this one, so the common case stays short and an
+// old chat is still unambiguous - the same rule the sidebar's cron run labels
+// follow (server.py's _when).
+//
+// Built in the READER's timezone from an absolute instant, which is why the
+// stamp is stored as epoch seconds: the same chat opened on a phone in
+// another country shows that phone's local time, not the server's.
+function stampParts(at) {
+  if (typeof at !== "number") return ["", ""];
+  const d = new Date(at * 1000);
+  const opts = { day: "numeric", month: "short" };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+  return [d.toLocaleDateString([], opts) + " "
+          + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          d.toLocaleString()];
+}
+
 // A message bubble. `stamp`, if given, is a short time shown in very small
 // font under the text (title holds the full date for hover). Text lives in
 // its own child so continuation lines (appendBody(current, ...)) can keep
@@ -3076,7 +3535,13 @@ function attachSafety(wrap, v) {
 // ...} - written by main.py's run(). Used for the chat window and for
 // subagent transcripts - in a subagent's transcript the user turns are the
 // prompts the main agent gave it. `vals` is the chat's safety-check log.
-function render(text, box = messages, vals = null) {
+//
+// `stamps` is when each turn was written, one entry per turn in the same
+// order (GET /stamps, see main.stamp_history). It is kept out of the history
+// and fetched separately for the same reason `vals` is: neither has ever been
+// sent to a model, and neither should be. Paired by index, which is what
+// stamp_history reconciles on every save to keep true.
+function render(text, box = messages, vals = null, stamps = null) {
   // A redraw clears the box, so the "am I at the bottom" check has to happen
   // before that - and if it says no, the old position is restored after,
   // rather than the fresh scrollHeight it would otherwise land on.
@@ -3103,12 +3568,18 @@ function render(text, box = messages, vals = null) {
   const toolWraps = [];  // role:"tool" boxes, in the order they appear
   const toolCalls = [];  // the call text behind each one, for pairing verdicts
   const rawById = {};    // tool_call_id -> the exact text the model wrote
-  for (const t of turns) {
+  // This turn's [short, full] time, or ["", ""] when the chat has no stamps
+  // (or fewer than it has turns, which is any conversation that was already
+  // going before this existed - the old messages stay undated, the new ones
+  // are stamped from here on).
+  const when = (i) => stampParts(stamps && stamps[i] ? stamps[i].at : null);
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i];
     if (t.role === "user") {
       if (t.content.startsWith("Subagent ")) {
         // A subagent's report enters the history as a user turn, but it is
         // not something the user typed - draw it as a report.
-        line("report", t.content, box);
+        line("report", t.content, box, ...when(i));
       } else if (t.content.startsWith("Tool result: ")) {
         // A retry/stop message main.py writes when no call ever actually
         // parsed (bad-JSON, code-fenced, or an identical repeat it caught) -
@@ -3120,9 +3591,9 @@ function render(text, box = messages, vals = null) {
         // as a user turn so the model reads it the way it reads a tool result
         // (see main.note_turn) - but nobody typed it, so it is drawn as the
         // note it is rather than as a message.
-        line("system", t.content, box);
+        line("system", t.content, box, ...when(i));
       } else {
-        line("user", t.content, box);
+        line("user", t.content, box, ...when(i));
       }
     } else if (t.role === "assistant") {
       // Never invent tool-call syntax here. raw_call, when there is one, is
@@ -3144,9 +3615,9 @@ function render(text, box = messages, vals = null) {
       // draw it red on reload the same as the live broadcast does, instead
       // of as an ordinary reply.
       if (shown.startsWith("Error: the turn failed - ")) {
-        line("error", shown, box);
+        line("error", shown, box, ...when(i));
       } else {
-        line("agent", shown, box);
+        line("agent", shown, box, ...when(i));
       }
     } else if (t.role === "tool") {
       const body = toolLine(t.content, box);
@@ -3200,7 +3671,7 @@ function render(text, box = messages, vals = null) {
 function renderPending() {
   messages.querySelectorAll(".msg.pending").forEach(el => el.remove());
   for (const m of pendingMessages) {
-    const body = line("user", m.text);
+    const body = line("user", m.text, messages, ...stampParts(m.at));
     body.parentElement.classList.add("pending");
     if (!m.sent) body.parentElement.classList.add("queued");
   }
@@ -3210,13 +3681,23 @@ async function refresh() {
   // Nothing to fetch for a chat that doesn't exist yet - a window that has
   // just opened, or has just hit "new chat". Draw it empty and stop; the chat
   // comes into being on the first message (see submitChatText).
-  if (!currentChat) { render("", messages, null); return; }
-  const hist = await (await fetch("/history" + chatQuery("?"))).text();
-  let vals = null;
-  try {
-    vals = await (await fetch("/validations?chat=" + encodeURIComponent(currentChat))).json();
-  } catch (e) { /* no log is fine - just no safety rows */ }
-  render(hist, messages, vals);
+  if (!currentChat) { render("", messages, null, null); return; }
+  // All three together, not one after the other: the transcript, its safety
+  // verdicts and its timestamps are three separate files precisely because
+  // only the first is ever sent to a model, and nothing here depends on
+  // anything else here. Sequentially this was three round trips of waiting
+  // before a single bubble was drawn.
+  //
+  // A failed sidecar fetch is not a failed redraw - the transcript still
+  // draws, just without safety rows or times, which is what a chat that has
+  // neither looks like anyway.
+  const q = encodeURIComponent(currentChat);
+  const [hist, vals, stamps] = await Promise.all([
+    fetch("/history" + chatQuery("?")).then(r => r.text()),
+    fetch("/validations?chat=" + q).then(r => r.json()).catch(() => null),
+    fetch("/stamps?chat=" + q).then(r => r.json()).catch(() => null),
+  ]);
+  render(hist, messages, vals, stamps);
 }
 
 // Who is working right now, shown above the input: "main agent working...",
@@ -3437,6 +3918,12 @@ async function pollStatus() {
     // follow a chat switch and not only a deliberate change here.
     if (s.workspace !== undefined && (s.workspace || "") !== (lastWorkspace || "")) {
       setWorkspaceQuickValue(s.workspace || "");
+    }
+    // And the safety level, for the third time and the same reason: it
+    // belongs to the loaded chat, so the corner has to follow a chat switch
+    // and not only a deliberate change here.
+    if (s.safety_threshold !== undefined) {
+      setSafetyQuickValue(s.safety_threshold, s.safety_own);
     }
   } catch (e) { /* server away - leave the bar as it is */ }
 
@@ -4527,6 +5014,59 @@ document.addEventListener("click", (e) => {
   modalBody.scrollTop = 0;
 });
 
+// Put text on the clipboard. navigator.clipboard needs a secure context, and
+// Uniagent is often reached over plain http on the LAN, so fall back to the
+// old select-a-hidden-textarea-and-execCommand trick where it is missing.
+async function copyToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall through */ }
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  ta.remove();
+  return ok;
+}
+
+// The copy button on a fenced code block. innerText rather than textContent
+// so the copy matches what is on screen line for line.
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest && e.target.closest(".code-copy");
+  if (!btn) return;
+  const pre = btn.parentElement.querySelector("pre");
+  if (!pre) return;
+  const ok = await copyToClipboard(pre.innerText);
+  btn.textContent = ok ? "copied" : "failed";
+  btn.classList.toggle("copied", ok);
+  setTimeout(() => {
+    // The bubble may have been redrawn under us mid-stream, in which case this
+    // button is off the page already and putting the label back is harmless.
+    btn.textContent = "copy";
+    btn.classList.remove("copied");
+  }, 1200);
+});
+
+// Copying out of the page hands over PLAIN text only. A browser's default copy
+// also writes a text/html flavour carrying the computed styles, so pasting into
+// PowerPoint or Word brought the dark theme's background along with it. With
+// only text/plain on the clipboard, the paste takes on whatever styling it
+// lands in. Typing in a field is untouched: a selection inside an <input> or
+// <textarea> doesn't show up in the document selection, so this bails out and
+// the browser's own copy runs.
+document.addEventListener("copy", (e) => {
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed) return;
+  const text = sel.toString();
+  if (!text || !e.clipboardData) return;
+  e.clipboardData.setData("text/plain", text);
+  e.preventDefault();
+});
+
 // Live events: chunks stream into one agent bubble as the model writes; when
 // the turn is done the transcript is redrawn from the history, which is the
 // authority (it also brings in the tool results the stream doesn't carry).
@@ -4566,17 +5106,26 @@ events.onmessage = (e) => {
     showApproval(ev.chat, ev.text);
   } else if (ev.type === "user") {
     turnBusy = true;
+    // Whatever is being read out keeps going. Sending the next message is not
+    // a request for silence - it used to cut the speaker off here, which meant
+    // typing a follow-up while the agent talked lost the rest of what it was
+    // saying, every time. Stop is the button that stops it (see "stopped"),
+    // and the new turn's own speech simply queues up behind this one.
+    //
     // If this is the echo of one we sent from the pending queue, it's already
     // on screen (flushQueue un-greys it the instant it's sent, not once this
     // confirms it) - draw the real bubble and drop the placeholder together
     // so they never overlap or gap.
     const i = pendingMessages.findIndex(m => m.sent && m.text === ev.text);
     if (i !== -1) pendingMessages.splice(i, 1);
-    line("user", ev.text);
+    // ev.at is the server's clock (see server.py's _run_turn) - the same
+    // instant it is writing into this chat's stamps file, so the time drawn
+    // now is the time still there after the end-of-turn redraw.
+    line("user", ev.text, messages, ...stampParts(ev.at));
     renderPending();
   } else if (ev.type === "report") {
     turnBusy = true;
-    line("report", ev.text);
+    line("report", ev.text, messages, ...stampParts(ev.at));
   } else if (ev.type === "note") {
     // Something that happened TO this chat rather than in it - it was moved to
     // another workspace. It is already in the history (the model reads it as a
@@ -4627,6 +5176,23 @@ events.onmessage = (e) => {
     // left alone here and waited on the real "done" minutes later.
     streaming = null;
     pendingSafety = null;
+    // And shut up: the agent now speaks as it works, so a stopped turn that
+    // kept talking its way through everything it had already said would be the
+    // most conspicuous thing on the page about a button meant to stop it.
+    stopSpeaking();
+  } else if (ev.type === "speak") {
+    // Something the agent said is ready to be read out - usually one message,
+    // arriving mid-turn the moment the model finished writing it, and queued
+    // behind whatever is still being spoken. The fetch inside is what makes
+    // the audio (and, in the summary modes, the summary) at all, so ids nobody
+    // asks for cost nothing.
+    if (ev.ids && ev.ids.length) playSpoken(ev.ids);
+  } else if (ev.type === "speaknote") {
+    // Reading it out went wrong in a way that isn't silence - the summarising
+    // model couldn't be reached, so what you are hearing is the reply itself.
+    // Said out loud here because the alternative is a setting that looks on
+    // and hasn't been for a week.
+    line("error", "speech: " + ev.text);
   } else if (ev.type === "done") {
     streaming = null;
     pendingSafety = null;
@@ -4652,7 +5218,10 @@ function flushQueue() {
   if (!unsent.length) return;
   const text = unsent.map(m => m.text).join("\n\n");
   pendingMessages = pendingMessages.filter(m => m.sent);
-  pendingMessages.push({ text, sent: true });
+  // Stamped NOW rather than carrying either queued part's time: the parts
+  // collapse into one message here, and this is the moment that message is
+  // sent - which is the time the server is about to record for it.
+  pendingMessages.push({ text, sent: true, at: Math.floor(Date.now() / 1000) });
   renderPending();
   submitChatText(text);
 }
@@ -4705,7 +5274,12 @@ async function submitChatText(text) {
 function sendUserText(text) {
   if (turnBusy && !text.startsWith("/")) {
     if (pendingMessages.filter(m => !m.sent).length >= 2) return false;  // both slots full
-    pendingMessages.push({ text, sent: false });
+    // `at` when it was WRITTEN, not when it is drawn: renderPending() redraws
+    // these repeatedly while the turn ahead runs, and stamping at draw time
+    // would have a queued message's time creep forward as it waited. This is
+    // the browser's own clock because nothing else knows about the message
+    // yet - the server's stamp replaces it the moment it is actually sent.
+    pendingMessages.push({ text, sent: false, at: Math.floor(Date.now() / 1000) });
     renderPending();
     return true;
   }
@@ -4880,6 +5454,163 @@ document.addEventListener("keyup", (e) => { if (e.code === voiceKey) releaseTalk
 // clip rather than record until the tab comes back.
 window.addEventListener("blur", releaseTalk);
 
+// ---- voice: the reply read back ---------------------------------------------
+// The other direction. When a turn ends on the model actually saying something
+// and the voice tab names someone to read it, the server broadcasts a "speak"
+// event carrying an id; the audio itself is fetched here, which is what makes
+// it get synthesised at all (see server.py's _speak_offer).
+//
+// Fetched rather than handed straight to <audio src>: a failure comes back as
+// a 502 with a sentence explaining itself, and an audio element would swallow
+// that and fire a bare "error" with nothing readable in it.
+// A turn arrives as a QUEUE, not one clip: the voice tab can be set to read
+// every message the agent writes, and each of those is broadcast the moment it
+// exists - mid-turn, while the tool it asked for is still running - so they
+// land here one at a time and pile up behind whatever is talking. The next
+// clip is fetched while the current one plays, so the join between two
+// messages isn't a pause while the speech model works.
+let speaking = null;    // the Audio playing right now, if any
+let speakQueue = [];    // ids waiting their turn to be read
+let speakRun = 0;       // bumped whenever something takes the speaker over
+let speakBusy = false;  // whether a reader is working through the queue
+let speakBlocked = false;   // the browser refused to play without a click first
+let speakEnd = null;    // ends the clip playing right now - see stopSpeaking
+
+// Any touch of the page lifts a browser's no-sound-until-you-interact rule, so
+// it lifts ours too. Capture phase and passive: this only watches, and must not
+// depend on where in the page the click landed.
+for (const ev of ["pointerdown", "keydown"]) {
+  document.addEventListener(ev, () => { speakBlocked = false; }, { capture: true, passive: true });
+}
+
+// Shut the speaker up and throw away everything waiting to be read. Stop is
+// the only thing that does this - the stop button and /stop, both of which
+// reach here through the server's "stopped" event. Nothing else interrupts a
+// reading: a clip that finishes hands over to the next one in the queue, and
+// sending another message while the agent is talking leaves it talking.
+function stopSpeaking() {
+  // Bumped even with nothing playing: a reading whose next clip is still being
+  // fetched has no Audio yet, and this is what tells it not to start.
+  speakRun++;
+  speakQueue = [];
+  if (speaking) {
+    speaking.pause();
+    speaking = null;
+  }
+  // Pausing an <audio> fires no "ended", so the reader waiting on this clip
+  // would wait on it forever - and, still counting itself busy, would never
+  // start again for the next thing the agent said. Ending it here is what lets
+  // stop be something you can come back from.
+  if (speakEnd) speakEnd(false);
+}
+
+// One clip, as {url} or {error}. Fetched rather than handed straight to
+// <audio src>: a failure comes back as a 502 with a sentence explaining itself,
+// and an audio element would swallow that and fire a bare "error" with nothing
+// readable in it.
+async function fetchSpoken(id) {
+  try {
+    const r = await fetch("/speak?id=" + id);
+    if (!r.ok) return { error: await r.text() };
+    return { url: URL.createObjectURL(await r.blob()) };
+  } catch (e) {
+    return { error: "could not reach the server" };
+  }
+}
+
+// Play one clip through to its end. Resolves "keep going" or "stop" - a
+// browser that refuses to play at all would otherwise do it once per message.
+function playClip(url) {
+  return new Promise((resolve) => {
+    const audio = new Audio(url);
+    speaking = audio;
+    // Called once, however this clip ends - played out, failed, or stopped -
+    // with whether the reader should carry on to the next one.
+    let over = false;
+    const done = (go) => {
+      if (over) return;
+      over = true;
+      URL.revokeObjectURL(url);
+      if (speaking === audio) speaking = null;
+      if (speakEnd === done) speakEnd = null;
+      resolve(go);
+    };
+    speakEnd = done;
+    audio.onended = () => done(true);
+    audio.onerror = () => done(true);
+    audio.play().catch((e) => {
+      // A browser refuses to play sound on a page nobody has clicked on yet, so
+      // a turn that started somewhere else (a cron job, another window) can land
+      // on a tab that has been sitting untouched. Say so rather than being
+      // mysteriously silent - clicking the page once fixes it for good.
+      //
+      // Latched, because the agent now speaks a message at a time: without it
+      // an untouched tab would say this again for every message of every turn,
+      // and pay to synthesise each one to find out what it already knew.
+      speakBlocked = true;
+      line("error", "speech: the browser wouldn't play it (" + e.name
+                    + ") - click the page once and it will from then on");
+      done(false);
+    });
+  });
+}
+
+// Add to what is being read, and start reading if nothing is. NOT a restart:
+// the agent's next message arrives while the previous one is still being
+// spoken, and cutting the old one off would mean only ever hearing the last
+// thing it said. The same goes across turns - a reading runs to its end unless
+// it is stopped outright (stopSpeaking, off the "stopped" event).
+function playSpoken(ids) {
+  // Nothing can be played until the page has been touched, and asking the
+  // server for the audio is what makes it - so a blocked tab doesn't even
+  // fetch. It has already been told to click once; see playClip.
+  if (speakBlocked) return;
+  speakQueue.push(...ids);
+  if (!speakBusy) readQueue();
+}
+
+async function readQueue() {
+  speakBusy = true;
+  const run = speakRun;
+  // The clip after the one playing, fetched early - that fetch is what makes
+  // the server synthesise it (and, in the summary modes, write the summary
+  // first), so starting it now is what keeps the gap between two messages down
+  // to nothing. Held as a promise; a blob URL the browser is keeping for us
+  // has to be revoked even if we end up not playing it.
+  let ahead = null;
+  const dropAhead = () => {
+    if (ahead) ahead.then((g) => { if (g.url) URL.revokeObjectURL(g.url); });
+    ahead = null;
+  };
+  try {
+    while (run === speakRun) {
+      const next = ahead || (speakQueue.length ? fetchSpoken(speakQueue.shift()) : null);
+      ahead = null;
+      if (!next) return;              // nothing left to read
+      const got = await next;
+      // Taken over while that was in flight - by the next turn, or by /stop.
+      // Throw away what was fetched rather than talking over whatever is now
+      // playing.
+      if (run !== speakRun) {
+        if (got.url) URL.revokeObjectURL(got.url);
+        return;
+      }
+      if (speakQueue.length) ahead = fetchSpoken(speakQueue.shift());
+      if (got.error) {
+        // One message failing doesn't cancel the rest - the others are already
+        // made, and stopping here would lose the end of the reply over a
+        // hiccup in the middle of it.
+        line("error", "speech: " + got.error);
+        continue;
+      }
+      if (!await playClip(got.url)) { speakQueue = []; return; }
+    }
+  } finally {
+    dropAhead();
+    speakBusy = false;
+  }
+}
+
 // Click the key button in settings, then press a key: the next keydown becomes
 // hold-to-talk. Capture phase, so it takes the press ahead of the listener
 // above - otherwise choosing the key would also start a recording.
@@ -5010,12 +5741,21 @@ const F = {
   theme: document.getElementById("s-theme"),
   voice_provider: document.getElementById("s-voice-provider"),
   voice_model: document.getElementById("s-voice-model"),
+  speak_provider: document.getElementById("s-speak-provider"),
+  speak_model: document.getElementById("s-speak-model"),
+  speak_mode: document.getElementById("s-speak-mode"),
+  speak_summary_provider: document.getElementById("s-speak-summary-provider"),
+  speak_summary_model: document.getElementById("s-speak-summary-model"),
+  speak_summary_temperature: document.getElementById("s-speak-summary-temperature"),
+  speak_summary_prompt: document.getElementById("s-speak-summary-prompt"),
   temperature: document.getElementById("s-temperature"),
   safety_validation: document.getElementById("s-safety"),
+  safety_threshold: document.getElementById("s-safety-threshold"),
   safety_prompt: document.getElementById("s-safety-prompt"),
   compaction_prompt: document.getElementById("s-compaction-prompt"),
 };
 const tempValue = document.getElementById("s-temperature-value");
+const speakSummaryTemp = document.getElementById("s-speak-summary-temperature-value");
 const accentPick = document.getElementById("s-accent");
 const accentHex = document.getElementById("s-accent-hex");
 // "" means "the theme's own", which is a real choice and not one a colour input
@@ -5141,6 +5881,9 @@ const PAIRS = [
   [F.sub_provider, F.sub_model],
   [F.cron_provider, F.cron_model],
   [F.verify_provider, F.verify_model],
+  // The summarising model on the voice tab is an ordinary chat model - unlike
+  // the two speech pairs above it, whose models come off their own endpoints.
+  [F.speak_summary_provider, F.speak_summary_model],
 ];
 
 // Offer providerSel's known models as autocomplete on modelSel - which is a
@@ -5241,11 +5984,41 @@ async function loadSettings() {
   F.voice_model.value = known.voice_model || "";
   drawVoiceModels(sttSeen[F.voice_provider.value]);
 
+  // And who reads the reply back, which works the same way in every respect
+  // except what blank means: nothing is read out at all.
+  F.speak_provider.innerHTML = "";
+  for (const [value, text] of [["", "nobody - stay silent"]]
+      .concat(providerNames.map((n) => [n, n]))) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = text;
+    F.speak_provider.appendChild(o);
+  }
+  F.speak_provider.value = known.speak_provider || "";
+  F.speak_model.value = known.speak_model || "";
+  drawSpeakModels(ttsSeen[F.speak_provider.value]);
+
+  // And what they're handed. The summarising model underneath is an ordinary
+  // provider/model pair, so its select was filled in from PAIRS above.
+  F.speak_mode.value = known.speak_mode || "final";
+  F.speak_summary_provider.value = known.speak_summary_provider;
+  populateModels(F.speak_summary_provider, F.speak_summary_model, known.speak_summary_model);
+  F.speak_summary_temperature.value = known.speak_summary_temperature;
+  // Blank is a real saved value here - it means the shipped prompt - so the box
+  // stays empty and the default shows through as its placeholder, the same as
+  // the compaction tab.
+  F.speak_summary_prompt.value = known.speak_summary_prompt || "";
+  F.speak_summary_prompt.placeholder = defaults.speak_summary_prompt || "";
+  drawSpeakMode();
+
   F.theme.value = known.theme;
   F.temperature.value = known.temperature;
   tempValue.textContent = Number(known.temperature).toFixed(1);
   F.safety_validation.checked = known.safety_validation;
   F.safety_prompt.value = known.safety_prompt;
+  checkPromptShape();
+  F.safety_threshold.value = known.safety_threshold;
+  drawSafetyDefaultOut();
   drawList(listBoxes.safety_whitelist, known.safety_whitelist);
   drawList(listBoxes.safety_blacklist, known.safety_blacklist);
   drawList(listBoxes.market_repos, known.market_repos);
@@ -5395,13 +6168,118 @@ F.voice_provider.addEventListener("change", () => {
   loadVoiceModels(F.voice_provider.value, "");
 });
 
-// The number next to the slider has to track the drag itself, not just where
+// ---- settings: who reads the reply back ------------------------------------
+// The same pair again for the other direction, off GET /speak/models. Kept as
+// its own copy rather than folded together with the transcription one above:
+// they answer different endpoints and say different things when empty, and the
+// shared version would be two branches wide at every line.
+let ttsSeen = {};
+
+function drawSpeakModels(info) {
+  const list = document.getElementById("s-speak-model-list");
+  const hint = document.getElementById("s-speak-model-hint");
+  list.innerHTML = "";
+  hint.innerHTML = "";
+  const name = F.speak_provider.value;
+
+  const say = (text) => {
+    const span = document.createElement("span");
+    span.className = "who";
+    span.textContent = text;
+    hint.appendChild(span);
+  };
+
+  if (!name) return;              // nobody chosen - nothing to explain
+  if (!info) { say("looking…"); return; }
+
+  for (const m of info.models) {
+    const o = document.createElement("option");
+    o.value = m;
+    list.appendChild(o);
+  }
+  // The note is only worth the space when there is nothing to pick: a wire
+  // that can't speak at all, or a catalogue with no speech models in it. When
+  // there are models, the models themselves are the whole answer.
+  if (!info.models.length) { say(info.note || "no speech models"); return; }
+
+  for (const m of info.models) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = m;
+    if (m === F.speak_model.value) b.classList.add("on");
+    b.onclick = () => {
+      F.speak_model.value = m;
+      for (const other of hint.querySelectorAll("button")) other.classList.remove("on");
+      b.classList.add("on");
+    };
+    hint.appendChild(b);
+  }
+}
+
+async function loadSpeakModels(name, wanted) {
+  if (wanted !== undefined) F.speak_model.value = wanted;
+  if (!name) { drawSpeakModels(null); return; }
+  if (ttsSeen[name]) { drawSpeakModels(ttsSeen[name]); return; }
+  drawSpeakModels(undefined);   // "looking…" - a catalogue can take a second
+  try {
+    ttsSeen[name] = await (await fetch("/speak/models?provider=" + encodeURIComponent(name))).json();
+  } catch (e) {
+    ttsSeen[name] = { models: [], note: "could not ask " + name + " what it serves" };
+  }
+  if (F.speak_provider.value === name) drawSpeakModels(ttsSeen[name]);
+}
+
+F.speak_provider.addEventListener("change", () => {
+  loadSpeakModels(F.speak_provider.value, "");
+});
+
+// ---- settings: what gets read out -------------------------------------------
+// The summarising model is only part of the form for the two modes that use
+// one - shown the rest of the time it would look like something you had to
+// fill in to hear anything at all. The line under the dropdown says what the
+// choice above it costs, since the two summary modes buy a model call per turn
+// and the other two don't.
+// Each says what you hear and what it costs. Timing is worth saying too: every
+// mode but "summary" speaks a message the moment the agent finishes writing it
+// - while the tool it just asked for is still running - and "summary" is the
+// one that has to wait for the turn to be over before it can start.
+const SPEAK_MODE_SAYS = {
+  off: "Nothing is read out. Everything else on this tab is remembered for when you turn it back on.",
+  final: "Only the reply a turn ends on, word for word, the moment it's written. A turn that ends on tool work is silent.",
+  all: "Every message, including what it says alongside each tool call - each one spoken as it lands, so a long turn talks its way through the work.",
+  summary: "One model call per turn, for a single account of the whole thing. The only setting here that waits for the turn to end before it says anything.",
+  summary_each: "A model call per message, spoken as soon as that message is written - the running commentary, each step in a sentence. The most calls of any setting here.",
+  summary_final: "One model call, and only for a turn that ends on a reply. A turn that ends on tool work is silent.",
+};
+
+function drawSpeakMode() {
+  const mode = F.speak_mode.value;
+  document.getElementById("s-speak-summary").hidden = !mode.startsWith("summary");
+  document.getElementById("s-speak-mode-hint").textContent = SPEAK_MODE_SAYS[mode] || "";
+  speakSummaryTemp.textContent = Number(F.speak_summary_temperature.value).toFixed(1);
+}
+F.speak_mode.addEventListener("change", drawSpeakMode);
+
+// Puts the shipped prompt back in the box to be read and edited, the same way
+// the safety tab's button does - rather than emptying it, which would also
+// work (server.py's _speak_summary reads a blank setting as the default) but
+// would leave nothing on screen to say what is now in force.
+document.getElementById("s-speak-summary-default").addEventListener("click", () => {
+  F.speak_summary_prompt.value = (defaults && defaults.speak_summary_prompt) || "";
+});
+
+// Wire up a temperature slider and the number beside it. Two of them now - the
+// default on the models tab and the summarising model's on the voice tab - and
+// everything below is the same for both, so it is written once here.
+//
+// The number has to track the drag itself, not just where
 // it lands - "input" fires continuously from the moment you press down and
 // move, one event per step; "change" only fires once, on release. Binding
 // "change" here would leave the label frozen at the OLD value for the whole
 // drag and only jump to the new one when you let go, which reads as broken.
-F.temperature.addEventListener("input", () => {
-  tempValue.textContent = Number(F.temperature.value).toFixed(1);
+function bindTemperature(slider, out) {
+slider.addEventListener("input", () => {
+  out.textContent = Number(slider.value).toFixed(1);
 });
 
 // A plain click on the TRACK (as opposed to dragging the thumb) is where
@@ -5412,20 +6290,87 @@ F.temperature.addEventListener("input", () => {
 // makes press-down the moment that counts everywhere, which is what a slider
 // should feel like - the drag that follows still updates live through the
 // native "input" events above, this only fixes the click itself.
-F.temperature.addEventListener("pointerdown", (e) => {
-  const rect = F.temperature.getBoundingClientRect();
-  const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-  const min = Number(F.temperature.min), max = Number(F.temperature.max);
-  const step = Number(F.temperature.step) || 1;
-  const raw = min + ratio * (max - min);
-  const value = Math.min(max, Math.max(min, Math.round(raw / step) * step));
-  F.temperature.value = value;
-  tempValue.textContent = value.toFixed(1);
-  F.temperature.dispatchEvent(new Event("input", { bubbles: true }));
+// The thumb's CENTRE only travels between half a thumb in from each end, so
+// the pointer maps onto the value over (width - thumb), not over the full
+// width. Measuring across the full width made this calculation disagree with
+// the browser's own by half a thumb everywhere except the exact middle: the
+// press put the thumb in one place and the drag that followed immediately
+// snapped it to another.
+const THUMB = 16;
+
+slider.addEventListener("pointerdown", (e) => {
+  const t = slider;
+  const rect = t.getBoundingClientRect();
+  const min = Number(t.min), max = Number(t.max);
+  const travel = Math.max(1, rect.width - THUMB);
+
+  // Pressing ON the thumb is the start of a drag, not a jump. Without this
+  // the thumb would twitch by up to half a step the moment it was grabbed.
+  const at = rect.left + THUMB / 2 + ((Number(t.value) - min) / (max - min)) * travel;
+  if (Math.abs(e.clientX - at) <= THUMB / 2) return;
+
+  const before = t.value;
+  // Deferred a frame so the browser's OWN handling of this press goes first.
+  // Where a browser moves the thumb itself (Chrome does, on press), its
+  // mapping is the reference and this must not fight it - the two rounded
+  // differently at the very bottom of the range, so a click near 0 landed on
+  // one value and then immediately corrected to the other. Only where nothing
+  // happened (Firefox, which waits for the button to come back up) does this
+  // step in.
+  requestAnimationFrame(() => {
+    if (t.value !== before) return;
+    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left - THUMB / 2) / travel));
+    const step = Number(t.step) || 1;
+    const raw = min + ratio * (max - min);
+    // Rounded off the MINIMUM, not off zero: a slider that starts at 0.3 with
+    // a 0.2 step has no 0.4 on it, and snapping to a value the control cannot
+    // otherwise reach would leave the thumb between two of its own positions.
+    const value = Math.min(max, Math.max(min, min + Math.round((raw - min) / step) * step));
+    // toFixed, because 0.1-steps in binary floating point land on values like
+    // 0.30000000000000004, which a stepped input will not accept.
+    t.value = value.toFixed(2);
+    out.textContent = Number(t.value).toFixed(1);
+    t.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+});
+}
+
+bindTemperature(F.temperature, tempValue);
+bindTemperature(F.speak_summary_temperature, speakSummaryTemp);
+
+// Says so when the prompt can't drive the number - the same warning the chat
+// dropdown carries, shown here where the prompt is edited, live as it is typed.
+// The number beside the settings slider, in the same words the chat dropdown
+// uses - so the default and a chat's own setting read identically.
+function drawSafetyDefaultOut() {
+  const n = Number(F.safety_threshold.value);
+  const out = document.getElementById("s-safety-threshold-out");
+  out.textContent = n + " - " + safetySays(n);
+  out.style.setProperty("--lv-h", levelHue(n));
+}
+F.safety_threshold.addEventListener("input", drawSafetyDefaultOut);
+
+function checkPromptShape() {
+  const text = F.safety_prompt.value;
+  const warn = document.getElementById("s-prompt-warn");
+  const lowered = text.toLowerCase();
+  const rating = !lowered.includes("{true}")
+    && (lowered.includes("danger") || lowered.includes("0-10") || lowered.includes("0 to 10"));
+  warn.hidden = rating || !text.trim();
+}
+F.safety_prompt.addEventListener("input", checkPromptShape);
+
+document.getElementById("s-prompt-default").addEventListener("click", () => {
+  // The shipped prompt comes from /settings' "defaults" block, which exists
+  // precisely so a box the user has overwritten can get back what it started
+  // as. Not saved here - the tab's own save button commits it.
+  F.safety_prompt.value = (defaults && defaults.safety_prompt) || "";
+  checkPromptShape();
 });
 
 document.getElementById("set-save").addEventListener("click", async () => {
   const body = {
+    safety_threshold: Number(F.safety_threshold.value),
     provider: F.provider.value,
     model: F.model.value,
     sub_provider: F.sub_provider.value,
@@ -5449,6 +6394,15 @@ document.getElementById("set-save").addEventListener("click", async () => {
     voice_key: voiceKey,
     voice_provider: F.voice_provider.value,
     voice_model: F.voice_model.value.trim(),
+    speak_provider: F.speak_provider.value,
+    speak_model: F.speak_model.value.trim(),
+    speak_mode: F.speak_mode.value,
+    speak_summary_provider: F.speak_summary_provider.value,
+    speak_summary_model: F.speak_summary_model.value.trim(),
+    speak_summary_temperature: Number(F.speak_summary_temperature.value),
+    // Blank is a real value - it means the shipped prompt - so it goes over as
+    // typed rather than being defaulted back to what was saved.
+    speak_summary_prompt: F.speak_summary_prompt.value.trim(),
   };
   const r = await fetch("/settings", { method: "POST", body: JSON.stringify(body) });
   if (!r.ok) { flash("could not save"); return; }
@@ -5459,6 +6413,12 @@ document.getElementById("set-save").addEventListener("click", async () => {
   drawList(listBoxes.safety_whitelist, known.safety_whitelist);
   drawList(listBoxes.safety_blacklist, known.safety_blacklist);
   drawList(listBoxes.market_repos, known.market_repos);
+  F.safety_threshold.value = known.safety_threshold;
+  drawSafetyDefaultOut();
+  checkPromptShape();
+  // The corner dropdown is drawing names and thresholds that may have just
+  // changed underneath it, and the chat behind this overlay keeps its level.
+  loadSafety();
   applyTheme(known.theme);
   accentValue = known.accent || "";
   applyAccent(accentValue);
@@ -5641,6 +6601,264 @@ wsQuick.addEventListener("change", async () => {
     drawWorkspaceBar();
   }
 });
+
+// ---- the chat's safety number -----------------------------------------------
+// One number, 0 to 10: the highest danger rating a tool call can be given by
+// the checking model and still run without asking. 0 asks about everything,
+// 10 checks nothing, and anything between runs that rating and below.
+//
+// Per chat, like the model and the workspace: one chat can be reading a
+// codebase at 6 while the one next to it, pointed at a live machine, sits at
+// 0. The button's colour is its position on the scale, so the corner says how
+// loose the chat is without being read.
+
+const safetyBtn = document.getElementById("safety-btn");
+const safetyNameOut = document.getElementById("safety-name");
+const safetyPanel = document.getElementById("safety-panel");
+const safetySlider = document.getElementById("safety-slider");
+const safetyTicks = document.getElementById("safety-ticks");
+const spNumber = document.getElementById("sp-number");
+const spSays = document.getElementById("sp-says");
+const spExtra = document.getElementById("sp-extra");
+const spPrompt = document.getElementById("sp-prompt");
+const spSaid = document.getElementById("sp-said");
+const spUnset = document.getElementById("sp-unset");
+const spLegacy = document.getElementById("safety-legacy");
+
+// The last GET /safety - the chat's extra rules, its own prompt, and whether
+// the shared prompt can drive the number at all. Fetched when the panel opens.
+let safetyInfo = null;
+// What /status last said. Kept separately because it arrives every two
+// seconds and safetyInfo does not, so a chat switch relabels the button
+// straight away rather than waiting for the panel to be opened.
+let safetyNow = null;
+let safetyOwnNow = false;
+
+// Green at 0 through to red at 10 - the same run of hues as the slider's
+// gradient, so the button's colour and the thumb's position agree.
+function levelHue(n) { return Math.round(140 - (n / 10) * 140); }
+
+// What a number does, in as few words as it takes. These are the only words
+// in the control: the scale is a scale, and a position on it explains itself.
+function safetySays(n) {
+  if (n <= 0) return "asks every time";
+  if (n >= 10) return "no checks";
+  return "allows " + n + " and below";
+}
+
+function paintLevel(el, n) {
+  el.style.setProperty("--lv-h", levelHue(n));
+}
+
+function drawSafetyButton() {
+  const n = safetyNow;
+  if (n === null) return;
+  paintLevel(safetyBtn, n);
+  safetyNameOut.textContent = n;
+  safetyBtn.classList.toggle("own", !!safetyOwnNow);
+  safetyBtn.title = "safety " + n + " - " + safetySays(n)
+    + (safetyOwnNow ? " (set for this chat)" : " (following the default)");
+}
+
+// Called from pollStatus. Only redraws on an actual change: this runs every
+// two seconds and the button is otherwise static.
+function setSafetyQuickValue(n, own) {
+  if (n === safetyNow && own === safetyOwnNow) return;
+  safetyNow = n;
+  safetyOwnNow = !!own;
+  drawSafetyButton();
+  // The panel, if open, is showing the old number - possible when another
+  // window moved this chat underneath it.
+  if (!safetyPanel.hidden) drawSafetyPanel(n);
+}
+
+async function loadSafety() {
+  try {
+    const r = await fetch("/safety?chat=" + encodeURIComponent(currentChat || ""));
+    if (!r.ok) return;
+    safetyInfo = await r.json();
+  } catch (e) {
+    return;  // server away - leave whatever is there
+  }
+  safetyNow = safetyInfo.threshold;
+  safetyOwnNow = safetyInfo.own;
+  drawSafetyButton();
+  if (!safetyPanel.hidden) drawSafetyPanel(safetyNow);
+}
+
+function drawTicks(n) {
+  if (!safetyTicks.children.length) {
+    for (let i = 0; i <= 10; i++) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = i;
+      b.dataset.n = i;
+      // A number can be aimed at directly rather than dragged to, which for
+      // eleven positions in 290px is the difference between usable and not.
+      b.addEventListener("click", () => chooseSafety(i));
+      safetyTicks.appendChild(b);
+    }
+  }
+  for (const b of safetyTicks.children) {
+    b.classList.toggle("on", Number(b.dataset.n) === n);
+  }
+}
+
+// `n` is what to show, so a drag can preview a number before it is committed.
+function drawSafetyPanel(n) {
+  if (n === null || n === undefined) return;
+  paintLevel(safetyPanel, n);
+  paintLevel(safetySlider, n);
+  spNumber.textContent = n;
+  spSays.textContent = safetySays(n);
+  if (document.activeElement !== safetySlider) safetySlider.value = n;
+  drawTicks(n);
+  if (!safetyInfo) return;
+
+  spUnset.hidden = !safetyInfo.own;
+  spLegacy.hidden = !!safetyInfo.prompt_is_rating;
+  // Only touch the boxes when they aren't being typed in: this redraws on
+  // every poll that moves the chat, and yanking half a sentence out from
+  // under someone mid-edit is unforgivable.
+  if (document.activeElement !== spExtra) spExtra.value = safetyInfo.extra || "";
+  if (document.activeElement !== spPrompt) spPrompt.value = safetyInfo.prompt || "";
+  if (safetyInfo.prompt) document.getElementById("sp-custom-wrap").open = true;
+}
+
+// Against the button, in viewport coordinates, because the panel is fixed -
+// see the CSS note on why it can't hang off the button in flow.
+function placeSafetyPanel() {
+  const box = safetyBtn.getBoundingClientRect();
+  safetyPanel.style.top = (box.bottom + 6) + "px";
+  safetyPanel.style.right = Math.max(8, window.innerWidth - box.right) + "px";
+}
+
+function closeSafetyPanel() {
+  safetyPanel.hidden = true;
+  safetyBtn.setAttribute("aria-expanded", "false");
+  spSaid.textContent = "";
+}
+
+async function openSafetyPanel() {
+  spSaid.textContent = "";
+  safetyPanel.hidden = false;
+  safetyBtn.setAttribute("aria-expanded", "true");
+  placeSafetyPanel();
+  // Drawn from what is already known first so it appears instantly, then
+  // refreshed - the shared prompt may have changed since this page loaded.
+  drawSafetyPanel(safetyNow);
+  await loadSafety();
+  placeSafetyPanel();
+}
+
+safetyBtn.addEventListener("click", () => {
+  if (safetyPanel.hidden) openSafetyPanel(); else closeSafetyPanel();
+});
+
+// Dragging previews live and commits on release: one save per gesture rather
+// than one per number crossed on the way.
+safetySlider.addEventListener("input", () => drawSafetyPanel(Number(safetySlider.value)));
+safetySlider.addEventListener("change", () => chooseSafety(Number(safetySlider.value)));
+
+// pointerdown rather than click, for the same reason the settings overlay
+// uses it: a click only lands on release, so pressing elsewhere left the
+// panel up until the button came back.
+document.addEventListener("pointerdown", (e) => {
+  if (safetyPanel.hidden) return;
+  if (e.target.closest("#safety-panel") || e.target.closest("#safety-bar")) return;
+  closeSafetyPanel();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || safetyPanel.hidden) return;
+  // Stop here: Escape with this open means "shut this", not "shut the settings
+  // page behind it too". This listener is registered before that one, so
+  // stopping propagation now is what keeps the two from both firing.
+  e.stopImmediatePropagation();
+  closeSafetyPanel();
+  safetyBtn.focus();
+});
+window.addEventListener("resize", () => { if (!safetyPanel.hidden) placeSafetyPanel(); });
+
+// Applies a server answer - the whole state, not just what was asked for, so
+// a number that resolved differently from the drag shows what it actually is.
+function applySafety(info) {
+  safetyInfo = info;
+  safetyNow = info.threshold;
+  safetyOwnNow = info.own;
+  drawSafetyButton();
+  drawSafetyPanel(safetyNow);
+}
+
+async function postSafety(body, saying) {
+  spSaid.classList.remove("bad");
+  spSaid.textContent = saying;
+  try {
+    // requireChat, like a message, a pin, a model switch and a workspace:
+    // choosing how carefully a chat runs is setting it up, and it needs a
+    // real id to be written against.
+    const r = await fetch("/safety?chat=" + encodeURIComponent(requireChat()), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      spSaid.classList.add("bad");
+      spSaid.textContent = await r.text();
+      return false;
+    }
+    applySafety(await r.json());
+    return true;
+  } catch (e) {
+    spSaid.classList.add("bad");
+    spSaid.textContent = "could not save: " + e;
+    return false;
+  }
+}
+
+async function chooseSafety(n) {
+  drawSafetyPanel(n);          // instant, so the control never feels laggy
+  await postSafety({ threshold: n }, "");
+}
+
+spUnset.addEventListener("click", () => postSafety({ threshold: null }, ""));
+
+document.getElementById("sp-save").addEventListener("click", async () => {
+  if (await postSafety({ extra: spExtra.value, prompt: spPrompt.value }, "saving…")) {
+    spSaid.textContent = "saved";
+  }
+});
+
+// Swaps the INSTALL's shared prompt for the rating one - a global change made
+// from a per-chat panel, hence the confirm.
+document.getElementById("sp-fix-prompt").addEventListener("click", async () => {
+  if (!confirm("Replace the shared checking prompt with the 0-10 rating one?"
+               + "\n\nThis affects every chat, and any wording you have added "
+               + "to it will be lost.")) return;
+  spSaid.classList.remove("bad");
+  spSaid.textContent = "switching…";
+  try {
+    const r = await fetch("/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ safety_prompt: safetyInfo.rating_prompt }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    spSaid.textContent = "done";
+    await loadSafety();
+  } catch (e) {
+    spSaid.classList.add("bad");
+    spSaid.textContent = "could not switch: " + e;
+  }
+});
+
+document.getElementById("sp-to-settings").addEventListener("click", () => {
+  closeSafetyPanel();
+  // Reuses the real buttons rather than reaching into their state, so opening
+  // settings here does everything opening it normally does.
+  document.getElementById("set-btn").click();
+  document.querySelector('.set-tab[data-tab="safety"]').click();
+});
+
 
 // ---- settings: providers tab -------------------------------------------------
 // The whole provider list, out of .env's LLM_PROVIDERS (see provider.py). There
@@ -7501,97 +8719,233 @@ document.getElementById("cron-reload").addEventListener("click", () => loadCron(
 
 // ---- settings: system tab, the updater --------------------------------------
 // Three routes, and the split between them is the point. GET /update is local
-// and instant - which commit this is, and whatever the last update wrote - so
-// opening this tab costs nothing. POST /update/check is the only one that goes
-// out to the network, and it only ever runs because the button was pressed.
-// POST /update starts the update and returns straight away: the update outlives
-// the server (it restarts it), so there is nothing to stream back and the log
-// is followed as a file instead. See scripts/update.py.
+// and instant - which commit this is, whatever the last update wrote, and the
+// last answer the remote gave - so opening this tab, or the app, costs nothing.
+// That last answer is what lets the card say "up to date" or "3 new commits"
+// before anything is pressed; the server refreshes it in the background when it
+// goes stale (see _maybe_refresh_check), and POST /update/check is the same
+// question asked on purpose, now, because someone is watching. POST /update
+// starts the update and returns straight away: the update outlives the server
+// (it restarts it), so there is nothing to stream back and the log is followed
+// as a file instead. See scripts/update.py.
+//
+// One line says what the situation is, one button does the thing, and the
+// detail - which commits, which files, the log - waits until it is asked for.
 
 const UP_DONE  = "::uniagent-update-done::";
 const upWhere  = document.getElementById("up-where");
-const upStatus = document.getElementById("up-status");
+const upHead   = document.getElementById("up-head");
+const upDot    = document.getElementById("up-dot");
 const upWarn   = document.getElementById("up-warn");
 const upList   = document.getElementById("up-list");
 const upLog    = document.getElementById("up-log");
 const upCheck  = document.getElementById("up-check");
 const upNow    = document.getElementById("up-now");
+const upDetail = document.getElementById("up-detail");
 
-function upSetLog(text) {
-  upLog.hidden = !text;
-  // Redraw only on a real change: this is polled every second, and rewriting
-  // the box each time would fight the user for the scroll position.
+// The last thing GET /update said, and whether an update we started is still
+// going - which is the one state the poller must not draw over.
+let upLast = null;
+let upRunning = false;
+let upWaitTimer = null;
+let upShowDetail = false;
+
+const upPlural = (k, one, many) => k + " " + (k === 1 ? one : many);
+
+// "just now" / "12 minutes ago" / "yesterday". Rough on purpose: the exact
+// second the remote was last asked is never the question - "recently or not"
+// is.
+function upAgo(ts) {
+  if (!ts) return "";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 90) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " minutes ago";
+  if (s < 86400) { const h = Math.round(s / 3600); return upPlural(h, "hour", "hours") + " ago"; }
+  const d = Math.round(s / 86400);
+  return d === 1 ? "yesterday" : d + " days ago";
+}
+
+function upSetDot(kind) {
+  upDot.className = "up-dot" + (kind ? " " + kind : "");
+}
+
+function upSetLog(text, show) {
+  upLog.hidden = !text || !show;
+  // Redraw only on a real change: this is polled every second while an update
+  // runs, and rewriting the box each time would fight the user for the scroll
+  // position.
   if (!text || upLog.textContent === text) return;
   const atBottom = upLog.scrollHeight - upLog.scrollTop - upLog.clientHeight < 30;
   upLog.textContent = text.split(UP_DONE)[0].trimEnd();   // the marker is ours, not theirs
   if (atBottom) upLog.scrollTop = upLog.scrollHeight;
 }
 
-async function loadUpdate() {
-  try {
-    const u = await (await fetch("/update")).json();
-    const c = u.current;
-    if (!c) {
-      upWhere.textContent = "this folder is not a git checkout, so it cannot update itself.";
-      upCheck.disabled = true;
-      return;
-    }
-    upWhere.textContent = "on " + c.sha + " - " + c.subject
-      + " (" + new Date(c.date).toLocaleDateString() + "), following " + u.ref + ".";
-    upSetLog(u.log);
-  } catch (e) {
-    upWhere.textContent = "could not read this install.";
-  }
+// The dot on the way in - the settings button in the sidebar, and the system
+// tab inside it. An update nobody knows about is an update nobody installs,
+// and this tab is four clicks from the conversation.
+function upMark(on) {
+  document.getElementById("set-btn").classList.toggle("up-mark", !!on);
+  const tab = document.querySelector('.set-tab[data-tab="system"]');
+  if (tab) tab.classList.toggle("up-mark", !!on);
 }
 
-function upRender(s) {
-  upStatus.hidden = false;
-  if (!s.ok) { upStatus.textContent = s.error || "the check failed."; return; }
-  if (s.up_to_date) {
-    upStatus.textContent = "up to date - nothing new on " + s.ref + ".";
+// Everything the card knows, drawn from one payload. Called on open, after a
+// check, and on the tick that waits out a background check - so it has to be
+// safe to run at any moment and to say something sensible about every state,
+// including "we have never asked".
+function upDraw(u) {
+  const c = u.current;
+  if (!c) {
+    upSetDot("");
+    upHead.textContent = "this install cannot update itself";
+    upWhere.textContent = "it is not a git checkout, so there is nothing to fast-forward. "
+      + "Re-run the installer to move to one.";
+    upCheck.hidden = upNow.hidden = upDetail.hidden = true;
     return;
   }
-  const n = (k, one, many) => k + " " + (k === 1 ? one : many);
-  upStatus.textContent = n(s.behind, "new commit", "new commits") + ", "
-    + n(s.files.length, "file", "files") + " to update"
-    + (s.deps_changed ? ", and the dependencies have changed too." : ".");
 
-  if (s.commits.length) {
-    upList.hidden = false;
-    upList.innerHTML = s.commits.map(c =>
-      '<div><span class="sha">' + escapeHtml(c.sha) + "</span><span>"
-      + escapeHtml(c.subject) + "</span></div>").join("");
+  const s = u.check;
+  const where = "On " + c.sha + " - " + c.subject
+    + ", following " + u.ref + (u.checked_at ? ". Checked " + upAgo(u.checked_at) : "");
+  // The last look at the remote came back empty-handed. What was known before
+  // it is still on screen and still true, so this is a footnote rather than
+  // the headline - unless there is nothing else to say, below.
+  const failed = u.check_error ? " Last check: " + u.check_error + "." : "";
+  const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+
+  // Never asked, or asking right now. Both are honest answers and neither is
+  // an error, so neither gets a colour.
+  if (!s || !s.ok) {
+    const why = (s && !s.ok && s.error) || u.check_error;
+    upSetDot(u.checking ? "busy" : "");
+    upHead.textContent = u.checking ? "checking for updates..."
+      : why ? "could not check for updates" : "not checked for updates yet";
+    upWhere.textContent = (why && !u.checking ? cap(why) + ". " : "") + where + ".";
+    upNow.hidden = upDetail.hidden = true;
+    upWarn.hidden = true;
+    upList.hidden = true;
+    return;
   }
 
-  // The two things an update refuses to decide for you. Either one means the
-  // update button stays away until it is sorted out.
+  if (s.up_to_date) {
+    upSetDot("ok");
+    upHead.textContent = "Uniagent is up to date";
+    upWhere.textContent = where + (s.ahead
+      ? ". This checkout is " + upPlural(s.ahead, "commit", "commits") + " ahead of it." : ".")
+      + failed;
+    upNow.hidden = upDetail.hidden = true;
+    upWarn.hidden = upList.hidden = true;
+    return;
+  }
+
+  // Something to install. What it is, how big it is, and - if the update would
+  // have to overrule something of yours - why the button is not there.
   const stop = [];
   if (s.diverged) {
-    stop.push("This checkout has " + s.ahead + " commit(s) of its own that the remote "
-      + "does not, so it cannot fast-forward. Merge or drop them and check again.");
+    stop.push("This checkout has " + upPlural(s.ahead, "commit", "commits") + " of its own that "
+      + "the remote does not, so it cannot fast-forward. Merge or drop them, then check again.");
   }
   if (s.blocked && s.blocked.length) {
     stop.push("Edited here AND changed by the update: " + s.blocked.join(", ")
-      + ". Revert or commit them first - an update will not pick which version to keep.");
+      + ". Revert them (git checkout -- <file>) or commit them first - an update "
+      + "will not pick which version to keep.");
   }
+
+  upSetDot(stop.length ? "stop" : "new");
+  upHead.textContent = stop.length
+    ? "an update is waiting, but it cannot be applied yet"
+    : "update available - " + upPlural(s.behind, "new commit", "new commits");
+  upWhere.textContent = where + ". It changes "
+    + upPlural(s.file_count === undefined ? s.files.length : s.file_count, "file", "files")
+    + (s.deps_changed ? ", and the dependencies have changed too" : "")
+    + (s.latest ? ". Newest: " + s.latest.subject : ".") + failed;
+
   upWarn.hidden = !stop.length;
   upWarn.textContent = stop.join(" ");
   upNow.hidden = stop.length > 0;
+
+  const commits = s.commits || [];
+  upDetail.hidden = !commits.length;
+  upDetail.textContent = upShowDetail ? "hide the list" : "what's new";
+  upList.hidden = !upShowDetail || !commits.length;
+  upList.innerHTML = commits.map(c =>
+    '<div><span class="sha">' + escapeHtml(c.sha) + "</span><span>"
+    + escapeHtml(c.subject) + "</span></div>").join("");
 }
+
+// Local and instant. Also the only thing that sets the marker, so it runs once
+// when the app opens as well as whenever this tab is looked at.
+async function loadUpdate(draw = true) {
+  try {
+    const u = await (await fetch("/update", { cache: "no-store" })).json();
+    upLast = u;
+    upMark(u.check && u.check.ok && !u.check.up_to_date);
+    if (upRunning) return u;      // the update owns the card while it runs
+    if (draw) {
+      upDraw(u);
+      // The last update's output, while it is still news. An old one is not
+      // hidden away for good - it reappears the moment one is running again.
+      upSetLog(u.log, u.log_at && (Date.now() / 1000 - u.log_at) < 3600);
+    }
+    // The server went to the remote for us. Wait it out rather than leaving
+    // "checking..." on the screen with nothing behind it.
+    if (u.checking) upWaitForCheck();
+    return u;
+  } catch (e) {
+    if (draw) {
+      upSetDot("");
+      upHead.textContent = "could not read this install";
+      upWhere.textContent = "the server did not answer.";
+    }
+    return null;
+  }
+}
+
+// A background check is a git fetch on someone else's network, so it is given
+// a minute and a half and then given up on.
+function upWaitForCheck() {
+  if (upWaitTimer) return;
+  let ticks = 0;
+  upWaitTimer = setInterval(async () => {
+    if (++ticks > 45 || upRunning) { clearInterval(upWaitTimer); upWaitTimer = null; return; }
+    let u;
+    try {
+      u = await (await fetch("/update", { cache: "no-store" })).json();
+    } catch (e) { return; }
+    if (u.checking) return;
+    clearInterval(upWaitTimer);
+    upWaitTimer = null;
+    upLast = u;
+    upMark(u.check && u.check.ok && !u.check.up_to_date);
+    if (!upRunning) upDraw(u);
+  }, 2000);
+}
+
+upDetail.addEventListener("click", () => {
+  upShowDetail = !upShowDetail;
+  if (upLast) upDraw(upLast);
+});
 
 upCheck.addEventListener("click", async () => {
   upCheck.disabled = true;
   upCheck.textContent = "checking...";
-  upStatus.hidden = upWarn.hidden = upList.hidden = true;
-  upNow.hidden = true;
+  upSetDot("busy");
+  upHead.textContent = "asking " + ((upLast && upLast.ref) || "the remote") + "...";
+  upWarn.hidden = upList.hidden = true;
+  upNow.hidden = upDetail.hidden = true;
   try {
-    upRender(await (await fetch("/update/check", { method: "POST" })).json());
+    // The server writes this answer down as it passes, so re-reading afterwards
+    // gets the same result plus the "checked just now" it belongs with, and the
+    // marker on the way in agrees with what is on screen.
+    await fetch("/update/check", { method: "POST" });
+    await loadUpdate();
   } catch (e) {
-    upStatus.hidden = false;
-    upStatus.textContent = "could not reach the server.";
+    upSetDot("");
+    upHead.textContent = "could not check for updates";
+    upWhere.textContent = "the server did not answer.";
   }
   upCheck.disabled = false;
-  upCheck.textContent = "check for updates";
+  upCheck.textContent = "check again";
 });
 
 upNow.addEventListener("click", async () => {
@@ -7605,16 +8959,23 @@ upNow.addEventListener("click", async () => {
   if (!confirm("Update to the latest code and restart?\n\nYour keys, chats, prompts, "
       + "memories, settings and anything you added yourself are kept.")) return;
 
-  upNow.disabled = true;
+  upRunning = true;
+  upNow.disabled = upCheck.disabled = true;
   upNow.textContent = "updating...";
-  upList.hidden = true;
-  upStatus.hidden = true;
+  upSetDot("busy");
+  upHead.textContent = "updating...";
+  upWhere.textContent = "this takes a minute or so. Uniagent restarts itself at the end "
+    + "and this page comes back on its own - you can leave it open.";
+  upWarn.hidden = upList.hidden = upDetail.hidden = true;
+  upShowDetail = false;
   try {
     const r = await (await fetch("/update", { method: "POST" })).json();
     if (!r.ok) {
-      upStatus.hidden = false;
-      upStatus.textContent = r.error;
-      upNow.disabled = false;
+      upRunning = false;
+      upSetDot("stop");
+      upHead.textContent = "the update did not start";
+      upWhere.textContent = r.error || "the server would not start it.";
+      upNow.disabled = upCheck.disabled = false;
       upNow.textContent = "update now";
       return;
     }
@@ -7627,35 +8988,67 @@ upNow.addEventListener("click", async () => {
 // the end, which is what the marker is for: without it, "the server stopped
 // answering" and "the update died" look identical from in here.
 function upFollow() {
-  let ticks = 0, doneAt = 0, wentDown = false;
+  let ticks = 0, doneAt = 0, wentDown = false, lastLog = "";
   const tick = setInterval(async () => {
     ticks++;
     try {
       const u = await (await fetch("/update", { cache: "no-store" })).json();
       const log = u.log || "";
-      upSetLog(log);
+      lastLog = log || lastLog;
+      upSetLog(log, true);
       // It answered again after going away: that is the new code talking.
       if (wentDown) { clearInterval(tick); location.reload(); return; }
       if (!doneAt && log.includes(UP_DONE)) {
         doneAt = ticks;
-        // Finished with no restart coming - nothing more will happen.
-        if (!log.includes(UP_DONE + " restarting")) { clearInterval(tick); upFinished(); return; }
+        if (log.includes(UP_DONE + " restarting")) {
+          upHead.textContent = "restarting onto the new code...";
+          upWhere.textContent = "the page reloads itself as soon as the server is back.";
+        } else {
+          // Finished with no restart coming - nothing more will happen.
+          clearInterval(tick); upFinished(lastLog); return;
+        }
       }
       // It said it would restart and is still answering 20s later, so it could
       // not restart itself. The log says why.
-      if (doneAt && ticks - doneAt > 20) { clearInterval(tick); upFinished(); return; }
+      if (doneAt && ticks - doneAt > 20) { clearInterval(tick); upFinished(lastLog); return; }
     } catch (e) {
       if (doneAt) wentDown = true;   // the restart, landing
     }
-    if (ticks > 600) { clearInterval(tick); upFinished(); }
+    if (ticks > 600) { clearInterval(tick); upFinished(lastLog); }
   }, 1000);
 }
 
-function upFinished() {
+// The end of an update that did NOT take the server down with it: either it
+// refused to do anything, or it updated and could not restart itself. Both end
+// with the log on screen, because the log is where the reason is - but the
+// headline has to say which of the two happened rather than leaving it to be
+// read out of forty lines of progress.
+function upFinished(log) {
+  upRunning = false;
   upNow.hidden = true;
-  upNow.disabled = false;
+  upNow.disabled = upCheck.disabled = false;
   upNow.textContent = "update now";
-  loadUpdate();
+  upCheck.textContent = "check again";
+  const failed = /^xx /m.test(log || "");
+  const restarted = (log || "").includes(UP_DONE + " restarting");
+  upSetLog(log, true);
+  loadUpdate(false).then((u) => {
+    if (failed) {
+      upSetDot("stop");
+      upHead.textContent = "the update did not go through";
+      upWhere.textContent = "nothing was changed - this install is exactly as it was. "
+        + "The log below says what stopped it; sort that out and check again.";
+      return;
+    }
+    if (restarted) {
+      upSetDot("ok");
+      upHead.textContent = "updated, but the restart did not happen";
+      upWhere.textContent = "the new code is in place and runs from the next restart - "
+        + "use the restart buttons below, or the log says what went wrong.";
+      return;
+    }
+    if (u) upDraw(u);      // nothing was due, or it finished quietly
+  });
 }
 
 // ---- settings: system tab --------------------------------------------------
@@ -7993,18 +9386,25 @@ for (const tab of document.querySelectorAll(".set-tab")) {
     if (tab.dataset.tab === "providers") loadProviders();
     if (tab.dataset.tab === "email") loadEmail();
     if (tab.dataset.tab === "workspaces") loadWorkspaces();
-    // Local only - which commit this is, and the last update's log. Whether
-    // anything NEW exists is a question for the remote, and that waits for the
-    // button (see upCheck).
+    // Local and instant: which commit this is, the last update's log, and the
+    // last answer the remote gave. Going out to the remote again is the
+    // server's own business when that answer is stale, and the button's when
+    // it is not (see loadUpdate and upCheck).
     if (tab.dataset.tab === "system") loadUpdate();
     // The speech models are a round trip to the provider itself, so they are
     // fetched when this tab is actually looked at rather than on every
     // settings load - see loadVoiceModels.
-    if (tab.dataset.tab === "voice") loadVoiceModels(F.voice_provider.value, F.voice_model.value);
+    if (tab.dataset.tab === "voice") {
+      loadVoiceModels(F.voice_provider.value, F.voice_model.value);
+      loadSpeakModels(F.speak_provider.value, F.speak_model.value);
+    }
   });
 }
 
 document.getElementById("set-btn").addEventListener("click", async () => {
+  // The safety dropdown belongs to the chat behind the settings overlay, so
+  // leaving it up would strand it over a page it has nothing to do with.
+  closeSafetyPanel();
   settingsBox.hidden = false;
   setSaved.textContent = "";
   await loadSettings();
@@ -8089,7 +9489,7 @@ if (window.visualViewport) {
 // sequential round trips is most of what "the app is slow to open" meant.
 (async () => {
   await Promise.all([pollStatus(), refresh(), loadModelQuick(), loadChats(),
-                     loadChatWorkspaces()]);
+                     loadChatWorkspaces(), loadSafety()]);
   // The panel's first and only unprompted draw. From here on it moves when the
   // server says something moved, or when it's opened having missed some.
   syncContextPanel();
@@ -8098,6 +9498,16 @@ if (window.visualViewport) {
     applyTheme(s.values.theme);
     applyAccent(s.values.accent || "");
   } catch (e) { /* keep whatever localStorage gave us */ }
+  // Puts the dot on the settings button when there is new code waiting. Local
+  // and cheap - it reads what the server already knows and never waits on the
+  // remote itself - and it is last here because nothing else is waiting on it.
+  // Without it the updater is only ever found by someone who went looking for
+  // it, which is not how anyone finds out that an update exists.
+  loadUpdate(false);
+  // This app is left open for days, so "at startup" would mean "the week
+  // before last" by the time an update lands. Half-hourly, and still local:
+  // going to the remote is the server's own business, on its own schedule.
+  setInterval(() => { if (!upRunning) loadUpdate(false); }, 30 * 60 * 1000);
 })();
 </script>
 

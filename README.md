@@ -40,6 +40,8 @@ The web frontend has a hold-to-talk microphone button. Press it, speak, release.
 
 Transcription goes through the same providers chat does. The voice tab picks one of them and a speech model on it -- Whisper or gpt-4o-transcribe at OpenAI, whatever a local server is serving, or a Gemini model handed the audio directly -- and that choice is global: the browser button, the desktop hold-to-talk key and the terminal all use it. With nothing chosen it falls back to Whisper on `OPENAI_API_KEY`.
 
+Replies can be read back out. The voice tab has a second provider/model pair for it, and picking one is the on switch -- leave it blank and the page stays silent. When a turn ends on the model actually saying something (not a tool call, a stop or an error), the finished reply is synthesised and played in the window watching that chat. The audio is made only when a page asks for it, once per reply no matter how many windows are open.
+
 The server binds to `0.0.0.0`, so the page is accessible from any device on the local network (phone, tablet, another laptop). It serves over HTTPS on port 8764 using a self-signed certificate it generates itself, which is what lets browsers hand the page a microphone. Accept the certificate warning once per device and the mic works.
 
 On desktop, there is also a local voice path: hold Scroll Lock, speak, release. PyAudio records from the default microphone without needing the browser.
@@ -176,10 +178,13 @@ Your browser will warn about the certificate the first time on each device, beca
 
 ### Updating
 
-Settings → **system** → **check for updates**, then **update now**. It shows
-what the update would bring before it does anything, and the server restarts
-itself onto the new code with the page reconnecting on its own. From a terminal
-it is the same thing:
+Uniagent checks for new code by itself every few hours, and puts a dot on the
+**settings** button when there is some. Settings → **system** then says what is
+waiting — how many commits, what they were, how many files — and **update now**
+is the whole of doing it: the server fetches the code, restarts onto it, and the
+page reconnects on its own. **check for updates** asks the remote there and then
+rather than waiting for the next automatic check. From a terminal it is the same
+thing:
 
 ```bash
 ./scripts/update.sh --check     # what would change, without changing it

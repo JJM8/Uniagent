@@ -150,6 +150,106 @@ def route_of(cid):
     return cid
 
 
+# When each turn was written, kept BESIDE the chats rather than in them - one
+# .json per chat, holding one entry per history turn, in the same order.
+#
+# A sidecar for exactly the reason validations/ is one (see VALIDATIONS): the
+# transcript is what goes to the provider on every single request, and the
+# time under a message is for the person reading the page, not for the model.
+# Nothing in this folder is ever sent anywhere - provider.py builds its
+# messages from the history and has no idea this file exists.
+#
+# Keyed by the FLAT chat id (see chat_id), so a cron run's stamps are
+# stamps/ai-brief-003.json - the same keying the validation logs use, and
+# server.py's /stamps route maps a browser's route onto it the same way.
+STAMPS = CHATS / "stamps"
+
+
+def _stamp_path(cid):
+    return STAMPS / (cid + ".json")
+
+
+def read_stamps(cid):
+    """This chat's stamps, or [] when it has none - which is every chat written
+    before this existed, and most of them.
+
+    Never guessed at from the file's mtime. That is when the chat was LAST
+    touched, so falling back to it would put one confident, identical, wrong
+    date under every message of every old conversation. No date at all is the
+    honest answer, and the page draws nothing."""
+    try:
+        found = json.loads(_stamp_path(cid).read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    return found if isinstance(found, list) else []
+
+
+def clear_stamps(cid):
+    """Forget this chat's stamps - what /delete calls, since the file lives
+    outside the folder it moves and would otherwise be inherited by the next
+    chat to hold the id (see command_processor._delete)."""
+    try:
+        _stamp_path(cid).unlink()
+    except OSError:
+        pass
+
+
+def stamp_history(cid, history):
+    """Bring `cid`'s stamps into line with the history being written.
+
+    Reconciled and rewritten WHOLE, not appended to. Appending is right for
+    the validation log - tool calls are only ever added - but a history is not
+    only ever added to: /compact replaces the entire transcript with a single
+    summary turn (compaction.compact), and a stopped turn rewrites its tail
+    (_stopped_history). Either one slides every remaining stamp onto the wrong
+    message, and a wrong date is worse than no date, because it reads as
+    authoritative.
+
+    So an entry survives only where the turn at its index still matches what
+    was stamped - same role, same content length. Anything else is stamped
+    now. That is a deliberately generic anchor rather than a note-to-self in
+    each of the callers that rewrite a history: it defends itself against the
+    next one, which won't remember this file exists.
+
+    A turn's time is therefore when it first reached disk - for a message the
+    moment it was sent (run() appends it and saves immediately), for a reply
+    the moment it finished.
+
+    Epoch SECONDS, not the ISO-local string the token block uses
+    (record_usage). A chat gets read on whatever device is to hand, and only an
+    absolute instant lets each of them draw the time in its OWN zone; an ISO
+    string with no offset would be shown as the server's wall clock on a phone
+    three time zones away, and be wrong without ever looking wrong."""
+    try:
+        turns = json.loads(history) if history else []
+    except json.JSONDecodeError:
+        return  # a pre-JSON flat-text chat: no turns to index against
+    if not isinstance(turns, list):
+        return
+    old = read_stamps(cid)
+    now = int(datetime.now().timestamp())
+    stamps = []
+    for i, turn in enumerate(turns):
+        turn = turn if isinstance(turn, dict) else {}
+        role = turn.get("role")
+        size = len(turn.get("content") or "")
+        was = old[i] if i < len(old) and isinstance(old[i], dict) else None
+        if was and was.get("role") == role and was.get("n") == size \
+                and isinstance(was.get("at"), (int, float)):
+            stamps.append(was)
+        else:
+            stamps.append({"at": now, "role": role, "n": size})
+    # save() runs after every step of a turn, so an unchanged file must not
+    # mean a disk write every step - same reason record_context() checks.
+    if stamps == old:
+        return
+    try:
+        STAMPS.mkdir(parents=True, exist_ok=True)
+        _stamp_path(cid).write_text(json.dumps(stamps))
+    except OSError:
+        pass  # losing a stamp must never cost a turn, same as _log_validation
+
+
 MAX_TOOL_CALLS = 1000  # cap it so it can't call tools forever
 
 # Closes out a turn that /stop cut short. A constant because it's also matched
@@ -157,6 +257,11 @@ MAX_TOOL_CALLS = 1000  # cap it so it can't call tools forever
 # that means stepping back past this line.
 STOPPED = "[stopped by the user]"
 MAX_BAD_JSON = 5       # how many times to ask the model to fix a broken tool call
+
+# What a failed turn is filed under (see append_error). A constant for the same
+# reason STOPPED is: final_answer() has to recognise one of these so a turn that
+# blew up isn't mistaken for a reply.
+TURN_ERROR = "Error: the turn failed - "
 
 # What labels a message the user sent mid-turn (run()'s `inject`). It has to
 # say WHEN it was sent: it arrives after a tool result the model is still
@@ -310,13 +415,26 @@ class Agent:
     # pinned is this chat's OWN tools/skills manually added to context (see
     # add_pinned()) - scoped to this one agent, never shared context/ or
     # another chat's settings.
-    # safety/safety_prompt are this agent's own answer to the tool-call safety
-    # gate, both None = follow the settings page:
-    #   safety         True/False to force the check on or off for this agent
-    #                  alone, regardless of the global "safety_validation"
-    #   safety_prompt  this agent's own vetting prompt instead of the global
-    #                  "safety_prompt" - must contain "{call}" (see
-    #                  tool_validation.validate_tool_use)
+    # The safety block - this agent's own answer to the tool-call safety gate.
+    # All four are None = follow the settings page:
+    #   safety_threshold  0-10, set by the slider in the corner of the chat
+    #                  window: the highest danger rating a tool call can be
+    #                  given and still run without asking. 0 asks about
+    #                  everything, 10 checks nothing. The normal way a chat
+    #                  says how carefully to run.
+    #   safety_extra   extra rules for THIS chat, added to the shared prompt -
+    #                  "anything touching Google Drive is fine". The common
+    #                  case, and much better than rewriting the whole prompt:
+    #                  the chat keeps following the shared one as it improves
+    #                  and only says the bit that is different about itself.
+    #   safety_prompt  this agent's own vetting prompt INSTEAD of the global
+    #                  one - must contain "{call}" (see tool_validation.check).
+    #                  The escape hatch when the shared prompt is wrong for
+    #                  this chat rather than merely incomplete.
+    #   safety         the True/False flag that predates the number, still
+    #                  written by cron.json and present in every chat folder
+    #                  made before it. Read only when safety_threshold is
+    #                  unset - see tool_validation.threshold_for.
     # A cron job's are mirrored here from cron.json by cron.py's _ensure_chats,
     # so opening the job's chat shows what it actually runs under; cron.json
     # stays the source of truth for those.
@@ -325,6 +443,7 @@ class Agent:
     # older runs by, under its "history" toggle, since a run folder is numbered
     # and a number is not a thing anyone can pick a run out by.
     SETTINGS_KEYS = ("provider", "model", "temperature", "name", "started", "safety",
+                     "safety_threshold", "safety_extra",
                      "safety_prompt", "input_tokens",
                      "output_tokens", "tokens_model", "tokens_at",
                      "context_input", "context_max", "context_model",
@@ -355,6 +474,8 @@ class Agent:
         # agent's calls") and must not fall through to the global default the
         # way None (nothing set) does.
         self.safety = cfg.get("safety")
+        self.safety_threshold = cfg.get("safety_threshold")
+        self.safety_extra = cfg.get("safety_extra")
         self.safety_prompt = cfg.get("safety_prompt")
         self.input_tokens = cfg.get("input_tokens")
         self.output_tokens = cfg.get("output_tokens")
@@ -400,6 +521,8 @@ class Agent:
         self.name = cfg.get("name")
         self.started = cfg.get("started")
         self.safety = cfg.get("safety")
+        self.safety_threshold = cfg.get("safety_threshold")
+        self.safety_extra = cfg.get("safety_extra")
         self.safety_prompt = cfg.get("safety_prompt")
         self.pinned = cfg.get("pinned") or []
         # Re-read for the same reason as the model: the workspace dropdown
@@ -450,6 +573,43 @@ class Agent:
         self.safety = safety
         self.safety_prompt = prompt
         self._write_settings()
+
+    def set_safety_threshold(self, threshold):
+        """Put this chat on a safety number - 0 to 10, or None to follow the
+        settings page's default again. The slider in the corner of the chat
+        window, and nothing else, writes this.
+
+        Setting it also clears the old True/False `safety` flag on this chat.
+        The two answer the same question and the number is the better answer,
+        so leaving a stale flag behind would mean a chat whose file says both -
+        harmless while the number is set (threshold_for reads it first) and
+        quietly wrong the moment it is cleared, which is exactly when nobody
+        is thinking about it."""
+        self.safety_threshold = tool_validation.clamp(threshold)
+        self.safety = None
+        self._write_settings()
+
+    def set_safety_text(self, extra=None, prompt=None):
+        """This chat's own words for the safety check: `extra` added to the
+        shared prompt, `prompt` replacing it outright. Either may be None or
+        blank, which clears that one and goes back to the shared wording.
+
+        Both are written together because the dropdown edits them on one panel
+        and a save there is one save. They are independent settings, though -
+        a chat can add a rule to the shared prompt, or replace the prompt, or
+        do both (extra is appended to a custom prompt exactly as it is to the
+        shared one, see tool_validation._compose)."""
+        self.safety_extra = (extra or "").strip() or None
+        self.safety_prompt = (prompt or "").strip() or None
+        self._write_settings()
+
+    def safety_state(self):
+        """What this chat's safety gate is set to, resolved - (threshold, own),
+        where `own` says whether that number is this chat's own choice or the
+        settings default it is following. The page draws both: the number, and
+        whether clearing it would change anything."""
+        return (tool_validation.threshold_for(self.safety_threshold, self.safety),
+                self.safety_threshold is not None or self.safety is not None)
 
     def set_workspace(self, wsid):
         """Move this agent to a workspace - the id of one out of WORKSPACES in
@@ -561,6 +721,13 @@ class Agent:
         # they change (pin/unpin), not on every save of the history.
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(self.history)
+        # When each turn landed, into its own file outside the chat folder -
+        # never into the transcript, which is the thing that goes to the
+        # provider (see STAMPS). Done HERE because this line is the one place
+        # every writer of a history passes through: the turn loop's sync,
+        # append_error, note_turn, a stopped turn's rewrite, /compact, and
+        # cron's first empty save all end up on it.
+        stamp_history(self.id, self.history)
 
 
 class Chat(Agent):
@@ -1991,6 +2158,93 @@ def dynamic_reads(history):
     return reads
 
 
+def final_answer(history):
+    """The reply a turn ended on: the last turn in `history`, but only when it
+    is the model answering in words rather than calling something. None for
+    every other way a turn can end.
+
+    "The last assistant turn" and "the turn the chat ends on" are not the same
+    question, and it is the second one that matters here. run() appends an
+    assistant turn at several points that are not an answer - a reply that
+    wouldn't parse as a tool call and is being sent back to be fixed, one half
+    of the loop-breaker - and each of those is followed by a user turn telling
+    the model so. Reading the list from the end rather than searching backwards
+    for a role is what tells those apart: an answer is the last word in the
+    chat, and the others never are.
+
+    Ruled out on purpose: a turn /stop cut short (STOPPED), and one that blew
+    up (TURN_ERROR). Both are filed as assistant turns so they render and so
+    the model reads them next time, but neither is something the agent said."""
+    try:
+        turns = json.loads(history) if history else []
+    except json.JSONDecodeError:
+        return None        # an old flat-text chat - no structure to read
+    if not turns:
+        return None
+    last = turns[-1]
+    if not isinstance(last, dict) or last.get("role") != "assistant":
+        return None
+    if last.get("tool_calls"):
+        return None
+    text = last.get("content")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if text.strip() == STOPPED or text.startswith(TURN_ERROR):
+        return None
+    return text.strip()
+
+
+def turn_count(history):
+    """How many turns are in `history` right now - the mark to hand back to
+    said_since() after a turn, so it can tell this turn's messages from the
+    conversation they were added to. 0 for an unparseable or empty history,
+    which makes said_since() read the lot rather than nothing."""
+    try:
+        turns = json.loads(history) if history else []
+    except json.JSONDecodeError:
+        return 0
+    return len(turns) if isinstance(turns, list) else 0
+
+
+def said_since(history, mark):
+    """Everything the model wrote from turn `mark` onward, one string per
+    message, in order - the messages alongside tool calls included, which is
+    the whole difference from final_answer() above.
+
+    A turn of tool work is several assistant messages, most of them a sentence
+    of prose plus a call ("Right, let me look at the file" + read_file). Read
+    out loud they are the running commentary; final_answer() only ever sees the
+    last one. The calls themselves aren't here - a tool name and its arguments
+    are not something anyone wants read to them - so an assistant message that
+    was nothing but a call contributes nothing.
+
+    Kept as a list rather than joined, because a message is the unit everything
+    downstream works in: server.py reads them out one after another, and a
+    summary is written per message, not one for the turn.
+
+    The same two exclusions as final_answer(): a turn /stop cut short and one
+    that blew up are both filed as assistant turns, and neither is the agent
+    speaking. [] when there is nothing to say."""
+    try:
+        turns = json.loads(history) if history else []
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(turns, list):
+        return []
+    said = []
+    for turn in turns[max(mark, 0):]:
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        text = turn.get("content")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        text = text.strip()
+        if text == STOPPED or text.startswith(TURN_ERROR):
+            continue
+        said.append(text)
+    return said
+
+
 def _stream(messages, provider_name, model, temperature, on_text, should_stop=None, usage=None,
             native_call=None, reasoning=None):
     """One model response, read as it's written. Returns everything received.
@@ -2177,7 +2431,7 @@ def append_error(c, msg):
     Falls back to the old plain-text append only if `c.history` is already
     unparseable - a pre-JSON flat-text chat, where there's no structure to
     preserve anyway."""
-    text = "Error: the turn failed - " + msg
+    text = TURN_ERROR + msg
     try:
         turns = json.loads(c.history) if c.history else []
     except json.JSONDecodeError:
@@ -2261,7 +2515,8 @@ def workspace_note(c, ws, ok=True, message="", following_default=False):
 def run(text, history, provider_name=None, model=None, temperature=0, approve=_approve,
         on_save=None, on_text=None, should_stop=None, chat_id=None,
         on_tool_call=None, on_tool_result=None, on_safety=None, pinned=None,
-        safety=None, safety_prompt=None, inject=None, workspace_id=None):
+        safety=None, safety_prompt=None, inject=None, workspace_id=None,
+        safety_threshold=None, safety_extra=None, on_message=None):
     """Run one turn over `history` and return the updated history: reply to text,
     and work through any tool calls it makes.
 
@@ -2297,6 +2552,17 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
     a call is parsed, its result comes back, and the safety verdict is known - so
     a UI can draw the tool's own block (the call, safety row and result dropdown)
     as it happens, instead of waiting out the whole turn for a redraw.
+
+    `on_message`, if given, is handed each finished assistant message the
+    moment this function knows what it was - on_message(text, kind), where kind
+    is "call" for a message that ended in a tool call (the text is the prose
+    before it) and "answer" for one that ends the turn. It fires from inside
+    the loop rather than after it, which is the whole point: server.py reads a
+    message out loud from here, so the speaking starts while the tool it just
+    asked for is still running instead of after everything is over.
+    Deliberately NOT fired for the messages that aren't the agent speaking - a
+    reply being sent back to be reparsed, the loop-breaker, a stopped turn -
+    which is the same line final_answer() draws.
 
     `inject`, if given, is asked at the top of every pass for text the user has
     sent SINCE this turn started, and folds whatever it returns in as a user
@@ -2435,6 +2701,8 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
             # No tool call - this is the answer. Keep all of it.
             turns.append({"role": "assistant", "content": response})
             sync()
+            if on_message and response.strip():
+                on_message(response.strip(), "answer")
             break
 
         bad_json = 0  # a call parsed cleanly - reset the counter
@@ -2479,34 +2747,50 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         # the bubble it streamed and open the tool's result block straight away.
         if on_tool_call:
             on_tool_call(before + shown_call)
+        # What the model SAID on its way to that call, if anything - the running
+        # commentary, without the call itself, which is not something anyone
+        # wants read to them. Fired here, before the tool runs, so a UI reading
+        # it out gets the whole length of the tool call to do it in.
+        if on_message and before.strip():
+            on_message(before.strip(), "call")
 
-        # Safety gate: a call the verification model calls safe runs straight
-        # away; anything it flags goes to `approve`, with the model's reasoning
-        # so whoever answers knows what worried it. A denial tells the model to
-        # STOP AND WAIT, not to find another way. With the gate off the call
-        # runs unvetted - which is logged too, so the chat can show that it was
-        # never checked instead of showing nothing at all.
-        # `safety` is this turn's own override (a cron job's `safety:` line, an
-        # agent's settings .json); None means nobody said, so the settings page
-        # decides as it always has.
-        if not (safety if safety is not None else chosen["safety_validation"]):
-            # The check is OFF for this turn, so this call ran unvetted. Say so,
-            # rather than saying nothing: a tool result with no safety row used
-            # to be indistinguishable from one whose row simply failed to load,
-            # and in a cron job's chat - where the setting comes from cron.json
-            # and can differ per job - "was this checked?" is exactly the
-            # question you open the chat to answer. It also keeps the log one
-            # line per call, which is what the page pairs rows to results by.
+        # Safety gate. The turn's SAFETY NUMBER decides how the call is
+        # treated: 10 runs it unvetted, 0 puts it to the human without asking a
+        # model at all, and anything between sends it to the checking model for
+        # a 0-10 rating and compares that against the number.
+        # tool_validation.check() does all of that and answers with one of
+        # three words; the three branches here are that answer.
+        #
+        # A denial tells the model to STOP AND WAIT, not to find another way.
+        #
+        # `safety_threshold` and `safety` come from the chat (or a cron job's line
+        # in cron.json); both None means nobody said, so the settings page
+        # decides. See tool_validation.threshold_for for the full order.
+        threshold = tool_validation.threshold_for(safety_threshold, safety, chosen)
+        outcome, reason = tool_validation.check(
+            call, threshold, prompt=safety_prompt, extra=safety_extra)
+
+        if outcome == tool_validation.SKIP:
+            # Nothing was checked, so say so rather than saying nothing: a tool
+            # result with no safety row used to be indistinguishable from one
+            # whose row simply failed to load, and in a cron job's chat - where
+            # the setting comes from cron.json and can differ per job - "was
+            # this checked?" is exactly the question you open the chat to
+            # answer. It also keeps the log one line per call, which is what
+            # the page pairs rows to results by.
             skipped = _log_validation(shown_call, True, None, checked=False)
             if on_safety:
                 on_safety(True, skipped, checked=False)
         else:
-            safe, reason = tool_validation.validate_tool_use(call, prompt=safety_prompt)
+            safe = outcome == tool_validation.RUN
             _log_validation(shown_call, safe, reason)
             if on_safety:
                 on_safety(safe, reason)
-            if not safe and not approve("[safety] flagged as possibly unsafe: "
-                                        + reason + " - run it anyway?"):
+            # rstrip because a reason is a sentence from the checking model as
+            # often as it is one of ours, and half of them end in a full stop
+            # that reads as a stutter in front of " - run it anyway?".
+            if not safe and not approve("[safety] " + reason.rstrip(" .")
+                                        + " - run it anyway?"):
                 turns.append({"role": "tool", "tool_call_id": call_id, "content":
                               "DENIED - the user did not approve this call. Stop "
                               "working on this task: reply with a brief "
@@ -2537,7 +2821,8 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
 
 def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None,
          temperature=None, on_tool_call=None, on_tool_result=None, on_safety=None,
-         safety=None, safety_prompt=None, inject=None):
+         safety=None, safety_prompt=None, inject=None, safety_threshold=None,
+         safety_extra=None, on_begin=None, on_message=None):
     """One turn of agent `c` through run(), mirrored to its file as it goes.
     Serialised against other turns of the same agent by its turn slot; turns of
     OTHER agents run in parallel. on_text/approve pass through to run(), so a
@@ -2557,7 +2842,8 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
     provider_name/model/temperature still override when a caller pins the turn
     explicitly, but nothing needs to any more.
 
-    safety/safety_prompt work the same way and in the same order: the caller's
+    The whole safety block - safety_threshold, safety_extra, safety_prompt and
+    older safety flag - works the same way and in the same order: the caller's
     if it passed any (cron.py passes the job's, read fresh from cron.json), else
     the agent's own from its settings .json, else the settings page. None at
     every level is the normal case and means "as the settings page says".
@@ -2584,6 +2870,11 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
     # mirror cron.py just wrote - is picked up by this very turn.
     safe_on = safety if safety is not None else c.safety
     safe_prompt = safety_prompt or c.safety_prompt
+    # Same order, for the same reason: the caller's if it passed one (cron.py
+    # passes the job's, read fresh from cron.json), else the chat's own from
+    # its settings .json, else nothing and the settings page decides.
+    safe_level = safety_threshold if safety_threshold is not None else c.safety_threshold
+    safe_extra = safety_extra or c.safety_extra
 
     stem = c.id
     ctx = turnctx.TurnContext(stem)
@@ -2603,6 +2894,14 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
     turnctx.publish(ctx)
     turnctx.bind(ctx)
     clear_stop(stem)
+    # The first moment this turn owns the chat and its history is settled -
+    # which is the only moment a caller can note where its own turn begins. A
+    # second message sent while the first was still going has been sitting in
+    # the acquire() above; anything it read before that wait was a snapshot
+    # from before the turn ahead of it had written a word. server.py uses this
+    # to mark the start of the turn it is about to read out loud.
+    if on_begin:
+        on_begin(c.history)
     try:
         def keep(updated):
             c.history = updated
@@ -2622,7 +2921,9 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
                         on_tool_call=turnctx.guard(ctx, on_tool_call),
                         on_tool_result=turnctx.guard(ctx, on_tool_result),
                         on_safety=turnctx.guard(ctx, on_safety),
+                        on_message=turnctx.guard(ctx, on_message),
                         pinned=c.pinned, safety=safe_on, safety_prompt=safe_prompt,
+                        safety_threshold=safe_level, safety_extra=safe_extra,
                         inject=inject, workspace_id=c.workspace)
         # run() syncs as it goes, so the file is usually already this - but it
         # is the RETURNED history that's authoritative, and leaving the two to

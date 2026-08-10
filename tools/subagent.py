@@ -221,23 +221,69 @@ def _remember(folder, name, provider_name, model, temperature):
         pass  # worst case the next call falls back to the defaults
 
 
-def _answer(host, history):
-    """The subagent's closing report: run() appends every model response after
-    the agent's name, so the text after the LAST name marker is the final
-    plain answer.
+NO_REPORT = "(no report - the subagent ended without writing one.)"
 
-    A stopped run ends with the stop marker on its own line, which is not an
-    answer - drop it first, so a subagent you stopped still hands back the work
-    it actually managed instead of just reporting that it was stopped."""
-    lines = history.rstrip().splitlines()
+
+def _answer(host, history):
+    """The subagent's closing report: the text of the LAST plain answer in its
+    transcript, and nothing else.
+
+    `history` is what run() hands back - a JSON list of turns in OpenAI's own
+    message shape ({"role", "content"}, plus "tool_calls" on the ones that made
+    a call) - NOT the old flat "Uniagent: ..." text. Reading it as that flat
+    text found no name marker at all, so it fell through to returning the whole
+    string: every prompt, every tool call and every tool result of the entire
+    run, dumped into the chat. The report is meant to be the only thing that
+    crosses back, so that defeated the point of a subagent entirely.
+
+    Skipped on the way back: the user's own prompt, tool results, and the stop
+    marker a stopped run ends on - so a subagent you stopped still hands back
+    the last thing it actually wrote rather than just "stopped". Assistant
+    turns that made a tool call are skipped too on the first pass, because the
+    prose in front of a call is a running commentary, not a report; if there is
+    no plain answer at all (a stopped or exhausted run), the second pass takes
+    that commentary rather than handing back nothing."""
+    try:
+        turns = json.loads(history) if (history or "").strip() else []
+    except json.JSONDecodeError:
+        return _flat_answer(host, history)  # a pre-JSON transcript, from before the switch
+
+    for allow_calls in (False, True):
+        for turn in reversed(turns):
+            if not isinstance(turn, dict) or turn.get("role") != "assistant":
+                continue
+            if turn.get("tool_calls") and not allow_calls:
+                continue
+            text = turn.get("content")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            if text.strip() == host.STOPPED:
+                continue
+            # Second pass: this is commentary from mid tool-loop, not a report.
+            # Said outright, because otherwise "Report: let me start by
+            # searching..." reads as a finished piece of work when it is the
+            # opposite - a run that never got to write its report.
+            if allow_calls:
+                return ("(no final report - the subagent stopped mid-work. Its "
+                        "last message was:)\n" + text.strip())
+            return text.strip()
+    return NO_REPORT
+
+
+def _flat_answer(host, history):
+    """_answer for a transcript written before histories became JSON: every
+    model response follows the agent's name, so the text after the LAST name
+    marker is the final answer. Kept because a subagent's file IS its memory -
+    one written months ago is still re-promptable today."""
+    lines = (history or "").rstrip().splitlines()
     if lines and lines[-1].strip() == host.name + ": " + host.STOPPED:
         lines.pop()
     history = "\n".join(lines)
 
     at = history.rfind("\n" + host.name)
     if at == -1:
-        return history.strip()
-    return history[at + 1 + len(host.name):].strip().lstrip(":").strip()
+        return history.strip() or NO_REPORT
+    return history[at + 1 + len(host.name):].strip().lstrip(":").strip() or NO_REPORT
 
 
 def _report(host, note, origin):

@@ -238,8 +238,18 @@ Set `"provider": "local"` in `settings.json` and point it at your local model se
 
 ## Update
 
+Settings → **system** → **update now**. Uniagent checks for new code on its own
+every few hours and marks the settings button when there is some, so the button
+is usually already waiting for you; **check for updates** asks the remote there
+and then. Same thing from a terminal:
+
 ```bash
-cd uniagent
-git pull
-# Restart the server
+cd Uniagent
+./scripts/update.sh --check     # what it would bring, without changing anything
+./scripts/update.sh             # do it, and restart the services onto it
 ```
+
+Not `git pull` — the updater sets your switched-off tools and skills aside
+before it merges and puts them back after, which a plain pull does not, and it
+refuses rather than overwriting a shipped file you have edited. See
+`scripts/update.py`.

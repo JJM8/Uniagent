@@ -90,6 +90,11 @@ experiments/
 # running, and it is about THIS install's switched-off bundles. See update.py.
 update_state.json
 
+# The last answer the remote gave about new code, so the settings page can say
+# what it knows without going to the network every time it opens. Rewritten
+# whenever it goes stale, and about this install's checkout. See server.py.
+update_check.json
+
 # Logs.
 *.log
 nohup.out
@@ -110,6 +115,9 @@ august-uniagent-todo.md
 # ours to republish.
 stickfight/
 sky-strike.html
+# The Quest 3 headset's keyboard backend. It hands typed text to Uniagent over
+# HTTP, but it is its own thing with its own Unity frontend - not part of this.
+quest3-os/
 images/*/
 !images/screenshots/
 scripts/esp32-upload.json
