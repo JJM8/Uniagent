@@ -171,3 +171,6 @@ unused/
 # about your house rather than about this project. See docs/wake-word.md.
 models/wake/*
 !models/wake/.gitkeep
+
+# autopush lock file - don't version or sync this
+.autopush.lock
