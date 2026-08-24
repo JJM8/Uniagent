@@ -1,2 +1,7 @@
 // Ignore autopush lock files - transient, machine-local, must not sync
 .autopush.lock
+
+// Never sync the git database. Each machine has its own .git;
+// they stay in step via git pull/push, not via Syncthing.
+// Syncing .git while two machines run git on it corrupts the repo.
+.git
