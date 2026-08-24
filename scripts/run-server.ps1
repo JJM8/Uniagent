@@ -1,10 +1,15 @@
 # Supervises the Uniagent server and cron watcher on Windows.
 #
-# Started by the "Uniagent" scheduled task at logon (see install-autostart.ps1),
-# and the equivalent of Restart=always in the Linux systemd units: if either
-# process dies, it is started again. Gives up on a process that crashes within
-# seconds of starting over and over (a port conflict, say) rather than spinning
-# forever.
+# Started by the "Uniagent" scheduled task at logon (see attach.ps1), and the
+# equivalent of Restart=always in the Linux systemd units: if either process
+# dies, it is started again. Gives up on a process that crashes within seconds
+# of starting over and over (a port conflict, say) rather than spinning forever.
+#
+# THIS IS ALSO HOW AN UPDATE RESTARTS. Both processes know they are supervised
+# (UNIAGENT_SUPERVISED, set below and read by scripts/service.py) and a restart
+# is therefore an exit: they stop, this loop starts them again seconds later,
+# and the new process reads the new code, because Python reads a .py once at
+# startup and never looks again. Nothing here needs to know an update happened.
 #
 # Stop with:  schtasks /End /TN Uniagent   (kills the whole process tree)
 #
@@ -20,6 +25,24 @@ if (-not (Test-Path $py)) { $py = "python" }              # fall back to PATH
 
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 Set-Location $scriptsDir                                   # same as systemd WorkingDirectory
+
+# Inherited by everything started below, which is the point of setting them here
+# rather than passing them per process.
+#
+#   UNIAGENT_SUPERVISED  tells the two processes something will restart them if
+#                        they exit, so "restart" can mean "stop". Without it
+#                        they would have to launch their own replacement, and
+#                        this loop would start a second one on the same port.
+#   PYTHONUTF8           Windows decides text encoding from the system codepage,
+#                        which is cp1252 on a Western install. This makes Python
+#                        read and write UTF-8 regardless - the chats, the .env
+#                        and these logs all contain characters cp1252 has no
+#                        room for.
+#   PYTHONUNBUFFERED     so the log has the line in it when the thing happened,
+#                        not when the buffer happened to fill.
+$env:UNIAGENT_SUPERVISED = "1"
+$env:PYTHONUTF8          = "1"
+$env:PYTHONUNBUFFERED    = "1"
 
 $server = @{ name = "server"; args = "server.py";  proc = $null; start = $null; quick = 0 }
 $cron   = @{ name = "cron";   args = "cron.py";    proc = $null; start = $null; quick = 0 }
@@ -70,7 +93,14 @@ function Check-One($job) {
     Start-One $job
 }
 
-Write-Host "Uniagent supervisor running - server on https://localhost:8764"
+# The port the server will actually use, so this line is right on an install
+# that answered anything other than the default to the wizard's port question.
+$port = 8764
+try {
+    $port = [int](& $py -c "import sys; sys.path.insert(0, sys.argv[1]); import provider; print(provider.port('UNIAGENT_HTTPS_PORT', 8764))" $scriptsDir)
+} catch { }
+
+Write-Host "Uniagent supervisor running - server on https://localhost:$port"
 Start-One $server
 Start-One $cron
 

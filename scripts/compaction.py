@@ -33,12 +33,15 @@ answers in is still being felt out, and nothing here depends on it being JSON.
 import json
 import shutil
 import threading
+import time
 
+import claude_session
 import main
 import provider
 import settings
 import tool_processor
 import turnctx
+import usage
 
 # Chats being compacted right now, by id. A compaction holds the chat's own
 # turn slot for its whole length, so main.busy_chats() already counts it as busy
@@ -130,9 +133,25 @@ def _ask(agent, turns, prompt):
     # answer with a call instead of prose, and ignoring it means such a reply
     # comes back as empty text - which compact() below refuses to swap in,
     # rather than replacing a whole conversation with nothing.
-    return "".join(provider.stream_response(messages, provider=provider_name,
-                                            model=model, temperature=temperature,
-                                            tools=tools)).strip()
+    spend = {}
+    started = time.time()
+    try:
+        reply = "".join(provider.stream_response(messages, provider=provider_name,
+                                                 model=model, temperature=temperature,
+                                                 tools=tools, usage=spend)).strip()
+    except BaseException as e:
+        # The one request in the app that is guaranteed to be enormous - it
+        # sends the entire conversation - so a compaction that dies half way
+        # is the most expensive thing the ledger could be missing.
+        usage.record("compact", provider_name, model, chat=agent.id, usage=spend,
+                     prompt_text=usage.text_of(messages),
+                     ms=(time.time() - started) * 1000,
+                     ok=isinstance(e, turnctx.Stopped), error=repr(e))
+        raise
+    usage.record("compact", provider_name, model, chat=agent.id, usage=spend,
+                 prompt_text=usage.text_of(messages), reply_text=reply,
+                 ms=(time.time() - started) * 1000)
+    return reply
 
 
 def compact(agent, prompt=None):
@@ -183,6 +202,13 @@ def compact(agent, prompt=None):
         agent.history = json.dumps([{"role": "user", "content": HEADER + summary}],
                                    indent=2)
         agent.save()
+        # A Claude Code session for this chat is holding the conversation that
+        # was just replaced, and it does not compact when Uniagent does. Left
+        # open it would keep answering from the full transcript while the chat
+        # file shows only the summary - two different pasts, one of them
+        # invisible. Dropped, so the next turn opens a session on the summary
+        # (claude_session._replay).
+        claude_session.close(agent.id)
         # The last real token count was taken against the history that just went
         # away, and context_usage() prefers a reported count over its own
         # projection whenever the reported one is bigger - so without clearing it

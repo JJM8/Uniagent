@@ -75,11 +75,19 @@ class TurnContext:
     /compact - which is one request to the model with no safe point to give up
     at, so it holds a chat but is never cancelled.
 
-    `text`, `turns` and `partial` are the turn's working state, published here
-    for whoever stops it: the message being answered, the live turns list, and
-    whatever the current response has streamed so far. They are what lets the
-    STOPPING thread write the stopped transcript itself instead of waiting for
-    the abandoned worker to come back and do it - see main.request_stop()."""
+    `text`, `turns`, `partial`, `thinking` and `phases` are the turn's working
+    state, published here for whoever stops it: the message being answered, the
+    live turns list, whatever the current response has streamed so far, what it
+    was thinking while it did, and the clock running on it. They are what lets
+    the STOPPING thread write the stopped transcript itself instead of waiting
+    for the abandoned worker to come back and do it - see main.request_stop().
+
+    The last two are here for the same reason `partial` is. A stopped response
+    really happened: it waited, it thought, it wrote some of an answer, and all
+    of that is as true and as worth keeping as the words it managed. Without
+    them a stop threw away the thinking and every measurement of the response
+    it interrupted, so the transcript redrawn a second later was missing both -
+    which reads as though the turn had never thought at all."""
 
     def __init__(self, key, kind="turn"):
         self.key = key
@@ -96,6 +104,8 @@ class TurnContext:
         self.text = None
         self.turns = None
         self.partial = ""
+        self.thinking = ""
+        self.phases = None
 
     @property
     def cancelled(self):

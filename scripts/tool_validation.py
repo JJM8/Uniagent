@@ -23,9 +23,10 @@ level wording to drift away from what the prompt actually says.
 
 threshold_for() resolves it, most specific first: the chat's own (its settings
 .json, written by the slider in the corner), then the old True/False `safety`
-flag that predates it, then the settings page's default. See its docstring -
-the back-compatibility there is load-bearing, since every chat and cron job on
-disk was written before thresholds existed.
+flag that predates it, then the settings page's default - "safety_threshold",
+or "cron_safety_threshold" for a scheduled run, which passes its own
+`default_key`. See its docstring - the back-compatibility there is load-bearing,
+since every chat and cron job on disk was written before thresholds existed.
 
 ## The prompt, and the chat's own additions
 
@@ -36,8 +37,13 @@ plain string replace so a stray { or } elsewhere is harmless:
 
   {call}   the call being judged. Required; a prompt without it would ask
            about nothing, so one that lacks it falls back to the global prompt.
-  {extra}  the chat's own extra rules ("anything touching Google Drive is
+  {extra}  extra rules for this run ("anything touching Google Drive is
            fine"), appended at the end if the prompt has no {extra} of its own.
+           A chat's own rules come down here, and so does a cron run's - the
+           settings page's cron addendum, the job's task, and the job's own
+           rules, composed by cron.py into one block. The extra block may
+           itself say {call}, which is substituted after it is inserted (see
+           _compose) - a long block can then end on the call it is about.
 
 A caller can also replace the prompt outright (check's `prompt`): a cron job's
 "safety_prompt" in cron.json, or a chat that wanted to rewrite the whole thing.
@@ -67,10 +73,12 @@ no net at all.
 
 import json
 import re
+import time
 
 import provider
 import settings
 import turnctx
+import usage
 
 PINK = "\033[95m"
 RESET = "\033[0m"
@@ -86,11 +94,12 @@ SKIP = "skip"   # not checked at all - run it, and say it was not checked
 # a raw print lands in the middle of a half-drawn tool block.
 quiet = False
 
-# Introduces the chat's own extra rules inside the prompt. They are stated as
-# beating the scale rather than sitting beside it, because that is what they
-# are for: the scale calls sending a file somewhere a 4, and the whole reason
-# to type a rule is that in THIS chat it isn't.
-_EXTRA_HEAD = ("\nThis chat's owner has given extra rules for this chat. They "
+# Introduces the extra rules inside the prompt. They are stated as beating the
+# scale rather than sitting beside it, because that is what they are for: the
+# scale calls sending a file somewhere a 4, and the whole reason to type a rule
+# is that in THIS run it isn't. "This run" rather than "this chat" because a
+# cron job's rules - and the task it was set - arrive down the same channel.
+_EXTRA_HEAD = ("\nThe owner has given extra rules for this run. They "
                "override the scale above wherever they disagree:\n\n")
 
 # "DANGER: 7 - ..." is what the prompt asks for; the [:\-=]* tolerates a model
@@ -149,19 +158,39 @@ def clamp(value, fallback=None):
     return fallback
 
 
-def threshold_for(threshold=None, safety=None, chosen=None):
+def says(threshold):
+    """What a threshold does, in as few words as it takes - "allows 7 and
+    below". The scale is a scale, so a position on it explains itself and there
+    are no level names to keep in step with anything.
+
+    Here so that every Python front-end says it the same way (/cronsafety does,
+    and anything else that reports a number back). The web UI has the same three
+    lines in its own safetySays(), where the number is drawn."""
+    if threshold <= settings.SAFETY_MIN:
+        return "asks every time"
+    if threshold >= settings.SAFETY_MAX:
+        return "no checks"
+    return "allows " + str(threshold) + " and below"
+
+
+def threshold_for(threshold=None, safety=None, chosen=None,
+                  default_key="safety_threshold"):
     """The threshold a turn actually runs under, most specific answer first.
 
     1. `threshold` - what the chat (or a cron job) was set to. The normal path
        once anything has touched the slider.
     2. `safety` - the True/False flag that predates the number and is still
-       what cron.json carries and what every chat folder on disk was written
-       with. False meant "never check this one", which is exactly 10. True
-       meant "do check this one", which is the settings default unless that
-       default is itself 10 - a chat that explicitly asked to be checked must
-       not resolve to "check nothing", so it lands on the strictest setting
-       instead of being quietly ignored.
-    3. The settings page's own "safety_threshold".
+       present in every chat folder on disk written before it. False meant
+       "never check this one", which is exactly 10. True meant "do check this
+       one", which is the default unless that default is itself 10 - a chat
+       that explicitly asked to be checked must not resolve to "check
+       nothing", so it lands on the strictest setting instead of being quietly
+       ignored.
+    3. The settings page's default - "safety_threshold", or whichever of
+       settings.THRESHOLD_KEYS `default_key` names. Cron passes
+       "cron_safety_threshold": a scheduled run has its own default because
+       nobody is there to be asked, and one caller wanting a different DEFAULT
+       is no reason for it to resolve the order differently.
 
     "safety_validation" - the old global on/off switch - is honoured at step 3
     only: off means an install that had checking disabled keeps it disabled,
@@ -169,6 +198,7 @@ def threshold_for(threshold=None, safety=None, chosen=None):
     That ordering is what lets the old switch and the new slider coexist
     without either surprising the other."""
     chosen = chosen or settings.load()
+    fallback = clamp(chosen.get(default_key), 3)
 
     named = clamp(threshold)
     if named is not None:
@@ -177,12 +207,11 @@ def threshold_for(threshold=None, safety=None, chosen=None):
     if safety is False:
         return settings.SAFETY_MAX
     if safety is True:
-        stored = clamp(chosen["safety_threshold"], 3)
-        return stored if stored < settings.SAFETY_MAX else settings.SAFETY_MIN
+        return fallback if fallback < settings.SAFETY_MAX else settings.SAFETY_MIN
 
     if not chosen["safety_validation"]:
         return settings.SAFETY_MAX
-    return clamp(chosen["safety_threshold"], 3)
+    return fallback
 
 
 # ---- reading the checking model's answer ------------------------------------
@@ -237,18 +266,28 @@ def _legacy_verdict(reply):
 
 
 def _compose(prompt, call_text, extra):
-    """The prompt as it goes on the wire: the call substituted in, and the
-    chat's own extra rules placed where the prompt asks for them.
+    """The prompt as it goes on the wire: the extra rules placed where the prompt
+    asks for them, and the call substituted in.
 
     A prompt with no {extra} of its own still gets them - appended at the end -
     rather than having them silently dropped. Dropping would be the worse
     failure by far: the rule would be typed, saved, shown in the dropdown as
-    active, and do nothing."""
-    body = prompt.replace("{call}", call_text)
+    active, and do nothing.
+
+    The call goes in LAST, after the extra block is already part of the text, so
+    a {call} written inside the extra rules is substituted too. That is what lets
+    a long extra block end by restating the call it is about - which a cron run's
+    does, and needs to: its block carries the job's whole task, and a checking
+    model handed two thousand words of task between the call and the question
+    answers about the task. Restating it is the difference between "rate this
+    call" and "rate this job"."""
+    body = prompt
     block = _EXTRA_HEAD + extra.strip() + "\n" if (extra or "").strip() else ""
     if "{extra}" in body:
-        return body.replace("{extra}", block)
-    return body + "\n" + block if block else body
+        body = body.replace("{extra}", block)
+    elif block:
+        body = body + "\n" + block
+    return body.replace("{call}", call_text)
 
 
 # ---- the check itself -------------------------------------------------------
@@ -315,16 +354,31 @@ def check(call, threshold, prompt=None, extra=None):
         prompt = None
     prompt = prompt or chosen["safety_prompt"]
 
+    # Recorded like any other request, because that is what it is. This one
+    # fires on EVERY tool call rather than once a turn, so on a working agent
+    # there are more safety checks than there are messages - which is exactly
+    # the thing nobody can see without writing it down. See usage.py's KINDS.
+    asked = _compose(prompt, text, extra)
+    spend = {}
+    started = time.time()
+    ctx = turnctx.current()
     try:
         reply = provider.get_response(
-            _compose(prompt, text, extra),
+            asked,
             provider=chosen["verify_provider"],
             model=chosen["verify_model"],
+            usage=spend,
         )
     except Exception as e:
+        usage.record("safety", chosen["verify_provider"], chosen["verify_model"],
+                     chat=getattr(ctx, "key", None), usage=spend, prompt_text=asked,
+                     ms=(time.time() - started) * 1000, ok=False, error=repr(e))
         _note("check failed (" + type(e).__name__ + ": " + str(e) + ") - asking")
         return ASK, ("the safety check itself failed (" + type(e).__name__
                      + "), so this fails closed.")
+    usage.record("safety", chosen["verify_provider"], chosen["verify_model"],
+                 chat=getattr(ctx, "key", None), usage=spend, prompt_text=asked,
+                 reply_text=reply, ms=(time.time() - started) * 1000)
 
     _note("model said: " + reply.strip())
 

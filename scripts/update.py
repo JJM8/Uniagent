@@ -49,6 +49,9 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import service  # noqa: E402  - needs the line above to be importable
+
 ROOT = Path(__file__).parent.parent
 
 # Written before the first file moves and deleted once they are all back. Its
@@ -84,7 +87,7 @@ def say(msg=""):
 def git(*args, check=False):
     """(exit code, stdout, stderr), always run against this checkout."""
     r = subprocess.run(["git", "-C", str(ROOT)] + list(args),
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     if check and r.returncode != 0:
         raise RuntimeError("git " + " ".join(args) + ": " + (r.stderr.strip() or "failed"))
     return r.returncode, r.stdout.strip(), r.stderr.strip()
@@ -158,7 +161,8 @@ def restore(moves):
 
 
 def _save_state(moves):
-    STATE_FILE.write_text(json.dumps({"moves": moves, "at": time.time()}, indent=2))
+    STATE_FILE.write_text(json.dumps({"moves": moves, "at": time.time()}, indent=2),
+                          encoding="utf-8")
 
 
 def _clear_state():
@@ -172,7 +176,7 @@ def recover():
     if not STATE_FILE.exists():
         return
     try:
-        moves = json.loads(STATE_FILE.read_text()).get("moves", [])
+        moves = json.loads(STATE_FILE.read_text(encoding="utf-8")).get("moves", [])
     except (OSError, ValueError):
         _clear_state()
         return
@@ -214,7 +218,7 @@ def _env_new_keys():
         return []
     def keys(path):
         out = []
-        for line in path.read_text(errors="replace").splitlines():
+        for line in path.read_text(errors="replace", encoding="utf-8").splitlines():
             m = ENV_KEY.match(line)
             if m:
                 out.append(m.group(1))
@@ -290,11 +294,7 @@ def survey(ref, fetch=True):
 def _python():
     """The interpreter the install actually runs on - the venv's, if install.sh
     or install.ps1 built one, because that is where the dependencies live."""
-    for rel in (".venv/bin/python3", ".venv/bin/python", ".venv/Scripts/python.exe"):
-        p = ROOT / rel
-        if p.exists():
-            return str(p)
-    return sys.executable
+    return service.python()
 
 
 def install_deps():
@@ -302,7 +302,7 @@ def install_deps():
     say("==> Dependencies changed - re-applying them with " + py)
     r = subprocess.run([py, "-m", "pip", "install", "--quiet", "-r",
                         str(ROOT / "requirements.txt")],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         say("    ! pip failed: " + (r.stderr.strip()[:400] or "unknown"))
         return False
@@ -310,7 +310,7 @@ def install_deps():
     # installer: try quietly, and a failure here is not a failure.
     subprocess.run([py, "-m", "pip", "install", "--quiet", "-r",
                     str(ROOT / "requirements-voice.txt")],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, encoding="utf-8", errors="replace")
     say("    dependencies up to date.")
     return True
 
@@ -324,13 +324,7 @@ def restart_services():
     either way, but it does mean this must be the LAST thing done and that
     nothing may be written afterwards."""
     if os.name == "nt":
-        r = subprocess.run(["schtasks", "/Run", "/TN", "Uniagent"],
-                           capture_output=True, text=True)
-        if r.returncode == 0:
-            say("==> Restarting Uniagent. The page will reconnect on its own.")
-            return True
-        say("==> Update finished. Restart Uniagent yourself to run the new code.")
-        return False
+        return _restart_windows()
 
     if not shutil.which("systemctl"):
         say("==> Update finished. Restart the server yourself to run the new code.")
@@ -347,8 +341,55 @@ def restart_services():
     # --no-block: return as soon as systemd has the job, rather than waiting
     # for a restart that is going to kill this process.
     subprocess.run(["systemctl", "--user", "restart", "--no-block"] + units,
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, encoding="utf-8", errors="replace")
     return True
+
+
+def _restart_windows():
+    """Bring both processes back, on Windows.
+
+    Windows keeps them alive with run-server.ps1 rather than a service manager:
+    it starts each one and starts it again whenever it exits. So a restart is
+    a stop - the supervisor does the rest, and the process it starts reads the
+    new code because Python reads a .py once, at startup.
+
+    NOT `schtasks /Run /TN Uniagent`, which is what this used to do. The task is
+    already running by definition (it is what started the server that spawned
+    this), and a scheduled task refuses to start a second copy of itself - so
+    that call reported success having done nothing at all, and Uniagent carried
+    on running the old code until the next logon.
+
+    This process was started detached by the server, so stopping the server
+    does not take it with it and there is time to stop the cron watcher too.
+    """
+    stopped = []
+    for name, script in (("cron", "cron.py"), ("server", "server.py")):
+        pid = service.read_pid(name)
+        if not service.alive(pid):
+            continue
+        if service.stop(name):
+            stopped.append(name)
+            # Nothing is watching, so nothing will bring it back but us.
+            if not service.supervised():
+                service.spawn(script)
+
+    if stopped:
+        say("==> Restarting " + " and ".join(stopped)
+            + ". The page will reconnect on its own.")
+        return True
+
+    # No pidfiles and nothing running under them. Either Uniagent was started
+    # some other way, or this is an install from before pidfiles existed - in
+    # which case the scheduled task is still the honest way to start it, since
+    # by now there is nothing running for it to collide with.
+    r = subprocess.run(["schtasks", "/Run", "/TN", "Uniagent"],
+                       capture_output=True,
+                       text=True, encoding="utf-8", errors="replace")
+    if r.returncode == 0:
+        say("==> Starting Uniagent. The page will reconnect on its own.")
+        return True
+    say("==> Update finished. Restart Uniagent yourself to run the new code.")
+    return False
 
 
 def run(ref=None):

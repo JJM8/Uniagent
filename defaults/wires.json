@@ -1,0 +1,271 @@
+{
+  "_readme": [
+    "Every wire Uniagent ships, as data. A wire is the SHAPE of an API - the",
+    "protocol its endpoint speaks - not the company running it, which is why",
+    "'openai' here is spoken by OpenRouter, Groq, Together, xAI, Mistral,",
+    "Fireworks, Ollama and LM Studio just as much as by OpenAI.",
+    "",
+    "THIS FILE IS SHIPPED AND IS REPLACED BY AN UPDATE. Do not edit it - your",
+    "changes would be a merge conflict the next time Uniagent updates. Edit",
+    "wires.json in the project root instead: it is merged over this one key by",
+    "key, so overriding a wire's URL still lets an update fix its body template",
+    "underneath you. The settings page writes there, and 'revert' deletes from",
+    "there. See scripts/wires.py for the full format.",
+    "",
+    "  dialect      how the history is built and the reply is read: openai,",
+    "               anthropic or gemini. The one part that is code.",
+    "  endpoint     appended to the base URL. Takes placeholders.",
+    "  auth         which header (or query parameter) carries the key.",
+    "  body         THE REQUEST, IN ORDER. Written here is sent in that order.",
+    "               $model $messages $system $temperature $tools $stop",
+    "               $max_tokens $want_usage $key $setting:NAME",
+    "               A placeholder with no value deletes its key, and anything",
+    "               that leaves empty, outward - which is how systemInstruction",
+    "               disappears whole on a turn with no system text.",
+    "  models       the catalogue endpoint, and where the ids are in its reply.",
+    "  fields       extra boxes this wire's settings form asks for, beyond a",
+    "               base URL and a key. Saved on the provider itself, and",
+    "               falling back to the environment variable of the same name.",
+    "  base_url     false to hide the URL box, or a string to rename it.",
+    "  key          false to hide the API key box.",
+    "  native       true for a wire that is a Python function rather than a",
+    "               spec, because it is not HTTP-and-JSON at all."
+  ],
+
+  "openai": {
+    "label": "OpenAI",
+    "help": "The /chat/completions shape, and by far the most widely spoken one - most third-party endpoints serve it, so point this at any of them and it works. Uniagent drops a parameter and retries if a model rejects it, so newer models that refuse 'stop' or a non-default temperature need no configuration.",
+    "icon": "/icons/openai.svg",
+    "dialect": "openai",
+    "default_base_url": "https://api.openai.com/v1",
+    "endpoint": "/chat/completions",
+    "auth": {"header": "Authorization", "template": "Bearer $key"},
+    "body": {
+      "model": "$model",
+      "temperature": "$temperature",
+      "stop": "$stop",
+      "stream": true,
+      "stream_options": {"include_usage": "$want_usage"},
+      "messages": "$messages",
+      "tools": "$tools"
+    },
+    "models": {
+      "endpoint": "/models",
+      "list": "data",
+      "id": "id",
+      "filter_chat": true
+    },
+    "suggested_models": [
+      "gpt-4o",
+      "gpt-4o-mini",
+      "gpt-4.1",
+      "gpt-4.1-mini",
+      "gpt-4.1-nano",
+      "o3",
+      "o3-mini",
+      "o4-mini"
+    ]
+  },
+
+  "deepseek": {
+    "label": "DeepSeek",
+    "help": "The OpenAI wire plus DeepSeek's own two quirks: a leading 'answer in English' system message, without which it tends to reply in Chinese, and the reasoning_content round-trip its thinking models demand on any turn that made a tool call. A DeepSeek key wants this rather than plain openai, which would fail on deepseek-reasoner.",
+    "icon": "/icons/deepseek.svg",
+    "dialect": "openai",
+    "default_base_url": "https://api.deepseek.com",
+    "endpoint": "/chat/completions",
+    "auth": {"header": "Authorization", "template": "Bearer $key"},
+    "prepend_system": "Always respond in English.",
+    "replay_reasoning": true,
+    "body": {
+      "model": "$model",
+      "temperature": "$temperature",
+      "stop": "$stop",
+      "stream": true,
+      "stream_options": {"include_usage": "$want_usage"},
+      "messages": "$messages",
+      "tools": "$tools"
+    },
+    "models": {
+      "endpoint": "/models",
+      "list": "data",
+      "id": "id",
+      "filter_chat": true
+    },
+    "suggested_models": [
+      "deepseek-v4-flash",
+      "deepseek-chat",
+      "deepseek-reasoner"
+    ]
+  },
+
+  "anthropic": {
+    "label": "Anthropic",
+    "help": "Claude's own API. The system prompt travels in its own top-level field rather than as a message, and tool calls arrive as content blocks - both handled by the anthropic dialect.",
+    "icon": "/icons/claude.svg",
+    "dialect": "anthropic",
+    "default_base_url": "https://api.anthropic.com",
+    "endpoint": "/v1/messages",
+    "auth": {"header": "x-api-key", "template": "$key"},
+    "headers": {"anthropic-version": "2023-06-01"},
+    "body": {
+      "model": "$model",
+      "max_tokens": "$max_tokens",
+      "temperature": "$temperature",
+      "stop_sequences": "$stop",
+      "stream": true,
+      "messages": "$messages",
+      "system": "$system",
+      "tools": "$tools"
+    },
+    "max_tokens": 1024,
+    "models": {
+      "endpoint": "/v1/models",
+      "list": "data",
+      "id": "id"
+    },
+    "suggested_models": [
+      "claude-opus-4-8",
+      "claude-fable-5",
+      "claude-sonnet-5",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-opus-4-5",
+      "claude-sonnet-4-6",
+      "claude-sonnet-4-5",
+      "claude-haiku-4-5"
+    ]
+  },
+
+  "gemini": {
+    "label": "Google Gemini",
+    "help": "Google's own API. The model id goes in the URL rather than the body, the conversation is called 'contents', and alt=sse is what makes it stream as Server-Sent Events instead of one big JSON array at the end.",
+    "icon": "/icons/gemini.svg",
+    "dialect": "gemini",
+    "default_base_url": "https://generativelanguage.googleapis.com/v1beta",
+    "endpoint": "/models/$model:streamGenerateContent?alt=sse",
+    "auth": {"header": "x-goog-api-key", "template": "$key"},
+    "body": {
+      "generationConfig": {
+        "temperature": "$temperature",
+        "stopSequences": "$stop"
+      },
+      "contents": "$messages",
+      "systemInstruction": {"parts": [{"text": "$system"}]},
+      "tools": "$tools"
+    },
+    "models": {
+      "endpoint": "/models",
+      "list": "models",
+      "id": "name",
+      "strip_prefix": "models/",
+      "requires": ["supportedGenerationMethods", "generateContent"]
+    },
+    "suggested_models": [
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "gemini-2.5-flash-lite",
+      "gemini-2.0-flash",
+      "gemini-2.0-flash-lite",
+      "gemini-1.5-pro",
+      "gemini-1.5-flash"
+    ]
+  },
+
+  "local": {
+    "label": "Local model server",
+    "help": "An OpenAI-compatible server running on this machine or your network - LM Studio, Ollama, vLLM, llama.cpp. Same wire as openai; the only difference is that it takes no key, so it doesn't ask for one. Its model list comes from the server's own /models, so whatever you have loaded is what you can pick.",
+    "dialect": "openai",
+    "default_base_url": "http://localhost:1234/v1",
+    "base_url": "server address",
+    "key": false,
+    "endpoint": "/chat/completions",
+    "body": {
+      "model": "$model",
+      "temperature": "$temperature",
+      "stop": "$stop",
+      "stream": true,
+      "stream_options": {"include_usage": "$want_usage"},
+      "messages": "$messages",
+      "tools": "$tools"
+    },
+    "models": {
+      "endpoint": "/models",
+      "list": "data",
+      "id": "id",
+      "filter_chat": true
+    }
+  },
+
+  "bedrock": {
+    "label": "Amazon Bedrock",
+    "help": "Signs requests with AWS SigV4 rather than sending a key, so there is no URL to point at and no bearer token. Leave the credential boxes empty to use whatever this machine already has - ~/.aws/credentials, an instance role, or the AWS_* variables in the environment. Fill them in to give this provider its own account.",
+    "icon": "/icons/bedrock.svg",
+    "native": true,
+    "base_url": false,
+    "key": false,
+    "suggested_models": [
+      "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+      "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    ],
+    "fields": [
+      {
+        "env": "AWS_REGION",
+        "label": "region",
+        "required": true,
+        "default": "eu-west-2",
+        "placeholder": "eu-west-2",
+        "help": "Which region's Bedrock endpoint to call. Models are enabled per region, so a model that works in one may not exist in another."
+      },
+      {
+        "env": "AWS_PROFILE",
+        "label": "profile",
+        "placeholder": "default",
+        "help": "A named profile out of ~/.aws/credentials. Use this OR the two keys below, not both - a profile wins if it is set."
+      },
+      {
+        "env": "AWS_ACCESS_KEY_ID",
+        "label": "access key id",
+        "placeholder": "AKIA…",
+        "help": "Only needed if you are not using a profile or an instance role."
+      },
+      {
+        "env": "AWS_SECRET_ACCESS_KEY",
+        "label": "secret access key",
+        "secret": true,
+        "help": "The other half of the access key. Stored on this provider in .env."
+      },
+      {
+        "env": "AWS_SESSION_TOKEN",
+        "label": "session token",
+        "secret": true,
+        "help": "Only for temporary credentials (STS, SSO, an assumed role). Leave empty for long-lived keys."
+      }
+    ]
+  },
+
+  "claude-subscription": {
+    "label": "Claude subscription (Claude Code CLI)",
+    "help": "Spends the Claude subscription already signed in on this machine, through the Claude Agent SDK driving the claude CLI. There is no endpoint and no API key: sign in once with `claude login` in a terminal. It needs the SDK installed (pip install --user claude-agent-sdk) and needs to be able to FIND the CLI - which is what the path box below is for, because a background service does not get your shell's PATH.",
+    "icon": "/icons/claude.svg",
+    "native": true,
+    "base_url": false,
+    "key": false,
+    "suggested_models": ["sonnet", "opus", "haiku"],
+    "fields": [
+      {
+        "env": "CLAUDE_CLI_PATH",
+        "label": "path to the claude CLI",
+        "placeholder": "/usr/local/bin/claude",
+        "help": "Leave empty to look on PATH. Set it if this provider says it can't find the CLI while `which claude` works in your terminal - a systemd service has a minimal PATH that usually leaves out ~/.local/bin, which is where npm and pipx put things."
+      },
+      {
+        "env": "CLAUDE_TIMEOUT",
+        "label": "timeout (seconds)",
+        "default": "120",
+        "placeholder": "120",
+        "help": "How long to wait for a reply before giving up. The CLI is slower to first token than an HTTP API because it starts a process per turn."
+      }
+    ]
+  }
+}

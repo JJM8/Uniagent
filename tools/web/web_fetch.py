@@ -1,6 +1,12 @@
-import requests
 import subprocess
+
+import requests
 from bs4 import BeautifulSoup
+
+# tools/ and every folder under it is on sys.path by the time a tool is
+# imported - see tool_processor.load_tools - so this reaches the helper next
+# door. The leading underscore is what keeps it from being loaded as a tool.
+import _browser
 
 NAME = "web_fetch"
 DESCRIPTION = ("Fetch a web page and read it as plain text. Use this to look things up, "
@@ -53,8 +59,39 @@ def _looks_js_gated(text):
     return any(marker in low for marker in JS_GATED_MARKERS)
 
 
-def _to_text(html):
-    soup = BeautifulSoup(html, "html.parser")
+def _header_charset(r):
+    """The charset the response actually NAMED, or None if it named none.
+
+    Worth distinguishing, because requests does not: asked for r.text it
+    answers ISO-8859-1 for any text/* that left the charset off, which is RFC
+    2616's default and is wrong for essentially the whole modern web. A page of
+    UTF-8 then arrives one byte at a time - "LLM->EasyEDA" coming out as
+    "LLMâ\\x86\\x92EasyEDA" - and it is the mojibake, not the page, that gets
+    read back to the user and saved into the chat.
+
+    So the header is only believed when it says something. When it doesn't,
+    _to_text is handed raw bytes and BeautifulSoup sniffs it instead, which is
+    the right answer for HTML: the charset is usually declared in a <meta> tag
+    inside the document rather than in the header at all."""
+    ctype = r.headers.get("content-type") or ""
+    for part in ctype.split(";")[1:]:
+        name, _, value = part.strip().partition("=")
+        if name.strip().lower() == "charset":
+            return value.strip().strip("\"'") or None
+    return None
+
+
+def _to_text(html, from_encoding=None):
+    """Readable text out of a page, given either bytes or an already-decoded
+    string. Bytes are preferred: BeautifulSoup then decodes them itself,
+    honouring the document's own <meta charset> and any BOM, and falling back
+    to a sniff rather than to Latin-1. from_encoding is passed on only when the
+    response named a charset - and only for bytes, since handing it alongside
+    text that is already decoded is what bs4 warns about."""
+    if isinstance(html, bytes):
+        soup = BeautifulSoup(html, "html.parser", from_encoding=from_encoding)
+    else:
+        soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "header", "footer", "noscript"]):
         tag.decompose()
     lines = [line.strip() for line in soup.get_text("\n").split("\n")]
@@ -62,16 +99,23 @@ def _to_text(html):
 
 
 def _fetch_with_chrome(url):
-    """Fetch with a real (headless) Chrome so the JavaScript actually runs."""
-    cmd = [
-        "google-chrome", "--headless=new", "--disable-gpu", "--no-sandbox",
-        "--virtual-time-budget=8000", "--dump-dom",
-        "--user-agent=" + CHROME_UA, url,
-    ]
+    """Fetch with a real (headless) browser so the JavaScript actually runs.
+
+    WHICH browser is _browser.find()'s problem, and it has to be asked rather
+    than assumed: "google-chrome" is the Debian package's name for it and
+    nothing else's, so this fallback used to do nothing at all on Windows, on
+    a machine with Chromium, or on one with Edge.
+    """
+    browser = _browser.find()
+    if not browser:
+        return None, _browser.NOT_FOUND
+    cmd = _browser.argv(browser, url, user_agent=CHROME_UA)
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=45)
     except subprocess.TimeoutExpired:
-        return None, "headless Chrome timed out after 45s"
+        return None, "the headless browser timed out after 45s"
+    except OSError as e:
+        return None, "could not run " + browser + " - " + str(e)
     if proc.returncode != 0:
         return None, proc.stderr.decode(errors="replace")[:500]
     return proc.stdout.decode(errors="replace"), None
@@ -115,7 +159,7 @@ def run(url):
     if r.status_code != 200:
         return "ERROR: " + url + " returned HTTP " + str(r.status_code) + " (nothing was read)"
 
-    text = _to_text(r.text)
+    text = _to_text(r.content, _header_charset(r))
 
     # If the page came back empty or is telling us it needs JavaScript, retry
     # with headless Chrome, which runs the JS and actually builds the page.

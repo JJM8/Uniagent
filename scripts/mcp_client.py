@@ -33,6 +33,7 @@ import asyncio
 import json
 import threading
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -46,6 +47,13 @@ READY_TIMEOUT = 30
 CALL_TIMEOUT = 60          # default per-call ceiling, overridable per call
 CONNECT_TIMEOUT = 20       # per server, so one hanging server can't block the rest
 
+# A server is entitled to page a long list, and the SDK hands back one page.
+# Asking once would quietly show the model the first slice of a much longer
+# catalogue - worse than an obvious truncation, because nothing says so.
+MAX_PAGES = 20
+MAX_ITEMS = 500
+LOG_RING = 200             # per server; log notifications arrive unasked for
+
 _lock = threading.Lock()
 _loop = None
 _started = False
@@ -53,9 +61,12 @@ _ready = threading.Event()     # set once every server has settled (up or broken
 _shutdown = None               # asyncio.Event, created on the loop
 
 # server name -> {"state": ready|connecting|broken|disabled, "error": str,
-#                 "tools": [ {name, description, schema} ]}
+#                 "tools": [ {name, description, schema} ],
+#                 "caps": {resources, prompts, completions, logging, subscribe},
+#                 "resources"|"templates"|"prompts": None until first asked for}
 _state = {}
 _sessions = {}                 # server name -> live ClientSession
+_logs = {}                     # server name -> deque of log lines it pushed at us
 
 
 def _config():
@@ -67,11 +78,24 @@ def _config():
     Uniagent reaching into that file here would undo the same decision from
     the other side. Uniagent's servers are Uniagent's to declare."""
     try:
-        data = json.loads(CONFIG_FILE.read_text())
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     servers = data.get("servers") if isinstance(data, dict) else None
     return servers if isinstance(servers, dict) else {}
+
+
+def _flat(cfg):
+    """Whether this server's tools are handed to the model as tools of their
+    own (see flattened()) rather than reached through the generic `mcp` one.
+
+    Having an allowlist IS the request to flatten. The two things want exactly
+    the same judgement from whoever writes mcp.json - "which handful of these
+    do I actually want the model to carry?" - so asking for it twice, once as
+    `tools` and once as some `flatten: true`, would only create the case where
+    they disagree."""
+    allow = cfg.get("tools") if isinstance(cfg, dict) else None
+    return isinstance(allow, list) and bool(allow)
 
 
 def _allowed(cfg, name):
@@ -80,7 +104,8 @@ def _allowed(cfg, name):
     see the note in mcp.json.example. The list exists because schemas are not
     free: every tool that gets through here goes into the mcp tool's own
     listing, and a server with forty tools is thousands of tokens the moment
-    the model asks what's on it."""
+    the model asks what's on it. Under flattening it costs that much on every
+    single turn instead, which is why the same list decides both."""
     allow = cfg.get("tools")
     if not isinstance(allow, list) or not allow:
         return True
@@ -179,6 +204,92 @@ async def _open(cfg, kind, errlog):
             yield read, write
 
 
+def _caps(session):
+    """Which of the four surfaces this server actually offers, off the
+    capabilities it declared during initialize.
+
+    Read rather than guessed so that "this server has no prompts" can be said
+    plainly instead of being discovered as a JSON-RPC method-not-found from
+    the far end - which reads to a model like something broke, and invites it
+    to try again."""
+    c = session.get_server_capabilities()
+    res = getattr(c, "resources", None)
+    return {"tools": bool(getattr(c, "tools", None)),
+            "resources": bool(res),
+            "prompts": bool(getattr(c, "prompts", None)),
+            "completions": bool(getattr(c, "completions", None)),
+            "logging": bool(getattr(c, "logging", None)),
+            "subscribe": bool(getattr(res, "subscribe", False))}
+
+
+def _log_sink(name):
+    """logging_callback for one server: keep the last LOG_RING lines it sent.
+
+    A server pushes these whenever it feels like it, so they cannot be
+    returned from a call - there has to be somewhere to put them, and a bounded
+    ring is that somewhere. Unbounded, a chatty server would grow this process
+    without limit over a long session for output nobody has asked to see."""
+    async def sink(params):
+        line = getattr(params, "data", "")
+        if not isinstance(line, str):
+            line = json.dumps(line, default=str)
+        logger = getattr(params, "logger", "") or ""
+        _logs.setdefault(name, deque(maxlen=LOG_RING)).append(
+            time.strftime("%H:%M:%S") + " [" + str(getattr(params, "level", "?")) + "]"
+            + (" " + logger if logger else "") + " " + line)
+    return sink
+
+
+async def _relist(name):
+    """Re-read one server's tools after it said they changed.
+
+    Its own task rather than inline in the notification handler: the handler
+    runs ON the session's receive loop, so awaiting a fresh request from
+    inside it would wait for a reply that only that same loop can deliver -
+    a deadlock. Handing the work to a separate task lets the receive loop
+    carry on and process the answer."""
+    session = _sessions.get(name)
+    s = _state.get(name)
+    if session is None or not s:
+        return
+    try:
+        listed = await asyncio.wait_for(session.list_tools(), CONNECT_TIMEOUT)
+    except Exception:
+        return          # it will be re-listed on the next reconnect
+    cfg = _config().get(name) or {}
+    s["tools"] = [{"name": t.name, "description": t.description or "",
+                   "schema": t.inputSchema or {"type": "object", "properties": {}}}
+                  for t in listed.tools if _allowed(cfg, t.name)]
+
+
+def _notified(name):
+    """message_handler for one server, for the notifications it sends unasked.
+
+    A changed list is handled by THROWING THE CACHE AWAY rather than by
+    fetching a new one: resources and prompts are fetched lazily anyway, so
+    clearing is both the cheapest correct answer and one that costs nothing
+    when the model never asks again. Tools are the exception - they go into
+    the prompt every turn without anybody asking, so they are re-fetched."""
+    async def handler(message):
+        method = str(getattr(getattr(message, "root", message), "method", "") or "")
+        s = _state.get(name)
+        if not s:
+            return
+        if method.endswith("tools/list_changed"):
+            asyncio.create_task(_relist(name))
+        elif method.endswith("resources/list_changed"):
+            s["resources"] = None
+            s["templates"] = None
+        elif method.endswith("prompts/list_changed"):
+            s["prompts"] = None
+        elif method.endswith("resources/updated"):
+            uri = getattr(getattr(getattr(message, "root", message), "params", None),
+                          "uri", "")
+            _logs.setdefault(name, deque(maxlen=LOG_RING)).append(
+                time.strftime("%H:%M:%S") + " [resource changed] " + str(uri))
+    return handler
+
+
 async def _serve(name, cfg):
     """Hold one server's session open until shutdown. One task per server."""
     from mcp import ClientSession
@@ -194,25 +305,52 @@ async def _serve(name, cfg):
     try:
         for kind in kinds:
             try:
-                with open(LOG_FILE, "a") as errlog:
+                # errors="replace" because this is somebody else's stderr: a
+                # server that prints a byte we cannot decode must not take the
+                # whole connection down with it.
+                with open(LOG_FILE, "a", encoding="utf-8",
+                          errors="replace") as errlog:
                     async with _open(cfg, kind, errlog) as (read, write):
-                        async with ClientSession(read, write) as session:
+                        async with ClientSession(
+                                read, write,
+                                logging_callback=_log_sink(name),
+                                message_handler=_notified(name)) as session:
                             # A server that never answers initialize would
                             # otherwise leave this task parked forever and
                             # _ready never set.
                             await asyncio.wait_for(session.initialize(), CONNECT_TIMEOUT)
-                            listed = await asyncio.wait_for(session.list_tools(),
-                                                            CONNECT_TIMEOUT)
+                            caps = _caps(session)
 
-                            tools = [{"name": t.name,
-                                      "description": t.description or "",
-                                      "schema": t.inputSchema
-                                                or {"type": "object", "properties": {}}}
-                                     for t in listed.tools if _allowed(cfg, t.name)]
+                            # Only ask for tools if it said it has them. A
+                            # server exposing nothing but resources or prompts
+                            # is perfectly legal, and answers tools/list with
+                            # "Method not found" - which, asked unconditionally,
+                            # failed the whole connection and made such a server
+                            # unusable rather than merely tool-less.
+                            tools = []
+                            if caps["tools"]:
+                                listed = await asyncio.wait_for(
+                                    session.list_tools(), CONNECT_TIMEOUT)
+                                tools = [{"name": t.name,
+                                          "description": t.description or "",
+                                          "schema": t.inputSchema
+                                                    or {"type": "object", "properties": {}}}
+                                         for t in listed.tools if _allowed(cfg, t.name)]
 
                             _sessions[name] = session
+                            # Only the tools are listed now. Resources, their
+                            # templates and prompts are left as None and
+                            # fetched on the first ask - three more round trips
+                            # per server on every boot, for catalogues most
+                            # sessions never open, would be paid by everyone to
+                            # help the few. A server that advertises a surface
+                            # and then mishandles the call also cannot take the
+                            # connection down with it this way.
                             _state[name] = {"state": "ready", "tools": tools,
-                                            "error": "", "transport": kind}
+                                            "error": "", "transport": kind,
+                                            "caps": caps,
+                                            "resources": None, "templates": None,
+                                            "prompts": None}
                             await _shutdown.wait()
                 # Shut down cleanly on a transport that WORKED - not a failure,
                 # so don't fall through and try the next one.
@@ -388,23 +526,158 @@ def summary():
         # state it will ever leave, and it goes into the description the model
         # is shown on that first turn.
         if isinstance(cfg, dict) and cfg.get("enabled") is False:
-            out[name] = {"state": "disabled", "tools": 0, "error": "", "transport": ""}
+            out[name] = {"state": "disabled", "tools": 0, "error": "",
+                         "transport": "", "flat": _flat(cfg), "caps": {}}
             continue
         s = _state.get(name) or {"state": "connecting", "tools": [], "error": ""}
+        # The capabilities, not counts of what is in them: a count would mean
+        # listing, and this runs while the prompt is being assembled. "has
+        # resources" is what the model needs to decide whether to look.
         out[name] = {"state": s["state"], "tools": len(s["tools"]),
-                     "error": s["error"], "transport": s.get("transport", "")}
+                     "error": s["error"], "transport": s.get("transport", ""),
+                     "flat": _flat(cfg), "caps": s.get("caps") or {}}
     return out
 
 
-def catalogue(server, tool=None):
-    """(tools, error) for one server - the tool dicts as tools/list gave them,
-    narrowed to `tool` if named. error is "" when all is well, otherwise the
-    text to hand the model instead."""
+# `mcp__server__tool`, the same shape Claude Code uses. The prefix is what
+# marks a name as belonging to a server rather than to a file in tools/, and
+# the doubled underscore is what lets the two halves be told apart again by
+# eye - single ones appear inside real server and tool names all the time.
+NAME_PREFIX = "mcp__"
+MAX_NAME = 64        # the tightest limit the four provider APIs impose
+MAX_DESC = 1024      # somebody else's prose, and it goes in every request
+
+
+def _safe(part):
+    """One name component reduced to what a provider will accept in a tool
+    name. Server names in mcp.json are free text and routinely have dots and
+    spaces in them; a tool name that carries those is rejected outright."""
+    return "".join(c if (c.isalnum() or c in "_-") else "_" for c in part)
+
+
+def _wire_name(server, tool):
+    """What the model calls this tool.
+
+    Trimming takes from the SERVER half and never the tool half: the tool name
+    is the part carrying the meaning the model matches on, and two tools on
+    one server have to stay distinguishable from each other. Collisions are
+    still possible once two long server names trim to the same stem, so
+    flattened() drops duplicates rather than trusting this to be injective -
+    two schemas under one name is a hard 400 from every provider."""
+    server_s, tool_s = _safe(server), _safe(tool)
+    name = NAME_PREFIX + server_s + "__" + tool_s
+    if len(name) <= MAX_NAME:
+        return name
+    room = MAX_NAME - len(NAME_PREFIX) - len("__") - len(tool_s)
+    if room > 0:
+        return NAME_PREFIX + server_s[:room] + "__" + tool_s
+    return (NAME_PREFIX + tool_s)[:MAX_NAME]
+
+
+def _object_schema(schema):
+    """The server's own inputSchema, guaranteed to be the object schema the
+    provider APIs insist on at the top level.
+
+    Passed through untouched when it already is one, which is the entire point
+    of flattening: the model is constrained by the SERVER's own contract,
+    argument names and types and all, rather than by a paraphrase of it that
+    something here rendered into prose. Only the top level is checked - what's
+    nested inside is the server's business, and tool_processor._gemini_schema
+    already handles the one provider that can't take all of it."""
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    if schema.get("type") != "object":
+        fixed = dict(schema)
+        fixed["type"] = "object"
+        fixed.setdefault("properties", {})
+        return fixed
+    return schema
+
+
+def _make_run(server, tool, timeout):
+    """run() for one flattened tool. A closure, so the server and tool names
+    are carried by the entry itself and dispatch needs no registry to map a
+    wire name back - tool_processor finds this like any other tool's run().
+
+    **args because the arguments are the server's, not ours: whatever the
+    schema declared is what arrives, and it goes straight through."""
+    def run(**args):
+        return call(server, tool, args, timeout)
+    return run
+
+
+def flattened():
+    """Every allowlisted tool on a ready server, as tool_processor TOOLS
+    entries - so an MCP tool reaches the model as a real tool with the
+    server's own JSON Schema on it, instead of as arguments typed by hand into
+    the generic `mcp` tool's untyped `args` object.
+
+    NEVER waits and never dials. This is called from load_tools(), which runs
+    on every single turn while the prompt is being built, so the cost has to
+    be a dict lookup. A server still connecting contributes nothing this turn
+    and appears on the next one.
+
+    ONLY servers with a "tools" allowlist, and that is the context budget
+    rather than a formality: each tool here spends its full schema on every
+    request from now on, used or not, while a server left behind the generic
+    tool costs one schema no matter how many tools sit on the far side. Four
+    Unity servers flattened whole would be most of a context window before the
+    model has read anything."""
+    start()
+    out = []
+    seen = set()
+    for server, cfg in _config().items():
+        if not isinstance(cfg, dict) or cfg.get("enabled") is False or not _flat(cfg):
+            continue
+        s = _state.get(server) or {}
+        if s.get("state") != "ready":
+            continue
+
+        # Per-server rather than an argument on the tool: adding our own
+        # `timeout` property would corrupt the server's schema - a server is
+        # perfectly entitled to have a `timeout` argument of its own - and the
+        # model has no way to know a Unity build needs longer than a file read.
+        try:
+            timeout = int(cfg.get("timeout") or CALL_TIMEOUT)
+        except (TypeError, ValueError):
+            timeout = CALL_TIMEOUT
+
+        for t in s["tools"]:
+            name = _wire_name(server, t["name"])
+            if name in seen:
+                continue
+            seen.add(name)
+            desc = (t["description"] or "").strip()[:MAX_DESC]
+            if not desc:
+                desc = "The \"" + t["name"] + "\" tool."
+            # The server is named in the description because the wire name may
+            # have been trimmed, and because it is what `mcp` action
+            # "reconnect" takes when this tool starts failing.
+            out.append({
+                "name": name,
+                "description": desc + " (From the \"" + server + "\" MCP server.)",
+                "instructions": ("Runs " + t["name"] + " on the \"" + server
+                                 + "\" MCP server. Its arguments are on the "
+                                   "schema attached to this tool."),
+                "run": _make_run(server, t["name"], timeout),
+                "schema": _object_schema(t["schema"]),
+            })
+    return out
+
+
+def _up(server):
+    """"" if `server` is connected and usable, otherwise the text to hand the
+    model instead of whatever it asked for.
+
+    Every entry point below runs this first, so a server that is unknown,
+    switched off, broken or still connecting is reported the same way whether
+    the model wanted a tool, a resource, a prompt or a completion - one
+    explanation of one situation, rather than four that could drift apart."""
     if not _wait_ready():
-        return [], "the MCP servers have not finished starting up. Try again."
+        return "the MCP servers have not finished starting up. Try again."
     if server not in _config():
         known = ", ".join(_config()) or "(none configured in mcp.json)"
-        return [], "there is no MCP server called \"" + server + "\". You have: " + known
+        return "there is no MCP server called \"" + server + "\". You have: " + known
 
     # Configured but never dialled - added to mcp.json since Uniagent started.
     # Dial it now rather than reporting a startup that is never going to happen.
@@ -413,15 +686,40 @@ def catalogue(server, tool=None):
 
     s = _state.get(server, {})
     if s.get("state") == "broken":
-        return [], "the \"" + server + "\" server did not start: " + s.get("error", "")
+        return "the \"" + server + "\" server did not start: " + s.get("error", "")
     if s.get("state") == "disabled":
-        return [], "the \"" + server + "\" server is switched off in mcp.json."
+        return "the \"" + server + "\" server is switched off in mcp.json."
     if s.get("state") != "ready":
-        return [], ("the \"" + server + "\" server is still connecting. Wait a "
-                    "moment and try once more; if it keeps saying this, the "
-                    "server is not answering and its command or url in mcp.json "
-                    "is likely wrong.")
+        return ("the \"" + server + "\" server is still connecting. Wait a "
+                "moment and try once more; if it keeps saying this, the "
+                "server is not answering and its command or url in mcp.json "
+                "is likely wrong.")
+    return ""
 
+
+def _offers(server, surface):
+    """"" if `server` declared `surface` at initialize, else the text to say so.
+
+    Checked before the request goes out, because a server that simply does not
+    do prompts answers a prompts/list with a JSON-RPC error, and an error is
+    indistinguishable to a model from something having gone wrong - so it
+    tries again, and again."""
+    caps = (_state.get(server) or {}).get("caps") or {}
+    if caps.get(surface):
+        return ""
+    return ("the \"" + server + "\" server does not offer " + surface
+            + " - it did not advertise that capability when it connected.")
+
+
+def catalogue(server, tool=None):
+    """(tools, error) for one server - the tool dicts as tools/list gave them,
+    narrowed to `tool` if named. error is "" when all is well, otherwise the
+    text to hand the model instead."""
+    error = _up(server)
+    if error:
+        return [], error
+
+    s = _state.get(server, {})
     tools = s["tools"]
     if tool:
         tools = [t for t in tools if t["name"] == tool]
@@ -432,16 +730,21 @@ def catalogue(server, tool=None):
     return tools, ""
 
 
-def _flatten(result):
-    """An MCP CallToolResult as the plain string every tool in tools/ returns.
+def _blocks(blocks):
+    """A list of MCP content blocks as plain text.
 
-    A result is a list of content blocks, not text - so text blocks are joined
-    and anything else is described rather than dumped. An image is the one
-    worth spelling out: it arrives as base64 that would swamp the context to no
-    purpose, so it is named and its size given, and view_image remains the way
-    to actually look at something."""
+    Text blocks are joined and anything else is described rather than dumped.
+    An image is the one worth spelling out: it arrives as base64 that would
+    swamp the context to no purpose, so it is named and its size given, and
+    view_image remains the way to actually look at something.
+
+    Shared by tool results and prompt messages, which are made of the same
+    blocks - so an image comes back described the same way whichever surface
+    it arrived through."""
     parts = []
-    for block in (result.content or []):
+    for block in (blocks or []):
+        if block is None:
+            continue
         kind = getattr(block, "type", "")
         if kind == "text":
             parts.append(block.text)
@@ -454,8 +757,46 @@ def _flatten(result):
             parts.append(text if text else "[resource: " + str(getattr(res, "uri", "?")) + "]")
         else:
             parts.append("[" + (kind or "unknown") + " content, not shown]")
+    return "\n".join(p for p in parts if p)
 
-    text = "\n".join(p for p in parts if p)
+
+def _contents(result):
+    """A ReadResourceResult as text. Contents are not content blocks - they
+    are text-or-blob records carrying a uri - so this is not _blocks."""
+    parts = []
+    for c in (getattr(result, "contents", None) or []):
+        text = getattr(c, "text", None)
+        if text is not None:
+            parts.append(text)
+            continue
+        blob = getattr(c, "blob", None)
+        if blob is not None:
+            parts.append("[binary resource: "
+                         + str(getattr(c, "mimeType", "?") or "?") + ", "
+                         + str(len(blob)) + " base64 chars, not shown]")
+    return "\n".join(p for p in parts if p) or "(the resource is empty)"
+
+
+def _messages(result):
+    """A GetPromptResult as text to follow.
+
+    Roles are kept and labelled, because a prompt is a scripted conversation
+    and which side says what is often the whole point of it. Rendered as text
+    rather than spliced into the real history: this is knowledge to act on,
+    which is what a skill is, and read_skill hands those back as text too."""
+    out = []
+    desc = (getattr(result, "description", "") or "").strip()
+    if desc:
+        out.append(desc + "\n")
+    for m in (getattr(result, "messages", None) or []):
+        body = _blocks([getattr(m, "content", None)])
+        out.append("[" + str(getattr(m, "role", "") or "?") + "]\n" + body)
+    return "\n".join(out).strip() or "(the prompt is empty)"
+
+
+def _flatten(result):
+    """An MCP CallToolResult as the plain string every tool in tools/ returns."""
+    text = _blocks(getattr(result, "content", None))
     # structuredContent is the newer typed half of a result; some servers put
     # everything there and leave content empty, which would otherwise come back
     # as a blank result the model can't act on.
@@ -484,44 +825,318 @@ def drop(server):
         _sessions.pop(server, None)
 
 
-def call(server, tool, args=None, timeout=CALL_TIMEOUT, _retry=True):
-    """Run one tool on one server and return its output as text. Never raises -
-    every failure comes back as an "ERROR: ..." string, same as every tool in
-    tools/ does, so a bad call is a turn the model can recover from rather than
-    a crashed one."""
-    found, error = catalogue(server, tool)
-    if error:
-        return "ERROR: " + error
+def _invoke(server, work, timeout, what, _retry=True):
+    """(result, error) for one request against a server's live session.
 
+    Every surface goes through here, so the awkward parts are solved once:
+    getting onto the background loop from a blocking caller, the timeout, and
+    the single silent re-dial. `work` is handed the session and returns the
+    coroutine to await, which is what lets one function serve calls, reads,
+    prompts and completions without knowing anything about them.
+
+    Never raises. Every failure is an error string, same as every tool in
+    tools/ returns, so a bad request is a turn the model can recover from
+    rather than a crashed one."""
+    error = _up(server)
+    if error:
+        return None, error
     session = _sessions.get(server)
     if session is None:
-        return "ERROR: the \"" + server + "\" server is not connected right now."
+        return None, "the \"" + server + "\" server is not connected right now."
 
     try:
-        future = asyncio.run_coroutine_threadsafe(
-            session.call_tool(tool, args or {}), _loop)
+        future = asyncio.run_coroutine_threadsafe(work(session), _loop)
         # +5 so the outer wait always loses to the inner one, and a timeout is
         # reported as the server being slow rather than as a bare future error.
-        result = future.result(timeout + 5)
+        return future.result(timeout + 5), ""
     except TimeoutError:
         # The server is alive and simply slow (or not answering) - NOT a dead
         # pipe, so the session is left alone. Reconnecting here would throw
-        # away a perfectly good server every time one call ran long.
-        return ("ERROR: " + server + "." + tool + " did not answer within "
-                + str(timeout) + "s. Raise `timeout` if it needs longer.")
+        # away a perfectly good server every time one request ran long.
+        return None, (what + " did not answer within " + str(timeout)
+                      + "s. Raise `timeout` if it needs longer.")
     except Exception as e:
-        # A tool that merely FAILED comes back as a result with isError set, so
-        # an exception out of call_tool means the transport itself broke - the
-        # server process died, or its pipes closed. Re-dial once and try again:
-        # that turns "ClosedResourceError forever" into one slow call.
+        # An McpError is the server ANSWERING, with an error: a method it does
+        # not implement, a parameter it rejected. The connection is perfectly
+        # healthy, so re-dialling would throw away a working session and every
+        # catalogue cached on it to no purpose - and the second attempt would
+        # be refused in exactly the same way. Report it and leave the session
+        # alone. Only a broken transport earns a re-dial.
+        from mcp.shared.exceptions import McpError
+        if isinstance(e, McpError):
+            return None, (what + " was refused by the server: " + str(e))
+
+        # Anything else means the transport itself broke - the server process
+        # died, or its pipes closed. Re-dial once and try again: that turns
+        # "ClosedResourceError forever" into one slow request. drop() clears the
+        # state, so _up() inside the retry re-dials on the way past.
         if _retry:
             drop(server)
             if _config().get(server):
-                return call(server, tool, args, timeout, _retry=False)
-        return ("ERROR calling " + server + "." + tool + ": " + type(e).__name__
-                + ": " + str(e) + " (the connection was re-dialled and it "
-                "failed again - the server may have stopped)")
+                return _invoke(server, work, timeout, what, _retry=False)
+        return None, (what + " failed: " + type(e).__name__ + ": " + str(e)
+                      + " (the connection was re-dialled and it failed again - "
+                        "the server may have stopped)")
+
+
+def call(server, tool, args=None, timeout=CALL_TIMEOUT):
+    """Run one tool on one server and return its output as text."""
+    found, error = catalogue(server, tool)
+    if error:
+        return "ERROR: " + error
+    result, error = _invoke(server, lambda s: s.call_tool(tool, args or {}),
+                            timeout, server + "." + tool)
+    if error:
+        return "ERROR: " + error
     return _flatten(result)
+
+
+# ---------------------------------------------------------------------------
+# Resources, prompts, completions and logging - the surfaces beyond tools.
+#
+# Tools are the one surface worth flattening into real tools of the model's
+# own, because a tool is a thing to CALL and has a schema saying how. The rest
+# are not shaped like that: a resource is addressed by URI and read, a prompt
+# is knowledge to follow rather than a result to report, a completion answers
+# a question about an argument. They stay behind the mcp tool, where an action
+# and a couple of arguments cover all of them.
+# ---------------------------------------------------------------------------
+
+# kind -> (capability it needs, how to ask for a page, field holding the items)
+_LISTS = {
+    "resources": ("resources", lambda s, c: s.list_resources(c), "resources"),
+    "templates": ("resources", lambda s, c: s.list_resource_templates(c),
+                  "resourceTemplates"),
+    "prompts": ("prompts", lambda s, c: s.list_prompts(c), "prompts"),
+}
+
+LOG_LEVELS = ("debug", "info", "notice", "warning", "error", "critical",
+              "alert", "emergency")
+
+
+async def _pages(fetch, attr):
+    """Every page of a cursor-paginated list, to a bound. See MAX_PAGES."""
+    out = []
+    cursor = None
+    for _ in range(MAX_PAGES):
+        page = await fetch(cursor)
+        out.extend(getattr(page, attr, None) or [])
+        cursor = getattr(page, "nextCursor", None)
+        if not cursor or len(out) >= MAX_ITEMS:
+            break
+    return out[:MAX_ITEMS]
+
+
+def _plain(kind, x):
+    """One listed item as a plain dict.
+
+    Nothing pydantic leaves this module, exactly as the tool catalogue is
+    stored as dicts rather than as SDK objects: the tool layer above should
+    not have to know the SDK exists, and a field the SDK renames between
+    versions then breaks one line here instead of several up there."""
+    if kind == "prompts":
+        return {"name": x.name,
+                "description": (x.description or "").strip(),
+                "arguments": [{"name": a.name,
+                               "description": (a.description or "").strip(),
+                               "required": bool(a.required)}
+                              for a in (x.arguments or [])]}
+    if kind == "templates":
+        return {"uri": x.uriTemplate, "name": x.name or "",
+                "description": (x.description or "").strip(),
+                "mime": x.mimeType or ""}
+    return {"uri": str(x.uri), "name": x.name or "",
+            "description": (x.description or "").strip(),
+            "mime": x.mimeType or ""}
+
+
+def _fetch_list(server, kind, timeout=CALL_TIMEOUT):
+    """(items, error) for one lazy catalogue, fetched once and then cached.
+
+    The cache is cleared by the server's own list_changed notification (see
+    _notified) and by drop(), so it cannot go stale in the ways that matter."""
+    error = _up(server)
+    if error:
+        return [], error
+    s = _state.get(server) or {}
+    if s.get(kind) is not None:
+        return s[kind], ""
+
+    surface, fetch, attr = _LISTS[kind]
+    error = _offers(server, surface)
+    if error:
+        return [], error
+
+    raw, error = _invoke(server,
+                         lambda sess: _pages(lambda c: fetch(sess, c), attr),
+                         timeout, server + "'s " + kind)
+    if error:
+        return [], error
+
+    items = [_plain(kind, x) for x in raw]
+    s = _state.get(server)
+    if s is not None:                       # may have been dropped while we waited
+        s[kind] = items
+    return items, ""
+
+
+def resources(server):
+    """(resources, uri templates, error) for one server.
+
+    Both halves of one surface, fetched together because a listing that showed
+    only one of them would read as complete and be wrong - plenty of servers
+    expose everything through templates and list no fixed resources at all.
+    Only a failure of BOTH is an error, so one unimplemented half never costs
+    the model the other."""
+    items, e1 = _fetch_list(server, "resources")
+    tmpl, e2 = _fetch_list(server, "templates")
+    if e1 and e2:
+        return [], [], e1
+    return items, tmpl, ""
+
+
+def read(server, uri, timeout=CALL_TIMEOUT):
+    """One resource's contents, as text."""
+    error = _up(server) or _offers(server, "resources")
+    if error:
+        return "ERROR: " + error
+    try:
+        from pydantic import AnyUrl
+        target = AnyUrl(str(uri))
+    except Exception as e:
+        return ("ERROR: \"" + str(uri) + "\" is not a usable resource URI ("
+                + type(e).__name__ + "). Use one exactly as the resource "
+                "listing gave it, scheme and all.")
+    result, error = _invoke(server, lambda s: s.read_resource(target), timeout,
+                            "reading " + str(uri))
+    if error:
+        return "ERROR: " + error
+    return _contents(result)
+
+
+def watch(server, uri, on=True, timeout=CALL_TIMEOUT):
+    """Ask to be told when one resource changes, or stop asking.
+
+    Without this the server sends nothing: resources/updated only arrives for
+    a uri that was subscribed to. What arrives lands in the same ring logs()
+    reads, because a turn-based agent has nowhere else to put a message that
+    turns up between turns - there is no callback for it to interrupt. So the
+    pattern is subscribe, do other work, then check logs()."""
+    error = _up(server) or _offers(server, "subscribe")
+    if error:
+        return ("ERROR: " + error.replace(
+            "does not offer subscribe",
+            "does not support watching resources for changes"))
+    try:
+        from pydantic import AnyUrl
+        target = AnyUrl(str(uri))
+    except Exception as e:
+        return ("ERROR: \"" + str(uri) + "\" is not a usable resource URI ("
+                + type(e).__name__ + ").")
+
+    _, error = _invoke(
+        server,
+        (lambda s: s.subscribe_resource(target)) if on
+        else (lambda s: s.unsubscribe_resource(target)),
+        timeout, ("watching " if on else "unwatching ") + str(uri))
+    if error:
+        return "ERROR: " + error
+    if not on:
+        return "No longer watching " + str(uri) + " on \"" + server + "\"."
+    return ("Watching " + str(uri) + " on \"" + server + "\". Changes are "
+            "reported through action \"logs\" on this server - they arrive "
+            "between turns, so check there rather than waiting.")
+
+
+def prompts(server):
+    """(prompts, error) - each with its arguments and which are required."""
+    return _fetch_list(server, "prompts")
+
+
+def prompt(server, name, args=None, timeout=CALL_TIMEOUT):
+    """One prompt, rendered as text to follow."""
+    error = _up(server) or _offers(server, "prompts")
+    if error:
+        return "ERROR: " + error
+    # Every value forced to str: the protocol types prompt arguments as
+    # strings, so a model passing 3 rather than "3" would otherwise be
+    # rejected by pydantic before the request was even sent - a validation
+    # error about types, for what is really a correct answer.
+    clean = {str(k): str(v) for k, v in (args or {}).items()}
+    result, error = _invoke(server, lambda s: s.get_prompt(name, clean or None),
+                            timeout, "prompt \"" + str(name) + "\"")
+    if error:
+        return "ERROR: " + error
+    return _messages(result)
+
+
+def complete(server, kind, target, argument, value="", timeout=CALL_TIMEOUT):
+    """Suggested values for one argument of a prompt or a URI template."""
+    error = _up(server) or _offers(server, "completions")
+    if error:
+        return "ERROR: " + error
+
+    from mcp.types import PromptReference, ResourceTemplateReference
+    if kind == "prompt":
+        ref = PromptReference(type="ref/prompt", name=str(target))
+    elif kind == "resource":
+        ref = ResourceTemplateReference(type="ref/resource", uri=str(target))
+    else:
+        return ("ERROR: `kind` must be \"prompt\" (completing a prompt's "
+                "argument) or \"resource\" (completing a URI template's), not \""
+                + str(kind) + "\".")
+
+    result, error = _invoke(
+        server,
+        lambda s: s.complete(ref, {"name": str(argument), "value": str(value)}),
+        timeout, "completions for \"" + str(argument) + "\"")
+    if error:
+        return "ERROR: " + error
+
+    comp = getattr(result, "completion", None)
+    values = list(getattr(comp, "values", None) or [])
+    if not values:
+        return ("The server has no suggestions for \"" + str(argument) + "\""
+                + (" starting \"" + str(value) + "\"." if value else "."))
+    text = ("Values for \"" + str(argument) + "\": "
+            + ", ".join(str(v) for v in values))
+    if getattr(comp, "hasMore", False):
+        text += " (there are more - pass a longer `value` to narrow them)"
+    return text
+
+
+def logs(server, level=None, timeout=CALL_TIMEOUT):
+    """What the server has pushed at us, and optionally how much it should send.
+
+    A read of the ring _log_sink fills rather than a request, because that is
+    what logging is: the server sends when it wants to, and `level` only
+    changes how much. Asking for a level the server does not have is not worth
+    a round trip to discover, hence the check against LOG_LEVELS first."""
+    error = _up(server)
+    if error:
+        return "ERROR: " + error
+
+    if level:
+        level = str(level).strip().lower()
+        if level not in LOG_LEVELS:
+            return ("ERROR: `level` must be one of " + ", ".join(LOG_LEVELS)
+                    + " - not \"" + level + "\".")
+        error = _offers(server, "logging")
+        if error:
+            return "ERROR: " + error
+        _, error = _invoke(server, lambda s: s.set_logging_level(level), timeout,
+                           "setting the log level")
+        if error:
+            return "ERROR: " + error
+
+    lines = list(_logs.get(server) or [])
+    if not lines:
+        return ("\"" + server + "\" has logged nothing"
+                + (" since the level was set to " + level + "." if level else
+                   ". Set `level` to \"debug\" or \"info\" to ask it for more."))
+    return ("The last " + str(len(lines)) + " lines from \"" + server + "\""
+            + (" (level now " + level + ")" if level else "") + ":\n"
+            + "\n".join(lines))
 
 
 def refresh():
@@ -540,6 +1155,7 @@ def refresh():
         _ready.clear()
         _state.clear()
         _sessions.clear()
+        _logs.clear()      # a new connection's log ring starts empty
     start()
     _wait_ready()
     return summary()

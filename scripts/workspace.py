@@ -286,7 +286,7 @@ class Workspace:
             if code != 0:
                 raise WorkspaceError(out.strip() or ("cannot read " + target))
             return out
-        return Path(target).read_text(errors="replace")
+        return Path(target).read_text(errors="replace", encoding="utf-8")
 
     def write_text(self, path, content):
         """Write a whole file, creating parent directories. Returns the
@@ -305,7 +305,7 @@ class Workspace:
             return target
         p = Path(target)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
+        p.write_text(content, encoding="utf-8")
         return target
 
     # --- reachability ------------------------------------------------------

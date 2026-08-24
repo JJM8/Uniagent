@@ -207,7 +207,7 @@ def _meta(folder):
     On disk next to the transcripts (module globals don't survive the per-turn
     tool reload), so it also survives restarts, same as the histories."""
     try:
-        return json.loads((folder / "_meta.json").read_text())
+        return json.loads((folder / "_meta.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 
@@ -216,7 +216,7 @@ def _remember(folder, name, provider_name, model, temperature):
     meta = _meta(folder)
     meta[name] = {"provider": provider_name, "model": model, "temperature": temperature}
     try:
-        (folder / "_meta.json").write_text(json.dumps(meta, indent=2))
+        (folder / "_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     except OSError:
         pass  # worst case the next call falls back to the defaults
 
@@ -320,7 +320,7 @@ def _work(host, name, path, prompt, provider_name, model, temperature, origin):
     # it in: turn_chat() can't be used on this thread (no turn is registered on
     # it), so recomputing the tag here would give the wrong chat.
     tag = threading.current_thread().name
-    history = path.read_text() if path.exists() else ""
+    history = path.read_text(encoding="utf-8") if path.exists() else ""
     # Published under the same tag /stop names, so stopping a subagent breaks
     # open whatever it is blocked in - a model still writing, a long tool -
     # rather than waiting for it to reach a check of its own. Unlike the chat's
@@ -350,7 +350,8 @@ def _work(host, name, path, prompt, provider_name, model, temperature, origin):
         # /stop broke it out of whatever it was blocked in, which lands here
         # rather than as a return. The transcript is on disk either way -
         # on_save mirrors it as it grows - so the report is built from that.
-        note = _stopped_note(host, name, path.read_text() if path.exists() else "")
+        note = _stopped_note(host, name,
+                             path.read_text(encoding="utf-8") if path.exists() else "")
     except Exception as e:
         note = ("Subagent " + name + " CRASHED - " + type(e).__name__ + ": "
                 + str(e) + ". Its transcript so far is in " + str(path))

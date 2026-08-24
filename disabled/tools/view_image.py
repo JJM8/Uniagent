@@ -62,7 +62,7 @@ def _api_key():
     if key:
         return key
     try:
-        lines = ENV_FILE.read_text().splitlines()
+        lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
     except OSError:
         return None
     for line in lines:

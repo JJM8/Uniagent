@@ -32,10 +32,26 @@ per job in the "jobs" list:
       "provider": "deepseek",  # optional - omit for the settings page's cron default
       "model": "deepseek-v4-flash",
       "temperature": 0.7,      # optional - omit for the settings page's default
-      "safety": false,         # optional - omit to follow the settings page
-      "safety_prompt": "This job's own vetting prompt. Must contain {call}.",
+      "safety": 7,             # optional - 0-10, omit for the cron default
+      "safety_extra": "This job's own rules for the safety check.",
       "prompt": "What to do."
     }
+
+"safety" is the same 0-10 number a chat runs on (see tool_validation): the
+highest danger rating a tool call can be given and still run. Nobody is here to
+approve a call above it - _deny answers the gate - so it is denied outright and
+the job goes no further, which is why a job's number is resolved against the
+settings page's "cron_safety_threshold" and not a chat's stricter default.
+
+What makes a higher number safe is that the check is TOLD WHAT THE JOB IS. The
+settings page's "cron_safety_extra" - the task in it - and then the job's own
+"safety_extra" are composed here into the one {extra} block a chat uses for its
+own rules, so a call that is ordinary work for this job reads as ordinary work
+and a call that has nothing to do with it stands out. See _safety_brief().
+
+A job may still replace the whole vetting prompt with a "safety_prompt" of its
+own (it must contain {call}) - the escape hatch for a job the shared prompt is
+wrong about rather than merely uninformed about. It wins over everything above.
 
 A schedule is two plain numbers, both unix seconds: runs happen at start,
 start+interval, start+2*interval, and so on. That means the whole clock is one
@@ -47,12 +63,16 @@ lands an hour out after the clocks change until its start is nudged back.
 
 import datetime
 import json
+import re
 import time
 from pathlib import Path
 
+import _term
 import main
 import provider
+import service
 import settings
+import tool_validation
 
 CRON_FILE = Path(__file__).parent.parent / "cron.json"
 STATE_FILE = Path(__file__).parent.parent / "cron_state.json"
@@ -62,12 +82,13 @@ TICK = 30  # seconds between checks - the finest granularity a schedule can hit
 DIM = "\033[2m"
 RESET = "\033[0m"
 
-# What a written-out `"safety": <this>` means, for a file edited by hand and for
-# /cronsafety's argument. Anything else is a typo, and a typo must never quietly
-# disarm the check - an unrecognised value is ignored and the job falls back to
-# the settings page (see _safety()).
-_SAFETY_WORDS = {"on": True, "true": True, "yes": True, "1": True,
-                 "off": False, "false": False, "no": False, "0": False}
+# What a `"safety"` that isn't a number means. This field was a true/false flag
+# before it was a 0-10 number, and files written then are still on disk, so the
+# old spellings are read rather than refused: "off" was "never check this one",
+# which is exactly 10, and "on" was "do check it", which is now whatever the
+# cron default says. Nothing writes these any more - see _threshold().
+_LEGACY_WORDS = {"on": True, "true": True, "yes": True,
+                 "off": False, "false": False, "no": False}
 
 
 def _note(text):
@@ -83,23 +104,77 @@ def _number(value):
     return int(value)
 
 
-def _safety(value, job_name):
-    """false -> False, true -> True. None for a job that said nothing, and also
-    for a job that said something unrecognised - which is noted, because
-    `"safety": "of"` silently meaning "checked" is a surprise worth one line in
-    the log, and silently meaning "unchecked" would be worse than a surprise.
+def _threshold(value, job_name):
+    """A job's own `"safety"` as a 0-10 number, or None for a job that hasn't
+    got one of its own and should follow the cron default.
 
-    Strings are taken too ("on"/"off"), so a hand-written file that says what
-    the old cron.md said still works."""
+    Three kinds of value reach here. A number is the answer, clamped. One of
+    the old true/false spellings is translated (see _LEGACY_WORDS) and noted,
+    so a file written before the numbers keeps working while saying out loud
+    that it should be rewritten. Anything else is a typo, and a typo must never
+    quietly disarm the check: it is ignored, noted, and the job follows the
+    default - which is a check, not the absence of one."""
     if value is None:
         return None
-    if isinstance(value, bool):
-        return value
-    word = _SAFETY_WORDS.get(str(value).strip().lower())
+
+    number = tool_validation.clamp(value)
+    if number is not None:
+        return number
+
+    word = _LEGACY_WORDS.get(str(value).strip().lower()) \
+        if isinstance(value, (bool, str)) else None
     if word is None:
-        _note("'" + job_name + "' has safety: " + repr(value)
-              + " - expected true or false, so following the settings page instead")
-    return word
+        _note("'" + job_name + "' has safety: " + repr(value) + " - expected a "
+              "number from 0 to 10, so following the cron default instead")
+        return None
+    if word:
+        _note("'" + job_name + "' has safety: " + repr(value) + " - that's the old "
+              "on/off form; it now follows the cron default, so write the number "
+              "you want")
+        return None
+    _note("'" + job_name + "' has safety: " + repr(value) + " - that's the old "
+          "on/off form for 'never check this job', which is now safety: "
+          + str(settings.SAFETY_MAX))
+    return settings.SAFETY_MAX
+
+
+def _safety_brief(own, task, chosen):
+    """Everything the check is told about this job beyond the call itself, as one
+    block of text for tool_validation's {extra} - the same channel a chat's own
+    rules use, so there is one prompt in force and one place it is composed.
+
+    The settings page's "cron_safety_extra" is the whole shape of it: the fixed
+    words about being a scheduled job, with this job's task written into its
+    {task} and this job's own "safety_extra" into its {rules}. Nothing about the
+    wording lives here, so improving how scheduled calls are judged is an edit
+    on the safety tab and not a release.
+
+    Either placeholder the text doesn't name is appended at the end instead -
+    the same tolerance _compose() has for a prompt with no {extra}, and for the
+    same reason: a task silently dropped would leave the check judging a
+    scheduled call with no idea what it was scheduled to do, which is the one
+    thing this block exists to tell it.
+
+    Emptying the addendum on the settings page, though, means exactly that: no
+    framing and no task, just the job's own words. An emptied box that sprang
+    back to the shipped text would be a box that cannot be emptied."""
+    frame = (chosen["cron_safety_extra"] or "").strip()
+    own = (own or "").strip()
+    if not frame:
+        return own or None
+
+    # The lead-in is for the APPENDED case only: a text that names the
+    # placeholder has already introduced it in its own words, and saying it
+    # again would read as a stutter.
+    for mark, text, lead in (("{task}", task, "The job was told to do this, and "
+                                              "only this:\n\n"),
+                             ("{rules}", own, "")):
+        if mark in frame:
+            frame = frame.replace(mark, text)
+        elif text:
+            frame += "\n\n" + lead + text
+    # A placeholder the job had nothing for leaves the blank line it stood on.
+    return re.sub(r"\n{3,}", "\n\n", frame).strip()
 
 
 def parse_jobs(data):
@@ -170,6 +245,15 @@ def parse_jobs(data):
         if job_temperature is None:
             job_temperature = chosen["temperature"]
 
+        # This job's own words for the check, and its own number. The number is
+        # resolved here rather than at the gate so that everything downstream -
+        # the run, the chat it is mirrored into, /cronsafety's listing - is
+        # looking at the same figure, and "own" keeps the one thing resolving
+        # loses: whether the file said it or the settings page did.
+        own_threshold = _threshold(raw.get("safety"), job_name)
+        safety_extra = raw.get("safety_extra")
+        safety_extra = safety_extra.strip() if isinstance(safety_extra, str) else ""
+
         # This job's own vetting prompt, an ordinary field like every other.
         safety_prompt = raw.get("safety_prompt")
         safety_prompt = safety_prompt.strip() if isinstance(safety_prompt, str) else ""
@@ -185,14 +269,33 @@ def parse_jobs(data):
 
         jobs.append({
             "name": job_name,
+            # Off switch. ABSENT MEANS ON - every job written before this
+            # existed, and every job the tool adds without thinking about it,
+            # has to keep running exactly as it did. Only an explicit false (or
+            # anything else falsy somebody hand-typed) turns a job off.
+            "enabled": bool(raw.get("enabled", True)),
             "start": start,
             "interval": interval,
             "provider": job_provider,
             "model": job_model,
             "temperature": job_temperature,
-            # None for both = this job says nothing, so the settings page
-            # decides, exactly as before these fields existed.
-            "safety": _safety(raw.get("safety"), job_name),
+            # The 0-10 number this run is judged against, already resolved
+            # against the cron default (and the old global on/off switch, which
+            # threshold_for still honours) - so it is always a number.
+            "safety": tool_validation.threshold_for(
+                own_threshold, chosen=chosen,
+                default_key="cron_safety_threshold"),
+            # Whether that number is the job's own or the default it happens to
+            # be following. For anything that reports the setting back.
+            "safety_own": own_threshold is not None,
+            # The job's own words, verbatim as the file has them, and then the
+            # whole brief the check is given: the settings page's framing, this
+            # job's task, and those words. Both, because they answer different
+            # questions - "has this job said anything of its own?" (reported by
+            # /cronsafety and the cron tab) and "what does the check see?" (what
+            # actually runs, and what gets mirrored into the run's chat).
+            "safety_extra": safety_extra or None,
+            "safety_brief": _safety_brief(safety_extra, text_prompt, chosen),
             "safety_prompt": safety_prompt or None,
             "prompt": text_prompt,
         })
@@ -204,7 +307,7 @@ def load_file():
     one place that failure is turned into a log line, so every caller below can
     just ask for jobs and get none."""
     try:
-        return json.loads(CRON_FILE.read_text())
+        return json.loads(CRON_FILE.read_text(encoding="utf-8"))
     except OSError:
         return None
     except json.JSONDecodeError as e:
@@ -218,9 +321,9 @@ def _load_jobs():
     return parse_jobs(data) if data is not None else []
 
 
-def set_job_safety(name, value):
-    """Set one job's "safety" in cron.json - True, False, or None to remove it
-    and go back to following the settings page. Returns an error string, or None
+def set_job_safety(name, threshold):
+    """Set one job's "safety" in cron.json - a 0-10 number, or None to remove it
+    and go back to following the cron default. Returns an error string, or None
     when it worked.
 
     This is the write half of the "safety" field parsed above, kept here beside
@@ -243,10 +346,45 @@ def set_job_safety(name, value):
     if found is None:
         return "no cron job called '" + name + "'"
 
-    if value is None:
+    if threshold is None:
         found.pop("safety", None)
     else:
-        found["safety"] = bool(value)
+        number = tool_validation.clamp(threshold)
+        if number is None:
+            return ("a safety number has to be a whole number from "
+                    + str(settings.SAFETY_MIN) + " to " + str(settings.SAFETY_MAX))
+        found["safety"] = number
+
+    return _write_file(data)
+
+
+def set_job_enabled(name, enabled):
+    """Turn one job in cron.json on or off. Returns an error string, or None
+    when it worked.
+
+    On removes the key rather than writing "enabled": true - on is the absence
+    of the switch, so a file nobody has ever turned anything off in stays as
+    clean as it was. Same load-modify-write as set_job_safety above, and for
+    the same reason: every other field, every other job, and anything this code
+    has never heard of survive by default.
+
+    Used by POST /cron/enabled; the watcher itself never writes cron.json."""
+    data = load_file()
+    if data is None:
+        return "could not read " + str(CRON_FILE)
+    jobs = data.get("jobs") if isinstance(data, dict) else data
+    if not isinstance(jobs, list):
+        return str(CRON_FILE) + " has no 'jobs' list"
+
+    found = next((j for j in jobs
+                  if isinstance(j, dict) and str(j.get("name", "")).strip() == name), None)
+    if found is None:
+        return "no cron job called '" + name + "'"
+
+    if enabled:
+        found.pop("enabled", None)
+    else:
+        found["enabled"] = False
 
     return _write_file(data)
 
@@ -256,7 +394,8 @@ def _write_file(data):
     None. Written whole, so a caller must have loaded the file first and be
     handing back everything it read."""
     try:
-        CRON_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        CRON_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                             encoding="utf-8")
     except OSError as e:
         return "could not write " + str(CRON_FILE) + " - " + str(e)
 
@@ -266,14 +405,14 @@ def _load_state():
     unix seconds. A fresh/corrupt file just means 'nothing has run yet', which
     is safe."""
     try:
-        return json.loads(STATE_FILE.read_text())
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _save_state(state):
     try:
-        STATE_FILE.write_text(json.dumps(state, indent=2))
+        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
     except OSError as e:
         _note("could not save state - " + str(e))
 
@@ -324,7 +463,14 @@ def _due(job, state, now):
 
 def _deny(_question):
     """How cron answers the safety gate: deny. There's no human here to approve a
-    flagged call, so it fails safe rather than open."""
+    flagged call, so it fails safe rather than open.
+
+    This is what a job's number is really setting. A call rated above it isn't
+    held for someone to look at in the morning - it never runs, and the job
+    carries on without it. Hence the cron default sitting higher than a chat's,
+    and hence _safety_extra: the way to avoid denying real work is to tell the
+    check what the real work is, not to raise the number until nothing is
+    denied."""
     return False
 
 
@@ -377,12 +523,22 @@ def _mirror(c, job):
         c.pin(job["provider"], job["model"])
     if missing or c.temperature != job["temperature"]:
         c.set_temperature(job["temperature"])
-    # Both together: they're one setting in two parts, and writing only the
-    # changed half would leave that .json disagreeing with cron.json about the
-    # other. _fire passes these to the turn directly anyway - the mirror is so
-    # the chat shows what it runs under.
-    if missing or (c.safety, c.safety_prompt) != (job["safety"], job["safety_prompt"]):
-        c.set_safety(job["safety"], job["safety_prompt"])
+    # The safety block, in the two writes the chat itself uses for it: the number
+    # the slider writes, then the words the dropdown writes. Compared as a whole
+    # and written as a whole, because writing only the changed part would leave
+    # that .json disagreeing with cron.json about the rest.
+    #
+    # `safety` (the old True/False flag) is cleared by set_safety_threshold, and
+    # that matters here: a run folder written before the numbers has one on file,
+    # and left there it would go on answering for a job whose number this is now.
+    #
+    # _fire passes all three to the turn directly anyway - the mirror is so the
+    # chat SHOWS what it ran under, and so a follow-up question typed into it is
+    # judged the way the run was.
+    if missing or (c.safety_threshold, c.safety_extra, c.safety_prompt, c.safety) \
+            != (job["safety"], job["safety_brief"], job["safety_prompt"], None):
+        c.set_safety_threshold(job["safety"])
+        c.set_safety_text(extra=job["safety_brief"], prompt=job["safety_prompt"])
 
 
 def new_run(job):
@@ -435,9 +591,9 @@ def _fire(job):
     window, so it gets the same lock, the same object, the same everything -
     the web UI lists it, opens it, and shows its tool calls exactly like a
     normal chat. It gets full tool use and the safety check, deny-only since
-    there's no human here to ask - unless the job's own `safety:`/
-    "safety_prompt" in cron.json says otherwise, which is passed straight
-    through here, read fresh this tick."""
+    there's no human here to ask (see _deny), at the number and with the words
+    this job's line in cron.json resolves to - passed straight through here,
+    read fresh this tick."""
     # Reuse the chat waiting for this job when nothing has been said in it yet.
     # _ensure_chats makes one the moment a job appears in cron.json, so the job
     # can be seen and talked to before it has ever fired; without this, its
@@ -452,10 +608,18 @@ def _fire(job):
     main.turn(c, job["prompt"], approve=_deny,
               provider_name=job["provider"], model=job["model"],
               temperature=job["temperature"],
-              safety=job["safety"], safety_prompt=job["safety_prompt"])
+              safety_threshold=job["safety"], safety_extra=job["safety_brief"],
+              safety_prompt=job["safety_prompt"])
 
 
 def watch():
+    # This process's stdout is a log file under both service managers. On
+    # Windows it would otherwise be written in the system codepage, so a job
+    # whose reply contains an em dash would raise on the way to the log.
+    _term.setup_console()
+    # So the server can find this process to restart it - on Windows that
+    # pidfile is the only handle on it there is.
+    service.write_pidfile("cron")
     _note("watching " + str(CRON_FILE))
     while True:
         state = _load_state()
@@ -469,6 +633,19 @@ def watch():
 
         for job in jobs:
             key = job["name"]
+
+            # Switched off: never fires, but is kept ARMED at the moment it is
+            # in - the same expression the first-sighting branch below uses.
+            # Without that its state would stay frozen at the last run it did,
+            # and switching it back on a week later would find a scheduled
+            # moment it had "missed" and fire instantly. Off means off, and on
+            # means "carry on from here", not "make up for lost time" - the
+            # same reason a restart never catches up on a schedule that has
+            # already gone past.
+            if not job["enabled"]:
+                moment = due_at(job, now)
+                state[key] = job["start"] - 1 if moment is None else moment
+                continue
 
             last = state.get(key)
             if not isinstance(last, (int, float)) or isinstance(last, bool):

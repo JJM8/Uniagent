@@ -109,7 +109,7 @@ def _load():
     if _cache is not None:
         return _cache
     try:
-        data = json.loads(CACHE_FILE.read_text())
+        data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         _cache = data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         _cache = {}
@@ -133,7 +133,7 @@ def _flush(force=False):
         _dirty, _last_write = False, now
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        CACHE_FILE.write_text(json.dumps(data))
+        CACHE_FILE.write_text(json.dumps(data), encoding="utf-8")
     except OSError:
         pass  # a cache that can't be written is still a cache in memory
 
@@ -304,6 +304,48 @@ def _count_tiktoken(encoding, text):
 
 def _approx(text):
     return max(1, len(text) // CHARS_PER_TOKEN)
+
+
+def estimate(name, model, text):
+    """A token count for `text` right now, from a local tokenizer only - never
+    the network, never queued, never exact.
+
+    count() above is for the context panel, where the number sits beside a real
+    context window and being wrong by 30k is a lie worth avoiding; it will
+    therefore reach for the provider's own tokenizer and answer "pending" while
+    it does. This one is for usage.py, which is writing down what a request
+    that has ALREADY happened cost, on a provider that declined to say. There
+    is nothing to wait for there - the request is over, a second reply is not
+    coming, and a number that lands two minutes later cannot be written into a
+    line that was appended two minutes ago. So this answers immediately with
+    whatever local tokenizer fits best, and the caller labels the result an
+    estimate rather than dressing it up (see usage.py's "estimate" sources).
+
+    The encoding is the model's own where tiktoken knows it and o200k_base
+    where it doesn't, which is what makes this an average rather than an
+    answer: a local Qwen or a Mistral is being measured with OpenAI's ruler.
+    It lands within a few percent for ordinary prose and is the honest best
+    available, since the only tokenizer that could do better is the one the
+    provider just declined to run.
+
+    Returns 0 for empty text, and falls back to chars/4 if tiktoken isn't
+    installed at all - still an estimate, just a coarser one."""
+    if not text:
+        return 0
+    tok = tokenizer(name, model)
+    # Anything with a real tiktoken encoding uses it; the network tokenizers
+    # (anthropic, gemini) have no local form at all, so they borrow o200k_base
+    # the same way an unknown local model does.
+    encoding = tok.split("/", 1)[1] if tok.startswith("tiktoken") else "o200k_base"
+    key = "est/" + encoding + ":" + _hash(text)
+    cached = _get(key)
+    if cached is not None:
+        return cached
+    n = _count_tiktoken(encoding, text)
+    if n is None:
+        return _approx(text)
+    _put(key, n)
+    return n
 
 
 def measure(name, model, segments):

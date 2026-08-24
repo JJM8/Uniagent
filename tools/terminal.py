@@ -402,6 +402,15 @@ class _PosixTerminal:
         self.read_until(self.mark, time.monotonic() + 5)
 
 
+def _shell_exe():
+    """The PowerShell to run on Windows: 7 if it is installed, else the 5.1
+    that ships with every copy of Windows. One answer for both the persistent
+    terminal and the throwaway one, so a command means the same thing in each.
+    """
+    return (shutil.which("pwsh") or shutil.which("powershell")
+            or "powershell.exe")
+
+
 def _ps_quote(text):
     """One PowerShell single-quoted string. PowerShell escapes a quote inside
     single quotes by doubling it, and does nothing else in there - no backslash
@@ -443,9 +452,7 @@ class _WindowsTerminal:
         self.workspace = workspace
         self.mark = "__UNI_" + uuid.uuid4().hex + "__"
 
-        # PowerShell 7 if it is there, else the 5.1 that ships with Windows.
-        shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
-        self.shell = shell
+        shell = self.shell = _shell_exe()
 
         env = dict(os.environ)
         env["TERM"] = "dumb"
@@ -555,7 +562,14 @@ class _WindowsTerminal:
         # console echoes what is typed at it and, unlike a pty, there is no
         # ECHO flag to turn off - so it comes off the output instead.
         self._echo = text.strip()
-        self.proc.write(text)
+        # ConPTY/PSReadLine only treats CR as Enter - a bare "\n" is not
+        # submitted at all, it just sits in the edit buffer. Every write()
+        # after that then lands on top of the SAME unsubmitted line, forever -
+        # which looked like PowerShell stuck showing ">>" continuation prompts
+        # that kept growing, and the marker never appeared. pywinpty's own
+        # write() does no newline translation (confirmed by reading
+        # ptyprocess.py), so it has to happen here.
+        self.proc.write(re.sub(r"\r?\n", "\r\n", text))
 
     def _take(self):
         with self._lock:
@@ -765,9 +779,25 @@ def _oneshot(command, timeout, workspace=None):
                     "and that it exists.)")
         return "(launched in the background - it is running now, this WORKED)"
 
+    # Which shell interprets this. On Windows shell=True means cmd.exe, and the
+    # instructions above teach PowerShell - so a cron job or a subagent (both
+    # of which come through here) would have been writing Get-ChildItem at a
+    # shell that has never heard of it. Same shell as the persistent terminal,
+    # so a command means the same thing however it is run.
+    argv, use_shell = command, True
+    if WINDOWS:
+        argv = [_shell_exe(), "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-Command", command]
+        use_shell = False
+
     try:
         result = subprocess.run(
-            command, shell=True, capture_output=True, text=True,
+            argv, shell=use_shell, capture_output=True,
+            # Said out loud rather than left to the locale: Windows would
+            # otherwise decode with the ANSI codepage, and a single odd byte
+            # from a program that prints in another one would raise instead of
+            # handing back the output it managed.
+            text=True, encoding="utf-8", errors="replace",
             timeout=timeout or DEFAULT_TIMEOUT,
             # A local workspace still decides where a one-shot command runs.
             cwd=(workspace.root if workspace is not None else None),

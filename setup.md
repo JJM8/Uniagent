@@ -20,12 +20,15 @@ That is the whole install — **no administrator rights needed**. The installer:
 2. clones Uniagent into `%USERPROFILE%\Uniagent` (or `$env:UNIAGENT_HOME`)
 3. makes a `.venv` and installs the dependencies
 4. writes `.env` from the example if you don't have one yet
-5. puts a `uniagentcli` command on your PATH (new terminal needed)
-6. installs a **scheduled task** so the server and cron watcher start at every
-   logon, and starts them immediately
-7. waits (up to 90s) for the server to answer on port 8764, then prints the
-   password and opens `https://localhost:8764`. The password is read from
-   `.env`, where the server writes the one it generates on first run — so
+5. asks the **three first-run questions** — a password, a port, and one model
+   provider to talk to. The same three the Linux installer asks, from the same
+   script (`scripts\setup_wizard.py`); run it again by hand whenever you like.
+6. hands over to **`attach.ps1`**, which puts a `uniagentcli` command on your
+   PATH (new terminal needed), installs a **scheduled task** so the server and
+   cron watcher start at every logon, and starts them immediately
+7. waits (up to 90s) for the server to answer, then prints the password and
+   opens the web UI. The password is read from `.env`, where the server writes
+   the one it generates on first run — so
    `findstr UNIAGENT_PASSWORD "%USERPROFILE%\Uniagent\.env"` gets it back at any
    time.
 
@@ -35,25 +38,57 @@ than re-cloned, and an existing `.env` is left alone.
 
 Afterwards: `update.ps1` pulls new code and restarts the server, keeping your
 `.env`, chats, prompts, settings and anything you added yourself (the settings
-page's system tab has the same thing as a button);
-`install-autostart.ps1 -Remove` stops it starting at logon. `schtasks /End /TN
-Uniagent` stops it right now. To remove it completely, run
-`install-autostart.ps1 -Remove` and delete `%USERPROFILE%\Uniagent` (plus
-`%LOCALAPPDATA%\Uniagent` if the installer put MinGit there). The first time the
-server listens, Windows asks to allow it through the firewall — click **Allow**
-(or run the installer as admin to have the rule added for you).
+page's system tab has the same thing as a button). `attach.ps1 -Remove` stops it
+starting at logon and stops it now; `schtasks /End /TN Uniagent` just stops it.
+To remove it completely, run `attach.ps1 -Remove` and delete
+`%USERPROFILE%\Uniagent` (plus `%LOCALAPPDATA%\Uniagent` if the installer put
+MinGit there). The first time the server listens, Windows asks to allow it
+through the firewall — click **Allow** (or run the installer as admin to have
+the rule added for you).
 
 Notes specific to Windows:
 
-- The **web UI is fully supported**. The terminal CLI's live-keyboard chat
-  mode is Unix-only for now; on Windows use `uniagentcli "a question"` for
-  one-shot turns or `echo text | uniagentcli` for piped input.
+- Both interfaces are supported. `uniagentcli` opens the same full-screen chat
+  it does on Linux — arrow keys, history, live output — and `uniagentcli "a
+  question"` still does a single turn. It needs Windows 10 or newer, which is
+  where the console learned to understand the escape codes that interface is
+  drawn with; an older console is told so and pointed at the web UI.
+- The **terminal tool runs PowerShell** here, where it runs bash on Linux, and
+  the agent is told which one it has. PowerShell 7 (`pwsh`) is used if you have
+  it, otherwise the 5.1 that ships with Windows. It is a real terminal either
+  way — `cd` sticks, and a program that stops to ask a question can be answered
+  — because pywinpty gives it a ConPTY, the Windows equivalent of a pty.
+- **Screenshots** work with no extra software: the capture is done through
+  .NET, which is already on the machine. Both whole-screen and active-window
+  captures are supported, and a scaled display (125%, 150%) is handled.
 - Voice: the **browser hold-to-talk works out of the box** (it records in the
   page). The local desktop hold-to-talk key needs `requirements-voice.txt`
   (pyaudio/pynput) — the installer tries, and the app runs fine without it.
 - "Always on before anyone logs in" (a true Windows service) needs admin
   rights — see the README's NSSM note. The scheduled task covers the normal
   case: it comes up at every logon and restarts if the server crashes.
+
+### Moving a Windows install to another PC
+
+Copy the whole folder — USB stick, network share, anything — and on the new
+machine run:
+
+```
+attach.cmd
+```
+
+Double-clicking it is enough. It asks which port, then does the half of the
+install that belongs to a machine rather than to a download: finds a Python
+that can run the code (building a `.venv` if the one that travelled with the
+folder can't run here), puts `uniagentcli` on that machine's PATH, registers the
+logon task pointed at wherever the folder now is, starts it, and prints your
+password. Nothing is cloned, nothing is pulled, and your API keys, chats,
+skills and settings are the ones that came with the folder.
+
+`attach.cmd -Remove` unhooks it again and leaves the folder alone.
+
+It is the same script as Linux's `attach.sh`, and `attach.sh` itself hands over
+to it when run under Git Bash on Windows.
 
 ## Linux (one line)
 

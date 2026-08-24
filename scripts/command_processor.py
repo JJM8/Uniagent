@@ -28,10 +28,13 @@ import re
 import threading
 
 import compaction
+import claude_session
 import cron
 import main
 import provider
 import settings
+import tool_validation
+import usage
 import workspace as workspace_mod
 
 HELP = """commands:
@@ -49,13 +52,17 @@ HELP = """commands:
 /temperature - show this chat's temperature, and the default
 /temperature <0-2> - set this chat's temperature (0 = most predictable)
 /temperature default - unpin, follow the settings default temperature
+/usage - tokens and requests spent over the last 30 days, by kind, model and chat
+/usage today|7d|30d|all - the same over a different window
+/usage chat - just the chat you're in (combines with a window)
 /workspace - show where this chat's files and terminal work, and the alternatives
 /workspace <name> - move this chat to that workspace (its id or its name)
 /workspace default - move it back to the default workspace
 /approve y|n - answer this chat's pending safety check
-/cronsafety - show whether each cron job's tool calls are safety-checked
-/cronsafety <job> on|off - check that job's calls, or don't (writes cron.json)
-/cronsafety <job> default - unset it, follow the settings page again
+/cronsafety - show the safety number each cron job's tool calls run at
+/cronsafety <job> 0-10 - the highest danger rating that job runs unasked
+/cronsafety <job> default - unset it, follow the cron default again
+/continue - pick a stopped or failed turn back up where it left off
 /stop - cut this chat's running turn short
 /stop <subagent> - stop just that subagent, leaving this chat's turn alone
 /restart - restart the web server on new code (not available in the terminal)
@@ -194,6 +201,10 @@ def _delete(arg, chat):
         destination = deleted_dir / (base + "-" + str(n))
         n += 1
     chat_folder.rename(destination)
+    # The Claude Code session this chat was holding, if any. It lives in memory
+    # keyed by the chat id, so a delete that left it open would keep a CLI
+    # process alive for a conversation nobody can reach any more.
+    claude_session.close(main.chat_id(path))
     # The stamps go with it. They live outside the chat folder (see
     # main.STAMPS), keyed by the chat's id, and a cron job's run numbers come
     # BACK: delete run 003 and the watcher makes another 003 within 30
@@ -247,6 +258,17 @@ def _compact(arg, chat):
         # chat is untouched either way, since nothing is written until the
         # reply is in hand.
         return "compaction failed - " + type(e).__name__ + ": " + str(e)
+
+
+def _continue(arg, chat):
+    """Only ever reached from the model's own uniagent_command tool. Both front
+    ends take /continue before the table gets near it, because continuing is
+    not a command that answers - it is a turn that starts with no message (see
+    main.CONTINUE). Which also makes it the one command the model cannot
+    usefully run: it is inside a turn already."""
+    return ("/continue picks up a turn that was stopped or that failed, so it "
+            "belongs to the user, not to you - you are in a running turn right "
+            "now. Carry on with what you were doing.")
 
 
 def _stop(arg, chat):
@@ -551,55 +573,206 @@ def _name(arg, chat):
     return "this chat is now titled: " + arg
 
 
+def _num(n):
+    """A token count at a glance. Thousands and millions are shortened because
+    the interesting comparison is between rows, not to the last token - 3.8M
+    against 398k is read in one look where 3812440 against 398210 is not."""
+    n = int(n or 0)
+    if n >= 1_000_000:
+        return format(n / 1_000_000, ".2f").rstrip("0").rstrip(".") + "M"
+    if n >= 1_000:
+        return format(n / 1_000, ".1f").rstrip("0").rstrip(".") + "k"
+    return str(n)
+
+
+def _provenance(counters, side):
+    """The parenthetical that keeps a total honest: how much of it we measured
+    ourselves, and how many requests contributed nothing at all. Empty when
+    every number on that side came from the provider, which is the only case
+    where a bare figure would be the whole truth."""
+    notes = []
+    estimated = counters.get(side + "_est", 0)
+    unknown = counters.get(side + "_unknown", 0)
+    if estimated:
+        notes.append(_num(estimated) + " estimated")
+    if unknown:
+        notes.append(str(unknown) + " request" + ("s" if unknown != 1 else "")
+                     + " unknown")
+    return ("  (" + ", ".join(notes) + ")") if notes else ""
+
+
+def _usage_rows(rows, label_of, limit=8):
+    lines = []
+    for row in rows[:limit]:
+        lines.append("  " + label_of(row).ljust(38)
+                     + str(row["requests"]).rjust(6) + " req"
+                     + _num(row["in"]).rjust(9) + " in"
+                     + _num(row["out"]).rjust(9) + " out")
+    if len(rows) > limit:
+        lines.append("  ... and " + str(len(rows) - limit) + " more")
+    return lines
+
+
+def _usage(arg, chat):
+    """What has been spent, from the ledger usage.py keeps.
+
+    Every request the app makes is written down as it happens - chat turns,
+    the safety check on each tool call, compactions, spoken summaries - so this
+    reads a file rather than asking any provider anything. It costs nothing and
+    works offline.
+
+    Bare, it reports the last 30 days across every chat, then today and this
+    chat as one-liners so the common questions are answered without a second
+    command. '/usage today|7d|30d|all' picks the window, and '/usage chat'
+    narrows to the chat you are in; the two combine in either order.
+
+    Counts are labelled wherever they aren't the provider's own: a model that
+    reports no usage has its tokens measured locally and shown as estimated,
+    and a request that could not be measured at all is counted as unknown
+    rather than as zero. See usage.py on why that is so common - a turn ending
+    in a tool call usually never receives the provider's final usage event."""
+    parts = arg.lower().split()
+    window = "30d"
+    here = False
+    for part in parts:
+        if part in usage.RANGES:
+            window = part
+        elif part in ("chat", "here", "this"):
+            here = True
+        else:
+            return ("/usage [today|7d|30d|all] [chat] - unknown option '" + part
+                    + "'.\n/usage chat reports only the chat you are in.")
+
+    stem = chat.id if (here and chat is not None) else None
+    if here and stem is None:
+        return "no chat here to report on - /usage on its own covers everything."
+    data = usage.summary(window, chat=stem)
+    totals = data["totals"]
+
+    if not totals["requests"]:
+        if data["logging_since"]:
+            return ("no requests recorded in this window (usage has been logged "
+                    "since " + data["logging_since"] + ").")
+        return ("nothing recorded yet. Usage is logged from the moment this "
+                "feature was installed - there is no history from before it, "
+                "and the first request will start the ledger.")
+
+    span = ("today" if window == "today" else
+            "all time" if window == "all" else
+            "last " + window.rstrip("d") + " days")
+    head = "usage - " + span
+    if data["since"] and window != "today":
+        head += " (" + data["since"] + " to " + data["until"] + ")"
+    if stem:
+        head += ", this chat only"
+
+    lines = [head, ""]
+    failed = totals["errors"]
+    lines.append("  requests  " + str(totals["requests"]).rjust(10)
+                 + (("  (" + str(failed) + " failed)") if failed else ""))
+    lines.append("  input     " + _num(totals["in"]).rjust(10) + _provenance(totals, "in"))
+    lines.append("  output    " + _num(totals["out"]).rjust(10) + _provenance(totals, "out"))
+    if totals["cache_read"] or totals["cache_write"]:
+        lines.append("  cached    " + _num(totals["cache_read"]).rjust(10)
+                     + "  read from cache, part of the input above"
+                     + ((", " + _num(totals["cache_write"]) + " written")
+                        if totals["cache_write"] else ""))
+
+    if data["by_kind"]:
+        lines += ["", "by kind:"] + _usage_rows(data["by_kind"],
+                                                lambda r: r["kind"] or "(none)")
+    if data["by_model"]:
+        lines += ["", "by model:"] + _usage_rows(
+            data["by_model"],
+            lambda r: (r["provider"] or "?") + " / " + (r["model"] or "?"))
+    if not stem and data["by_chat"]:
+        lines += ["", "by chat:"] + _usage_rows(data["by_chat"],
+                                                lambda r: r["chat"], limit=5)
+
+    # The two one-liners that save a second command. Skipped when they would
+    # just repeat what is already above - which is why they are collected
+    # first and only then given their blank line: either may be the one that
+    # isn't there.
+    footnotes = []
+    if window != "today" and not stem:
+        today = usage.summary("today")["totals"]
+        footnotes.append("today: " + str(today["requests"]) + " requests, "
+                         + _num(today["in"]) + " in, " + _num(today["out"]) + " out")
+    if not stem and chat is not None:
+        mine = usage.summary(window, chat=chat.id)["totals"]
+        if mine["requests"]:
+            footnotes.append("this chat: " + str(mine["requests"]) + " requests, "
+                             + _num(mine["in"]) + " in, " + _num(mine["out"]) + " out")
+    if footnotes:
+        lines += [""] + footnotes
+
+    lines += ["", "/usage today|7d|30d|all changes the window, /usage chat "
+              "reports just this chat."]
+    return "\n".join(lines)
+
+
 def _cronsafety(arg, chat):
-    """Show or set whether a CRON JOB's tool calls go through the safety check.
+    """Show or set the safety NUMBER a cron job's tool calls run at - the same
+    0-10 scale as the slider in the corner of a chat, and the same meaning: the
+    highest danger rating a call can be given and still run unasked.
 
-    Per job, written as a "safety" field on that job in cron.json -
-    which is the source of truth for everything about a cron job, and is
-    re-read by the watcher every 30 seconds, so a change here lands on the next
-    run with no restart. A job with no field of its own follows the settings
-    page's safety_validation, exactly as every job did before this existed.
+    Per job, written as a "safety" field on that job in cron.json - which is the
+    source of truth for everything about a cron job, and is re-read by the
+    watcher every 30 seconds, so a change here lands on the next run with no
+    restart. A job with no number of its own follows the settings page's cron
+    default.
 
-    Bare, lists every job with its state and where that state came from. The
-    per-job safety PROMPT (a "safety_prompt" field) isn't editable from here -
-    write it in cron.json or the settings page's cron tab. This does say which
-    jobs have one.
+    Bare, lists every job with its number and where that number came from. The
+    per-job WORDS aren't editable from here - a job's own "safety_extra", and the
+    task the check is told about, live in cron.json and the safety tab. This does
+    say which jobs have added something of their own.
 
-    Turning the check off matters more for a cron job than for a chat: no one
-    is watching at 03:00, and the watcher answers a flagged call by denying it,
-    so `off` means that job runs whatever it decides to run, unattended."""
+    The number bites harder here than in a chat: no one is watching at 03:00, and
+    the watcher answers a flagged call by denying it, so a number set too low is
+    a job that quietly doesn't finish and """ + str(settings.SAFETY_MAX) + """ is
+    a job that runs whatever it decides to, unattended."""
     parts = arg.split()
     jobs = cron._load_jobs()
-    default = settings.load()["safety_validation"]
+    chosen = settings.load()
+    default = tool_validation.threshold_for(
+        chosen=chosen, default_key="cron_safety_threshold")
 
     if not parts:
         if not jobs:
             return "no cron jobs in " + str(cron.CRON_FILE) + " yet."
         lines = []
         for job in sorted(jobs, key=lambda j: j["name"]):
-            if job["safety"] is None:
-                state = ("on" if default else "off") + " (following the settings page)"
-            else:
-                state = ("on" if job["safety"] else "off") + " (set in cron.json)"
+            state = str(job["safety"]) + " - " + tool_validation.says(job["safety"]) + (
+                " (set in cron.json)" if job["safety_own"]
+                else " (following the cron default)")
+            if job["safety_extra"]:
+                state += ", own rules"
             if job["safety_prompt"]:
                 state += ", own prompt"
             lines.append("  " + job["name"] + " - " + state)
-        return ("safety checks on cron jobs:\n" + "\n".join(lines)
-                + "\n\ndefault (settings page): " + ("on" if default else "off")
-                + "\nset one with /cronsafety <job> on|off, or 'default' to unset it."
-                + "\ngive a job its own, gentler check with a safety_prompt "
-                "field in cron.json (it must contain {call}).")
+        return ("safety numbers on cron jobs:\n" + "\n".join(lines)
+                + "\n\ncron default (settings > safety): " + str(default)
+                + "\nset one with /cronsafety <job> 0-" + str(settings.SAFETY_MAX)
+                + ", or 'default' to unset it."
+                + "\nthe check is told what each job was asked to do, and a job can "
+                "add rules of its own with a safety_extra field in cron.json.")
 
     if len(parts) != 2:
-        return "usage: /cronsafety <job> on|off|default   (bare, it lists every job)"
+        return ("usage: /cronsafety <job> 0-" + str(settings.SAFETY_MAX)
+                + "|default   (bare, it lists every job)")
 
     name, word = parts[0], parts[1].lower()
     if word in ("default", "clear", "unpin"):
         value = None
-    elif word in cron._SAFETY_WORDS:
-        value = cron._SAFETY_WORDS[word]
     else:
-        return "usage: /cronsafety " + name + " on|off|default"
+        try:
+            value = int(word)
+        except ValueError:
+            return ("usage: /cronsafety " + name + " 0-"
+                    + str(settings.SAFETY_MAX) + "|default")
+        if not settings.SAFETY_MIN <= value <= settings.SAFETY_MAX:
+            return ("a safety number has to be from " + str(settings.SAFETY_MIN)
+                    + " to " + str(settings.SAFETY_MAX) + ".")
 
     error = cron.set_job_safety(name, value)
     if error:
@@ -607,12 +780,14 @@ def _cronsafety(arg, chat):
         return error + ".\njobs: " + known
 
     if value is None:
-        return ("'" + name + "' now follows the settings page: safety checks "
-                + ("on" if default else "off") + ".")
-    if value:
-        return "'" + name + "' now has its tool calls safety-checked."
-    return ("'" + name + "' now runs its tool calls WITHOUT the safety check - "
-            "unattended, with no human to deny anything.")
+        return ("'" + name + "' now follows the cron default: safety "
+                + str(default) + " - " + tool_validation.says(default) + ".")
+    if value >= settings.SAFETY_MAX:
+        return ("'" + name + "' now runs its tool calls WITHOUT the safety check - "
+                "unattended, with nothing vetting what it does.")
+    return ("'" + name + "' now runs at safety " + str(value) + " - "
+            + tool_validation.says(value) + ". Anything rated higher is denied, not asked about, "
+            "since nobody is there to ask.")
 
 
 def _restart(arg, chat):
@@ -648,9 +823,11 @@ COMMANDS = {
     "model": _model,
     "name": _name,
     "temperature": _temperature,
+    "usage": _usage,
     "workspace": _workspace,
     "approve": _approve,
     "cronsafety": _cronsafety,
+    "continue": _continue,
     "stop": _stop,
     "delete": _delete,
     "restart": _restart,

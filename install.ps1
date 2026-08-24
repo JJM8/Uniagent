@@ -10,14 +10,22 @@
 #   3. makes a venv and installs the Python dependencies (voice extras are
 #      best-effort; the browser microphone works without them)
 #   4. writes .env from .env.example if it does not exist yet
-#   5. puts a `uniagentcli` command on your PATH
-#   6. installs a scheduled task so the server and cron watcher start at every
-#      logon, and starts them right now
-#   7. waits for the server to answer, then opens https://localhost:8764 and
-#      prints the password
+#   5. asks the three first-run questions - a password, a port, and one provider
+#      to talk to (scripts\setup_wizard.py, the same three install.sh asks)
+#   6. hands over to attach.ps1, which puts `uniagentcli` on your PATH, installs
+#      the logon task, starts the server and the cron watcher, waits for the
+#      server to answer and prints the password
+#   7. adds a firewall rule if elevated, and opens the web UI
+#
+# Steps 5 and 6 are where this used to differ from install.sh, and it mattered:
+# Windows never asked the first-run questions, so an install finished with a
+# password nobody had been shown and no provider configured. Both scripts now
+# ask the same questions and end in the same place.
 #
 # Nothing here needs administrator rights: every fallback installs per-user.
-# Running elevated only adds the firewall rule in step 8.
+# Running elevated only adds the firewall rule.
+#
+# To uninstall: attach.ps1 -Remove, then delete the folder.
 #
 # Works when piped straight in with `irm | iex`, or run as a downloaded file.
 # Note that it must not use $PSScriptRoot or $MyInvocation - both are empty when
@@ -36,6 +44,9 @@ $Repo      = "https://github.com/JJM8/Uniagent.git"
 $Root      = if ($env:UNIAGENT_HOME) { $env:UNIAGENT_HOME } else { Join-Path $HOME "Uniagent" }
 $ToolsDir  = Join-Path $env:LOCALAPPDATA "Uniagent\tools"
 $PyVersion = "3.12.10"
+# Only the fallback. The real one is read out of .env after the setup wizard has
+# had its say, the same way install.sh does it - otherwise every message below
+# names a port the server is not actually listening on.
 $Port      = 8764
 
 function Step($msg) {
@@ -206,18 +217,9 @@ function Install-Git {
     Write-Host "  git installed to $dir"
 }
 
-function Get-EnvPassword($envFile) {
-    # Same read auth.py does: first non-blank UNIAGENT_PASSWORD line, quotes off.
-    if (-not (Test-Path $envFile)) { return $null }
-    foreach ($line in (Get-Content $envFile -ErrorAction SilentlyContinue)) {
-        $t = $line.Trim()
-        if ($t.StartsWith("UNIAGENT_PASSWORD=")) {
-            $v = $t.Substring("UNIAGENT_PASSWORD=".Length).Trim().Trim('"').Trim("'")
-            if ($v) { return $v }
-        }
-    }
-    return $null
-}
+# Reading the password back out of .env is attach.ps1's job now, since that is
+# the script that starts the server and so the one that knows when there is a
+# password to read.
 
 function Test-ServerUp($port) {
     $client = New-Object Net.Sockets.TcpClient
@@ -304,28 +306,27 @@ if (-not (Test-Path $envFile)) {
     Write-Host "Found an existing .env - leaving it alone."
 }
 
-# --- 6. CLI on PATH --------------------------------------------------------
-Step "Installing the 'uniagentcli' command..."
-$binDir = Join-Path $Root "bin"
-New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-Copy-Item (Join-Path $Root "scripts\uniagentcli.cmd") (Join-Path $binDir "uniagentcli.cmd") -Force
-if (Add-ToUserPath $binDir) {
-    Write-Host "Added $binDir to your user PATH. Open a NEW terminal to use 'uniagentcli'."
-} else {
-    Write-Host "'uniagentcli' is already on your PATH."
+# --- 6. first-run questions ------------------------------------------------
+# Before anything starts, not after: the wizard sets the password and the port,
+# and both have to be settled before the server reads them. Exactly what
+# install.sh does at this point, with the same script.
+Step "First-run setup..."
+& $venvPy (Join-Path $Root "scripts\setup_wizard.py")
+if ($LASTEXITCODE -ne 0) {
+    Write-Host ("Setup did not finish - run it again whenever you like with:`n" +
+                "  `"$venvPy`" `"$Root\scripts\setup_wizard.py`"") -ForegroundColor Yellow
 }
 
-# --- 7. autostart ----------------------------------------------------------
-Step "Setting up autostart (server + cron watcher start at every logon)..."
+# Whatever the wizard settled on. Read back from .env rather than remembered, so
+# this is right whether the wizard ran, was skipped, or the file already had a
+# port in it.
 try {
-    & (Join-Path $Root "scripts\install-autostart.ps1") -Install
-} catch {
-    Fail ("Could not register the scheduled task: $($_.Exception.Message)`n" +
-          "Everything else is installed. Start Uniagent by hand with:`n" +
-          "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$Root\scripts\run-server.ps1`"")
-}
+    $Port = [int](& $venvPy -c "import sys; sys.path.insert(0, sys.argv[1]); import provider; print(provider.port('UNIAGENT_HTTPS_PORT', 8764))" (Join-Path $Root "scripts"))
+} catch { }
 
-# --- 8. firewall (only helps if we're elevated) ----------------------------
+# --- 7. firewall (only helps if we're elevated) ----------------------------
+# Before the server starts rather than after, so the rule is already there the
+# first time it binds and Windows has no reason to pop its own dialog.
 if (Test-IsAdmin) {
     try {
         New-NetFirewallRule -DisplayName "Uniagent (port $Port)" -Direction Inbound `
@@ -339,44 +340,31 @@ if (Test-IsAdmin) {
     Write-Host "Not elevated - Windows will ask to allow Uniagent through the firewall on first start. Click 'Allow'."
 }
 
-# --- 9. wait for the server, then show the password ------------------------
-Step "Waiting for the server to come up..."
-# The password is read from .env rather than scraped out of the log: auth.py
-# writes the one it generates straight into .env, so this covers a fresh install
-# and a re-install over an .env that already had one, with no parsing to get
-# wrong. Waiting on the port as well means we only claim it is running when it is.
-$logFile  = Join-Path $Root "logs\server.out.log"
-$deadline = (Get-Date).AddSeconds(90)
-$pass     = $null
-$up       = $false
-while ((Get-Date) -lt $deadline) {
-    if (-not $up)   { $up = Test-ServerUp $Port }
-    if (-not $pass) { $pass = Get-EnvPassword $envFile }
-    if ($up -and $pass) { break }
-    Start-Sleep -Seconds 2
+# --- 8. CLI on PATH, autostart, and start it -------------------------------
+# attach.ps1 is the half of this that belongs to the machine rather than to the
+# download, and it is the same script someone runs by hand after moving the
+# folder to a new PC. -Port so it does not ask the port question the wizard has
+# just asked.
+Step "Installing the command, the logon task, and starting Uniagent..."
+try {
+    & (Join-Path $Root "attach.ps1") -Port $Port
+} catch {
+    Fail ("Could not finish the install: $($_.Exception.Message)`n" +
+          "Everything is downloaded. Start Uniagent by hand with:`n" +
+          "  powershell -NoProfile -ExecutionPolicy Bypass -File `"$Root\scripts\run-server.ps1`"")
 }
 
-Write-Host ""
-if ($up -and $pass) {
-    Write-Host "==========================================================" -ForegroundColor Green
-    Write-Host "  Uniagent is running." -ForegroundColor Green
-    Write-Host "  Password:  $pass" -ForegroundColor Green
-    Write-Host "  (it lives in $envFile as UNIAGENT_PASSWORD)" -ForegroundColor DarkGray
-    Write-Host "==========================================================" -ForegroundColor Green
-} elseif ($up) {
-    Write-Host "Uniagent is running, but no password turned up in $envFile." -ForegroundColor Yellow
-    Write-Host "Look for it in $logFile" -ForegroundColor Yellow
-} else {
-    Write-Host "The server has not answered on port $Port yet." -ForegroundColor Yellow
-    Write-Host "It may still be starting. Check $logFile and logs\server.err.log," -ForegroundColor Yellow
-    Write-Host "or start it by hand with: schtasks /Run /TN Uniagent" -ForegroundColor Yellow
-}
+# --- 9. done ---------------------------------------------------------------
+# attach.ps1 has already waited for the server, printed the password and listed
+# the day-to-day commands. Only the things that belong to a DOWNLOAD rather than
+# to this machine are left to say.
+$up = Test-ServerUp $Port
 
 Write-Host ""
 Write-Host "Install complete:" -ForegroundColor Green
-Write-Host "  Web UI:      https://localhost:$Port   (from any device: https://<this-pc-ip>:$Port)"
-Write-Host "  CLI:         uniagentcli `"a question`"   (new terminal)"
-Write-Host "  Update:      powershell -ExecutionPolicy Bypass -File `"$Root\scripts\update.ps1`""
-Write-Host "  Uninstall:   powershell -ExecutionPolicy Bypass -File `"$Root\scripts\install-autostart.ps1`" -Remove"
-Write-Host "               then delete $Root (and $ToolsDir if the installer put git there)" -ForegroundColor DarkGray
+Write-Host "  Installed to: $Root"
+Write-Host "  Update:       powershell -ExecutionPolicy Bypass -File `"$Root\scripts\update.ps1`""
+Write-Host "                (or the 'update now' button on the settings page)"
+Write-Host "  Uninstall:    powershell -ExecutionPolicy Bypass -File `"$Root\attach.ps1`" -Remove"
+Write-Host "                then delete $Root (and $ToolsDir if the installer put git there)" -ForegroundColor DarkGray
 if ($up) { try { Start-Process "https://localhost:$Port" } catch { } }

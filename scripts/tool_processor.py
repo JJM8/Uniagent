@@ -14,6 +14,16 @@ import provider
 import turnctx
 import workspace
 
+# Guarded, and mcp_client is guarded again at the point of use below. This
+# module failing to import takes the whole agent down with it, and MCP is an
+# optional extra whose SDK a given install may simply not have - the same
+# reasoning that makes one unreachable server a skipped tool rather than a
+# crash (see mcp_client's own module docstring).
+try:
+    import mcp_client
+except Exception:
+    mcp_client = None
+
 TOOLS_DIR = Path(__file__).parent.parent / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
@@ -74,7 +84,7 @@ def _read_skill(path, root=None):
     using it - which is what read_skill already says. It gets listed like any
     other tool, and its markdown body is what read_skill hands back."""
     try:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return None
     m = _FRONT.match(text)
@@ -193,6 +203,24 @@ def load_tools():
     taken = {t["name"] for t in tools}
     tools.extend(s for s in find_skills() if s["name"] not in taken)
 
+    # Then the MCP servers that mcp.json asked to be flattened, which arrive
+    # already in this shape - name, description, schema and a run() that calls
+    # the server. They come from a live catalogue rather than from disk, so
+    # they are the one kind of tool here whose membership can change without
+    # any file changing: a server that drops out simply stops contributing on
+    # the next turn, which is why this is rebuilt every turn like the rest.
+    #
+    # Reading the cache only, never dialling - see flattened(). A failure here
+    # is reported like a broken tool file instead of being raised: MCP going
+    # wrong must not cost the model the twenty tools that have nothing to do
+    # with it.
+    if mcp_client is not None:
+        try:
+            taken = {t["name"] for t in tools}
+            tools.extend(e for e in mcp_client.flattened() if e["name"] not in taken)
+        except Exception as e:
+            broken.append("MCP tools - " + type(e).__name__ + ": " + str(e))
+
     # Published only now that both lists are complete.
     TOOLS = tools
     BROKEN = broken
@@ -278,7 +306,7 @@ def inventory():
     for enabled, root in ((True, TOOLS_DIR), (False, DISABLED_TOOLS)):
         for path in _tool_files(root):
             try:
-                meta = source_meta(path.read_text())
+                meta = source_meta(path.read_text(encoding="utf-8"))
             except OSError:
                 meta = {}
             stem = path.stem
@@ -639,9 +667,47 @@ def looks_like_call(text):
 
     Checked on the UNFENCED text only: something call-shaped sitting inside a
     ``` block (a tool's source quoted back, a pinned skill's content) was
-    never an attempt, so it must not even trip the nudge."""
+    never an attempt, so it must not even trip the nudge.
+
+    Deliberately strict about what counts, because several tools are named
+    after ordinary English words - email, terminal, input, printing, cron,
+    firefox - and a reply is allowed to use those words in a sentence. Two
+    things have to hold, and prose fails both:
+
+      no space before the "(" - a model writing a call writes email({...}),
+      never "email (...)", while English puts a space before a parenthesis;
+
+      and the bracket has to open like ARGUMENTS - empty, a JSON object or
+      list, a quoted string, a name= keyword, or a single unspaced token -
+      rather than like an aside, which is words with spaces between them.
+
+    So "Check your email (Gmail, mail.com)" is left alone and email({"to":
+    ...}) still gets caught. Erring towards missing one is right: a missed
+    nudge costs a turn, while a false one interrupts an answer that was
+    perfectly good and tells the model off for something it never did."""
     text = unfenced(text)
-    return any(re.search(r"\b" + re.escape(t["name"]) + r"\s*\(", text) for t in TOOLS)
+    for t in TOOLS:
+        for m in re.finditer(r"\b" + re.escape(t["name"]) + r"\(", text):
+            if _args_shaped(text[m.end():]):
+                return True
+    return False
+
+
+# What sits just inside the bracket of a real written-out call: nothing at all,
+# JSON, a quoted string, a keyword argument, or one unspaced value.
+_ARGS_SHAPED = re.compile(r"""\s*(?:
+      \)                          # name() - no arguments
+    | [{\[]                       # name({...}) / name([...])
+    | ["']                       # name("...")
+    | [A-Za-z_][\w-]*\s*=         # name(query=...)
+    | [^\s()]+\s*\)               # name(value) - one token, no spaces
+)""", re.VERBOSE)
+
+
+def _args_shaped(after):
+    """True if the text right after a "name(" opens the way an argument list
+    does rather than the way an English aside does."""
+    return bool(_ARGS_SHAPED.match(after))
 
 
 def _find(name):
@@ -677,6 +743,17 @@ def process(call, chat_id=None, workspace_id=None):
         # Might be one the agent just wrote, so re-read the folder and retry.
         load_tools()
         t = _find(call["tool"])
+    if t is None and call["tool"].startswith(getattr(mcp_client, "NAME_PREFIX", "mcp__")):
+        # An MCP tool that was attached earlier in this conversation and isn't
+        # now: its server has dropped out since. Say that, instead of listing
+        # thirty tool names and leaving the model to work out for itself that
+        # the one it wants used to be there.
+        rest = call["tool"].split("__", 2)
+        server = rest[1] if len(rest) > 2 else call["tool"]
+        return ("ERROR: " + call["tool"] + " is not available - the \"" + server
+                + "\" MCP server is not connected right now. Use the mcp tool "
+                  "with action \"reconnect\" and server \"" + server
+                + "\", then try this again.")
     if t is None:
         known = ", ".join(x["name"] for x in TOOLS)
         msg = "ERROR: there is no tool called " + call["tool"] + ". You have: " + known

@@ -18,7 +18,7 @@ and the providers travelled with the folder, the port is the only thing that
 belongs to the machine.
 
 NOTHING HERE IS A SECOND SOURCE OF TRUTH. The wire list comes from
-provider.WIRES, whether a wire wants a key from provider.wants_key(), what its
+provider.wire_names(), whether a wire wants a key from provider.wants_key(), what its
 URL box is called from provider.base_url_label(), and the provider object is
 created by provider.save_custom_provider() - the same call the settings page
 makes. Adding a wire (openrouter, say) is an edit to provider.py and nothing
@@ -34,6 +34,7 @@ from pathlib import Path
 # imports below - the installer calls this by absolute path from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _term
 import auth
 import provider
 from cli_md import ACCENT, BOLD, DIM, MUTE, POP, RED, RESET, TEXT
@@ -58,7 +59,10 @@ def _open_tty():
     """
     for name in ("/dev/tty", "CONIN$"):        # POSIX, then the Windows console
         try:
-            return open(name, "r")
+            # errors="replace" because this is somebody typing: an accented
+            # character pasted into an API key must not end the install with a
+            # traceback.
+            return open(name, "r", encoding="utf-8", errors="replace")
         except OSError:
             continue
     return sys.stdin if sys.stdin and sys.stdin.isatty() else None
@@ -77,20 +81,11 @@ def ask(question, default="", secret=False):
     sys.stdout.write(TEXT + "  " + question + hint + DIM + " > " + RESET)
     sys.stdout.flush()
     if secret:
-        try:
-            import termios
-            fd = TTY.fileno()
-            saved = termios.tcgetattr(fd)
-            new = termios.tcgetattr(fd)
-            new[3] &= ~termios.ECHO                     # index 3 is lflags
-            termios.tcsetattr(fd, termios.TCSADRAIN, new)
-            try:
-                answer = TTY.readline()
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, saved)
-            print()                                     # the Enter that wasn't echoed
-        except Exception:
-            answer = TTY.readline()                     # no echo control - carry on visibly
+        # _term.read_hidden knows how to turn the echo off on both platforms -
+        # termios on POSIX, the console API on Windows - and falls back to
+        # reading visibly wherever it cannot, since a question that cannot be
+        # answered is worse than one answered in public.
+        answer = _term.read_hidden(TTY)
     else:
         answer = TTY.readline()
     if not answer:
@@ -149,10 +144,17 @@ def step_password():
 
 def _port_free(number):
     """Whether we could actually bind that port right now. Cheap, and it turns
-    'it silently failed to start' into a question asked before it happens."""
+    'it silently failed to start' into a question asked before it happens.
+
+    SO_REUSEADDR only on POSIX, where it means "don't refuse this because the
+    last socket here is still in TIME_WAIT". On Windows the same option means
+    something else entirely - it lets a second socket bind a port another
+    process is ALREADY listening on - so setting it there makes this answer
+    "free" for every port on the machine, which is worse than not asking."""
     import socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if os.name != "nt":
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("0.0.0.0", number))
             return True
@@ -210,10 +212,11 @@ def step_provider():
     else:
         note("Uniagent ships with no providers - it needs one to answer you at all.")
 
-    # Straight from provider.WIRES, so a wire added later is simply here.
-    wires = sorted(provider.WIRES)
+    # Straight from wires.json, shipped wires first, so a wire added later -
+    # by an update or by hand - is simply here with nothing to change.
+    choices = provider.wire_names()
     print()
-    for i, wire in enumerate(wires, 1):
+    for i, wire in enumerate(choices, 1):
         label = provider.wire_label(wire)
         extra = "" if label == wire else DIM + "  " + label + RESET
         print("    " + ACCENT + str(i) + RESET + ". " + TEXT + wire + RESET + extra)
@@ -227,11 +230,11 @@ def step_provider():
             return
         # A name is accepted as readily as a number - typing "openai" is the
         # obvious thing to do and refusing it would be pedantry.
-        if choice.strip().lower() in wires:
+        if choice.strip().lower() in choices:
             wire = choice.strip().lower()
             break
         try:
-            wire = wires[int(choice) - 1]
+            wire = choices[int(choice) - 1]
             break
         except (ValueError, IndexError):
             bad("Pick a number from the list, or type the wire's name.")
@@ -254,7 +257,7 @@ def step_provider():
     base_url = ""
     label = provider.base_url_label(wire)
     if label:
-        default_url = provider.WIRE_DEFAULT_URL.get(wire, "")
+        default_url = provider.wire_default_url(wire)
         base_url = ask(label.capitalize(), default_url)
         if base_url == default_url:
             base_url = ""      # saved blank means "follow the wire's default"
@@ -271,6 +274,12 @@ def step_provider():
 
 def main(argv=None):
     global TTY
+
+    # This whole wizard is colour codes and a box-drawing heading. Windows
+    # consoles print those as literal gibberish until asked not to, and the
+    # password it generates has to be readable - it is the only time the user
+    # is shown it.
+    _term.setup_console()
 
     # --port-only is attach.sh's entry point: that script sets up a folder that
     # has already been through this wizard somewhere else, so the password and

@@ -48,6 +48,18 @@ cron.json
 # The watcher's per-job last-run bookkeeping
 cron_state.json
 
+# Wires you have written or overridden - the shape of an API, as data. What
+# ships is defaults/wires.json, and this file is merged OVER it key by key, so
+# it holds only what you changed. That split is why it can be ignored safely:
+# an update keeps fixing the shipped wires underneath your overrides. See
+# scripts/wires.py.
+#
+# Anchored with a leading slash, like /context/ and /memories/ above and for
+# exactly the same reason: an unanchored "wires.json" matches at any depth and
+# would take defaults/wires.json - the one copy that has to stay in the repo -
+# down with it.
+/wires.json
+
 # MCP servers - paths into your other projects, and the place an auth token
 # would sit. mcp.example.json is the documented one.
 mcp.json
@@ -95,8 +107,18 @@ update_state.json
 # whenever it goes stale, and about this install's checkout. See server.py.
 update_check.json
 
-# Logs.
+# What this install has spent: one appended line per API request, sharded by
+# month. Yours, and nobody else's business - it names your chats, your models
+# and your working hours. See scripts/usage.py, /usage and the settings page's
+# usage tab.
+usage/
+
+# Logs. logs/ is where the Windows supervisor (run-server.ps1) sends the
+# server's and the cron watcher's output, and where both write the pid file
+# that lets an update find them - see scripts/service.py.
 *.log
+logs/
+*.pid
 nohup.out
 scripts/nohup.out
 
@@ -115,6 +137,21 @@ august-uniagent-todo.md
 # ours to republish.
 stickfight/
 sky-strike.html
+
+# Personal files that live here but are not Uniagent's to publish - CV, job
+# search captures, shopping list, scratch chat tests.
+cv-joshua-mcgill.html
+cv-joshua-mcgill.pdf
+indeed_brackley.txt
+jooble_banbury.txt
+totaljobs_brackley.txt
+shopping-list.html
+qwen_stats.html
+toks_per_second_demo.html
+chat-evtest1
+chat-evtest2
+chat-gaptest
+chat-livetest
 # The Quest 3 headset's keyboard backend. It hands typed text to Uniagent over
 # HTTP, but it is its own thing with its own Unity frontend - not part of this.
 quest3-os/
@@ -127,3 +164,10 @@ scripts/.edagent
 
 # Dead code and old drafts kept around locally - not part of the project
 unused/
+
+# Wake word models. The folder is tracked so the app has somewhere to look;
+# what goes in it is not - they are a few hundred KB to a megabyte each, they
+# are downloaded rather than written here, and which one you use is a choice
+# about your house rather than about this project. See docs/wake-word.md.
+models/wake/*
+!models/wake/.gitkeep

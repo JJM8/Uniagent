@@ -42,10 +42,7 @@ import re
 import sys
 import json
 import time
-import errno
-import select
-import signal
-import _term as termios  # no-op stand-in on Windows; the real thing elsewhere
+import _term as termios  # every terminal difference between platforms, in one file
 import threading
 from pathlib import Path
 
@@ -56,6 +53,7 @@ import command_processor
 import tool_processor
 import tool_validation
 import cli_md as md
+import timing
 from cli_md import (RESET, BOLD, NOBOLD, ITAL, TEXT, DIM, ACCENT, MUTE, RED,
                     BORDER, bg, fg, vlen, C)
 
@@ -545,11 +543,81 @@ class Stream:
         self.held = ""       # complete lines withheld as a suspected tool call
         self.holding = False
         self.wrote = False
+        # The model's own thinking as it arrives, and where the last committed
+        # line of it ended. Kept here rather than pushed straight to the screen
+        # because it arrives in fragments that are not lines: a reasoning
+        # stream sends " the", " user", " wants" and committing each of those
+        # would put one word per row.
+        self.thinking = ""
+        self.thought = 0     # characters of it already on screen
+        self.thinking_from = None   # when the first reasoning fragment landed
+        self.thought_spent = None   # that stream's numbers, known when it ended
+        self.spent = None    # the last response's timing, printed by flush()
+        # The request this response is answering, and whether the wait for it
+        # has been reported yet. Measured here rather than taken off the
+        # server's own figure because the terminal IS that process - the two
+        # readings are the same clock - and this one is available at the moment
+        # the wait ends, where the server's does not arrive until the whole
+        # response is over.
+        self.asked = None
+        self.said_wait = False
         self.console.set_tail([DIM + "…" + RESET])
+
+    def requested(self):
+        """A request has gone out. Everything after this until the first token
+        is latency - the model queued, or a long prompt being processed - and
+        on a local server it is regularly the longest part of a turn. Saying so
+        is the difference between a terminal that is working and one that has
+        hung."""
+        self.asked = timing.now()
+        self.said_wait = False
+        self.console.set_tail([DIM + "  waiting for the model…" + RESET])
+
+    def _token(self):
+        """The first token of this response, on whichever stream. Reports the
+        wait, once."""
+        if self.said_wait or self.asked is None:
+            return
+        self.said_wait = True
+        words = timing.waited({"latency": timing.ms(self.asked)})
+        if words:
+            self.console.update(commit=[MUTE + "  " + DIM + words + RESET], tail=[])
+
+    def thought(self, spent):
+        """The thinking stream's finished numbers, handed over at the moment it
+        ended. Held for _end_thinking below, which is about to run: the same
+        first token of the reply produces both, this one first."""
+        self.thought_spent = spent
+
+    def _end_thinking(self):
+        """Close the thinking block off, because the reply has started.
+
+        Here, at the first word of the answer, rather than when the response
+        finishes - "thinking" has to stop saying thinking the moment it stops
+        being true, or the block sits there in the present tense for the whole
+        length of the reply.
+
+        The line carries the rate as well as the duration, because both are
+        known by now: the server counts the thinking as that stream closes
+        rather than waiting for the provider's final usage event (see
+        main._stream's thinking_done). Only if that never arrived does this
+        fall back to the terminal's own reading of the clock, which is honest
+        about the duration and silent about the speed."""
+        if not self.thinking:
+            return
+        rest = self.thinking[self.thought:].rstrip()
+        done = [MUTE + "  │ " + DIM + ITAL + rest + RESET] if rest else []
+        spent = self.thought_spent or {"think": timing.ms(self.thinking_from)}
+        done.append(MUTE + "  └ " + DIM + timing.thought(spent) + RESET)
+        self.console.update(commit=done, tail=[])
+        self.thinking, self.thought, self.thinking_from = "", 0, None
+        self.thought_spent = None
 
     def __call__(self, chunk):
         if not chunk:
             return
+        self._token()
+        self._end_thinking()
         self.pending += chunk
         done = []
         while "\n" in self.pending:
@@ -568,15 +636,91 @@ class Stream:
         self.wrote = self.wrote or bool(done)
         self.console.update(commit=done, tail=tail)
 
+    def reasoning(self, text):
+        """A fragment of the model's thinking, shown as it is written.
+
+        Committed line by line and dimmed, above the reply, rather than held
+        back and printed as a block at the end. The whole value of watching a
+        thinking model is watching it: a local reasoning model can spend forty
+        seconds here, and forty seconds of a blank terminal is indistinguishable
+        from a hang. The unfinished trailing fragment sits in the tail, so a
+        sentence appears as it is written rather than a word per row.
+
+        The reply itself is untouched by any of this - thinking arrives on its
+        own callback (main.run's on_reasoning) and never through on_text, so
+        there is nothing here to filter back out of the answer."""
+        if not text:
+            return
+        self._token()
+        if self.thinking_from is None:
+            self.thinking_from = timing.now()
+        self.thinking += text
+        done = []
+        while "\n" in self.thinking[self.thought:]:
+            cut = self.thinking.index("\n", self.thought)
+            done.append(MUTE + "  │ " + DIM + ITAL
+                        + self.thinking[self.thought:cut].rstrip() + RESET)
+            self.thought = cut + 1
+        tail = self.thinking[self.thought:]
+        self.console.update(
+            commit=done,
+            tail=[MUTE + "  │ " + DIM + ITAL + tail[-md.width() + 6:] + RESET]
+            if tail.strip() else [DIM + "  thinking…" + RESET])
+
+    def measured(self, spent):
+        """This response's numbers, once it is complete.
+
+        One dim line under the reply - the same total and rate the web UI puts
+        under a bubble, plus the phase breakdown, which a terminal has room for
+        and no hover to hide it behind.
+
+        Held rather than printed, because at this point the response's own last
+        lines are not on screen yet: run() announces the timing the moment the
+        stream closes and only then decides whether what it read was a tool
+        call or the answer. Whichever it turns out to be prints this first -
+        tool_call() before the call block, flush() at the end of the turn - so
+        every message of a multi-call turn wears its own numbers instead of the
+        turn wearing only the last one's."""
+        self.spent = spent
+        # A backstop for the response that thought and then said nothing at
+        # all. Normally the first word of the reply closes the block (see
+        # _end_thinking), and on a turn that ends in a tool call that word is
+        # the call being typed - but a response that produced neither would
+        # otherwise leave the block hanging open.
+        self._end_thinking()
+
+    def _took(self):
+        """The held timing as lines, and forget it. [] when there is none."""
+        if not self.spent:
+            return []
+        line = timing.summary(self.spent)
+        detail = timing.detail(self.spent)
+        if detail:
+            line += "   (" + detail + ")"
+        self.spent = None
+        return [MUTE + "  " + line + RESET] if line.strip() else []
+
     def tool_call(self, shown):
         raw = (self.held + self.pending).strip() or shown
         self.held, self.pending, self.holding = "", "", False
         self.md = md.Renderer()  # a fence cannot span a tool call
         self.wrote = True
-        self.console.update(commit=[""] + _call_block(raw), tail=[])
+        self.console.update(commit=self._took() + [""] + _call_block(raw), tail=[])
 
-    def tool_result(self, result):
-        self._commit(_result_block(result) + [""])
+    def tool_result(self, result, name=None, spent=None):
+        # `name` is which call this answered. Accepted and unused: the terminal
+        # prints results in the order they happen directly under the call that
+        # made them, so there is nothing here for it to disambiguate - it is
+        # taken so that a caller which knows the name can always say so.
+        #
+        # `spent` is how long the call took ({"ms": n}), which is worth a line
+        # for the same reason it is worth a label in the web UI: a turn that
+        # felt slow is as likely to have been a 40-second fetch as a slow
+        # model, and the result block is where you go to find out.
+        took = timing.human((spent or {}).get("ms"))
+        self._commit(_result_block(result)
+                     + ([MUTE + "  └ " + DIM + took + RESET] if took else [])
+                     + [""])
 
     def safety(self, safe, reason, checked=True):
         # Only a flagged call is worth a line here. `checked` False is the gate
@@ -586,7 +730,11 @@ class Stream:
         if checked and not safe:
             self._commit([RED + "  ⚠ " + reason.strip() + RESET])
 
-    def flush(self):
+    def flush(self, quiet=False):
+        """`quiet` drops the "(no reply)" placeholder. It is for the failed
+        turn: an error line is about to be printed saying exactly why nothing
+        arrived, and "(no reply)" directly above it is the same news, told
+        worse."""
         rest = (self.held + self.pending).rstrip("\n")
         self.held = self.pending = ""
         self.holding = False
@@ -602,8 +750,13 @@ class Stream:
         done += self.md.flush()
         if done:
             self.wrote = True
-        elif not self.wrote:
+        elif not self.wrote and not quiet:
             done = [DIM + "(no reply)" + RESET]
+        # What the reply cost, under it. The full breakdown rather than the web
+        # UI's summary-plus-hover: a terminal has the width for it and no hover
+        # to put the rest behind, and this is the one line that answers "why
+        # did that take so long" without another request.
+        done = done + self._took()
         self.console.update(commit=done, tail=[])
 
     def _commit(self, lines):
@@ -721,7 +874,8 @@ def _chat_label(path):
     """What to call a chat in the picker: its own /name if it has one, else the
     first thing actually typed into it, which is what the web's sidebar shows."""
     try:
-        name = json.loads((path.parent / main.SETTINGS_FILE).read_text()).get("name")
+        name = json.loads((path.parent / main.SETTINGS_FILE)
+                          .read_text(encoding="utf-8")).get("name")
         if name:
             return name
     except (OSError, json.JSONDecodeError, AttributeError):
@@ -825,14 +979,32 @@ def transcript(chat, keep=30):
                 continue
             out += user_line(said) + [""]
         elif role == "tool":
-            out += _result_block(content) + [""]
+            took = timing.human((t.get("timing") or {}).get("ms"))
+            out += _result_block(content)
+            if took:
+                out += [MUTE + "  └ " + DIM + took + RESET]
+            out += [""]
         elif role == "assistant":
+            # What it thought on the way, before what it said - one folded line
+            # rather than the reasoning itself. The full text is on the turn
+            # (reasoning_content) and the web UI opens it; a redrawn terminal
+            # transcript is for finding your place, and a page of somebody
+            # else's working is the fastest way to lose it.
+            waited = timing.waited(t.get("timing"))
+            if waited:
+                out += [MUTE + "  " + DIM + waited + RESET]
+            if t.get("reasoning_content"):
+                out += [MUTE + "  └ " + DIM + ITAL
+                        + timing.thought(t.get("timing")) + RESET]
             if content.strip():
                 out += md.render(content)
             for call in t.get("tool_calls") or []:
                 fn = call.get("function", {})
                 out += [""] + _call_block(t.get("raw_call")
                                           or fn.get("name", "") + "(" + fn.get("arguments", "") + ")")
+            spent = timing.summary(t.get("timing"))
+            if spent:
+                out += [MUTE + "  " + spent + RESET]
             out += [""]
     return out
 
@@ -1089,6 +1261,20 @@ class App:
         if text.lower() in QUIT:
             self.quit()
             return
+        if text.strip().lower() == main.CONTINUE:
+            # Not a command, despite the slash: it starts a turn rather than
+            # answering (see main.CONTINUE), so it joins the queue the way a
+            # message does - as None, which main.turn reads as "carry on from
+            # where the last one stopped".
+            why = main.continue_from(main.current)
+            if why is not None:
+                self.console.commit(md.render(why) + [""])
+                return
+            with self.cv:
+                self.pending.append(None)
+                self.cv.notify_all()
+            self.show_status()
+            return
         if text.startswith("/"):
             name, _, arg = text[1:].partition(" ")
             # Bare /chats and /model answer with a wall of text the web UI shows
@@ -1150,7 +1336,10 @@ class App:
                       + ([(LATER, t) for t in self.pending] if self.busy else []))
         for when, text in queued:
             label = "after this tool  " if when == TOOL else "when the reply ends  "
-            lines.append(MUTE + "  ⧗ " + DIM + label + RESET + TEXT + text)
+            # None is a queued /continue - it has no text of its own, so it is
+            # named by what it does.
+            lines.append(MUTE + "  ⧗ " + DIM + label + RESET + TEXT
+                         + (text if text is not None else "continue"))
         if self.stopping:
             lines.append(DIM + "  stopping…" + RESET)
         self.console.set_status(lines)
@@ -1170,7 +1359,9 @@ class App:
                 self.chat_id = main.current.id
             self.editor.busy = True
             self.show_status()
-            self.console.commit(user_line(text))
+            # A continue has no message to echo back - nobody said anything.
+            if text is not None:
+                self.console.commit(user_line(text))
             self.say(main.current, text)
             with self.cv:
                 # Anything queued for the turn that just ended but never landed
@@ -1191,10 +1382,12 @@ class App:
                 main.turn(chat, text, on_text=stream, approve=self.approve,
                           on_tool_call=stream.tool_call,
                           on_tool_result=stream.tool_result,
-                          on_safety=stream.safety, inject=self.drain_inject)
+                          on_safety=stream.safety, inject=self.drain_inject,
+                          on_reasoning=stream.reasoning, on_timing=stream.measured,
+                          on_request=stream.requested, on_thought=stream.thought)
                 stream.flush()
             except Exception as e:
-                stream.flush()
+                stream.flush(quiet=True)
                 self.console.commit([RED + "  " + type(e).__name__ + ": " + str(e) + RESET])
             self.console.commit([""])
 
@@ -1224,10 +1417,12 @@ class App:
             try:
                 main.turn(main.chat(origin), note, on_text=stream, approve=self.approve,
                           on_tool_call=stream.tool_call, on_tool_result=stream.tool_result,
-                          on_safety=stream.safety)
+                          on_safety=stream.safety,
+                          on_reasoning=stream.reasoning, on_timing=stream.measured,
+                          on_request=stream.requested, on_thought=stream.thought)
                 stream.flush()
             except Exception as e:
-                stream.flush()
+                stream.flush(quiet=True)
                 self.console.commit([RED + "  report failed: " + str(e) + RESET])
 
     def run_command(self, text):
@@ -1345,33 +1540,26 @@ class App:
     # -- the loop ---------------------------------------------------------
 
     def read_loop(self):
-        fd = sys.stdin.fileno()
+        # _term.KeySource is the same object on both platforms: a pty read
+        # behind select() on POSIX, the console polled through msvcrt on
+        # Windows, both handing back the same escape sequences. Which is why
+        # there is no platform in this loop.
+        source = termios.KeySource()
         keys = Keys()
         while self.alive:
-            try:
-                ready, _, _ = select.select([fd], [], [], 0.2)
-            except OSError as e:
-                if e.errno == errno.EINTR:
-                    continue
-                raise
-            if not ready:
-                continue
-            try:
-                data = os.read(fd, 4096)
-            except OSError as e:
-                if e.errno == errno.EINTR:
-                    continue
-                raise
-            if not data:
+            data = source.read(0.2)
+            if data is None:
                 self.quit()
                 break
+            if not data:
+                continue
             events = keys.feed(data)
             if keys.ambiguous():
                 # A lone \x1b: an escape, or the first byte of an arrow key. The
-                # rest of a real sequence is already in the kernel buffer, so a
+                # rest of a real sequence is already in the input buffer, so a
                 # few milliseconds settles it.
-                ready, _, _ = select.select([fd], [], [], 0.04)
-                events += keys.feed(os.read(fd, 4096) if ready else b"", final=not ready)
+                more = source.read(0.04) or b""
+                events += keys.feed(more, final=not more)
             for kind, value in events:
                 if kind == "key":
                     self.key(value)
@@ -1400,19 +1588,18 @@ def _save_history(history):
 # ------------------------------------------------------------------ entry
 
 def interactive():
-    if not termios.POSIX:
-        # Windows: raw-mode keyboard handling needs msvcrt work that isn't done
-        # yet. The rest of the CLI works - one-off turns, piped input - and the
-        # web UI is the primary interface anyway, so refuse this one mode with
-        # directions rather than hang on a console that can't deliver keypresses.
-        print(DIM + "  live-keyboard chat mode is not available on Windows yet." + RESET)
+    # This whole interface is drawn with escape codes, so a console that will
+    # not obey them can only produce a screenful of gibberish. Windows 10 and
+    # 11 do obey them once asked (setup_console does the asking); anything
+    # older is sent to the simpler interface instead of a broken one.
+    if not termios.ansi_ok():
+        print("  this terminal does not support the escape codes the "
+              "full-screen interface is drawn with.")
         print("  Use  uniagentcli \"a question\"   for a single turn,")
         print("       echo text | uniagentcli     for piped input,")
         print("  or the web UI at https://localhost:"
               + str(provider.port("UNIAGENT_HTTPS_PORT", 8764)))
         return 1
-    fd = sys.stdin.fileno()
-    saved = termios.tcgetattr(fd)
     app = App()
     main.notify = app.report
     worker = threading.Thread(target=app.worker, daemon=True)
@@ -1420,25 +1607,22 @@ def interactive():
     threading.Thread(target=app.usage_loop, daemon=True).start()
     banner(app.console)
     try:
-        raw = list(saved)
-        # cbreak, not full raw: keep the output side's newline translation, so
-        # a plain "\n" from anything that prints still returns the carriage.
-        raw[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
-        raw[6] = list(raw[6])
-        raw[6][termios.VMIN], raw[6][termios.VTIME] = 1, 0
-        termios.tcsetattr(fd, termios.TCSADRAIN, raw)
-        sys.stdout = Sink(app.console)
-        sys.stdout.write("\033[?2004h")  # bracketed paste on
-        signal.signal(signal.SIGWINCH, lambda *_: app.console.refresh())
-        app.console.start()
-        app.read_loop()
+        # Keys as they are pressed rather than lines as they are finished. The
+        # context manager puts the terminal back even if the body raises, which
+        # is the one case where a half-configured terminal would otherwise be
+        # left behind for the shell to inherit.
+        with termios.raw_mode():
+            sys.stdout = Sink(app.console)
+            sys.stdout.write("\033[?2004h")  # bracketed paste on
+            termios.on_resize(app.console.refresh)
+            app.console.start()
+            app.read_loop()
     finally:
         app.quit()
         worker.join(timeout=2)
         app.console.stop()
         sys.stdout = app.console.out
         sys.stdout.write("\033[?2004l" + RESET + "\n")
-        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
         _save_history(app.editor.history)
     print(DIM + "  bye" + RESET)
     return 0
@@ -1453,7 +1637,13 @@ def once(text):
     # unfinished line is still worth drawing - it is the difference between
     # watching the answer arrive and watching nothing until a line ends.
     console.on = sys.stdout.isatty()
-    result = command_processor.process(text)
+    if text.strip().lower() == main.CONTINUE:
+        why = main.continue_from(main.current)
+        if why is not None:
+            console.commit(md.render(why))
+            return 1
+        text = None  # run the turn over the history as it stands
+    result = command_processor.process(text) if text is not None else None
     if result is not None:
         reply, goto = result
         if reply:
@@ -1467,11 +1657,13 @@ def once(text):
     try:
         main.turn(main.current, text, on_text=stream, approve=lambda q: False,
                   on_tool_call=stream.tool_call, on_tool_result=stream.tool_result,
-                  on_safety=stream.safety)
+                  on_safety=stream.safety,
+                  on_reasoning=stream.reasoning, on_timing=stream.measured,
+                  on_request=stream.requested, on_thought=stream.thought)
     except KeyboardInterrupt:
         main.request_stop(main.current.id)
     except Exception as e:
-        stream.flush()
+        stream.flush(quiet=True)
         console.commit([RED + "  " + type(e).__name__ + ": " + str(e) + RESET])
         return 1
     stream.flush()
@@ -1496,6 +1688,10 @@ def dumb_loop():
 # it, turning every main.something above into an AttributeError on a module
 # that is actually a function.
 def run():
+    # Before anything is printed: UTF-8 out and ANSI escapes understood. On
+    # Linux both are already true and this changes nothing; on Windows neither
+    # is, and without it the first em dash in a reply ends the process.
+    termios.setup_console()
     # The safety layer's own log lines would otherwise land in the middle of
     # the tool block being drawn; Stream.safety shows the flagged ones instead.
     tool_validation.quiet = True

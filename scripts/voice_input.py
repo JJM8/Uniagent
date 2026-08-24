@@ -110,9 +110,19 @@ def _quiet():
     so redirecting sys.stderr in Python does nothing - the fd itself has to be
     swapped. Python-level errors are unaffected: they travel as exceptions, not
     as writes to fd 2.
+
+    The spam is a Linux sound stack thing and there is none of it on Windows,
+    where fd 2 may not even exist - a process started with no console has no
+    standard handles, and os.dup(2) raises there. So the whole dance is skipped
+    wherever it cannot be done, which costs nothing: the only thing lost is the
+    silencing of warnings that were never going to be printed.
     """
-    saved = os.dup(2)
-    null = os.open(os.devnull, os.O_WRONLY)
+    try:
+        saved = os.dup(2)
+        null = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        yield
+        return
     try:
         os.dup2(null, 2)
         yield
@@ -194,7 +204,7 @@ def _api_key():
         return key
 
     try:
-        lines = ENV_FILE.read_text().splitlines()
+        lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
     except OSError:
         return None
 

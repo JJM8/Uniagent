@@ -21,8 +21,46 @@
 # attached on several machines at once, each on its own port. Move the folder
 # afterwards and the services will point at where it used to be: run this again
 # from the new place and it takes over.
+#
+# ON WINDOWS this hands over to attach.ps1, which does the same job the way that
+# platform does it - a logon task instead of systemd units. Everything below
+# this point is systemd, and running it under Git Bash would get as far as
+# building a virtualenv and then quietly install no autostart at all.
 
 set -euo pipefail
+
+# --- Windows? then attach.ps1 is the script that knows how ------------------
+
+# --help first, so it answers here rather than being passed to a PowerShell
+# script that spells its options differently.
+case "${1:-}" in
+    -h|--help)
+        sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+        exit 0 ;;
+esac
+
+case "$(uname -s 2>/dev/null || echo unknown)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT)
+        HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        # cygpath, because PowerShell has never heard of /c/Users/you and would
+        # take the path it was handed as a relative one.
+        if command -v cygpath >/dev/null 2>&1; then
+            WIN_SELF="$(cygpath -w "$HERE/attach.ps1")"
+        else
+            WIN_SELF="$HERE/attach.ps1"
+        fi
+        for ps in powershell.exe pwsh.exe powershell pwsh; do
+            if command -v "$ps" >/dev/null 2>&1; then
+                echo "Windows detected - handing over to attach.ps1"
+                exec "$ps" -NoProfile -ExecutionPolicy Bypass -File "$WIN_SELF" "$@"
+            fi
+        done
+        echo "This is Windows, where the work is done by attach.ps1, and no" >&2
+        echo "PowerShell could be found to run it with. Run it yourself:" >&2
+        echo "    powershell -ExecutionPolicy Bypass -File attach.ps1" >&2
+        exit 1
+        ;;
+esac
 
 # The folder this script is sitting in, symlinks resolved. Every path below is
 # built from it, which is the whole point: there is no baked-in install location.
@@ -60,7 +98,7 @@ while [ $# -gt 0 ]; do
         --port)                        shift; WANT_PORT="${1:-}" ;;
         --port=*)                      WANT_PORT="${1#--port=}" ;;
         -h|--help)
-            sed -n '2,24p' "$SELF" | sed 's/^# \{0,1\}//'
+            sed -n '2,28p' "$SELF" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) die "Unknown option: $1  (try --help)" ;;
     esac

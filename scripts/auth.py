@@ -57,7 +57,7 @@ _fails = {}  # ip -> [consecutive failures, locked-until timestamp]
 
 def _read_env():
     try:
-        return ENV_FILE.read_text().splitlines()
+        return ENV_FILE.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
 
@@ -70,7 +70,7 @@ def _generate():
                      for _ in range(3))
     lines = _read_env()
     lines.append(ENV_NAME + "=" + value)
-    ENV_FILE.write_text("\n".join(lines) + "\n")
+    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     # The file already held every API key; now it holds the door key too.
     try:
         ENV_FILE.chmod(0o600)

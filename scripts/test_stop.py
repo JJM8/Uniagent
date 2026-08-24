@@ -157,7 +157,7 @@ def _wait_for(predicate, limit=15.0):
 
 def _check_transcript(case, path):
     try:
-        turns = json.loads(Path(path).read_text())
+        turns = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         case.problems.append("transcript unreadable: " + str(e))
         return

@@ -59,6 +59,8 @@ Supported commands:
 - /load <chat> - load a chat
 - /new - start new chat
 - /stop - stop current turn
+- /usage [today|7d|30d|all] [chat] - tokens and requests spent, from the local
+  ledger. Answers "how much have I spent" without asking any provider anything.
 - /help - show help
 
 WHAT A WORKSPACE IS - READ THIS, IT DECIDES WHERE YOUR TOOLS ACT.

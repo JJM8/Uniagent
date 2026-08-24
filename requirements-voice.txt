@@ -7,3 +7,26 @@
 
 pyaudio>=0.2.13
 pynput>=1.7.6
+
+# Optional - the wake word ("computer", or whatever you train). Only needed if
+# you actually turn it on; the hold-to-talk mic above and the whole rest of the
+# app work without any of it.
+#
+# INSTALL THIS WITH --no-deps. openwakeword declares tflite-runtime as a hard
+# dependency on Linux, and tflite-runtime has no wheel for Python 3.12+, so a
+# plain `pip install openwakeword` fails outright on a current machine. Nothing
+# here needs it: wake models are loaded through onnxruntime (see
+# scripts/wake_word.py, which asks for the "onnx" inference framework), and
+# tflite is only openWakeWord's other, optional backend. So:
+#
+#   pip install --no-deps openwakeword
+#   pip install onnxruntime numpy scipy scikit-learn tqdm requests
+#
+# docs/wake-word.md has the whole thing step by step, including the flags a
+# system Python needs.
+openwakeword>=0.6.0
+onnxruntime>=1.10
+numpy
+scipy
+scikit-learn
+tqdm

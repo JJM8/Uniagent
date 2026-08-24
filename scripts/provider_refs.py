@@ -85,13 +85,13 @@ def _rewrite_json(path, edit):
     said it changed anything. Any unreadable or non-object file is left alone -
     this walks hundreds of chat folders and one bad file must not stop it."""
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
     if not isinstance(data, dict) or not edit(data):
         return False
     try:
-        path.write_text(json.dumps(data, indent=2))
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return True
     except OSError:
         return False

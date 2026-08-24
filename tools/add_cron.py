@@ -58,15 +58,21 @@ action "add" - schedule a new job:
 - model:       OPTIONAL, one of that provider's models listed above.
 - temperature: OPTIONAL, a number 0-2 - 0 is most predictable, higher is more
                random. Omit to use the settings page's default.
-- safety:      OPTIONAL, "on" or "off" - whether this job's tool calls are
-               vetted by the safety check before they run. Omit to follow the
-               settings page, which is nearly always right. Set "off" ONLY if
-               the user asks for that job to skip the check: nobody is watching
-               when a cron job runs, so an unchecked job runs whatever it
-               decides to, unattended. A job can also be given its own, gentler
-               safety prompt - a "safety_prompt" field containing {call} -
-               which this tool carries through unchanged but does not write;
-               use the file tools if the user wants one.
+- safety:      OPTIONAL, a whole number 0-10 - the highest danger rating a tool
+               call of this job's can be given and still run. It is the same
+               scale as a chat's safety number: 0 stops on everything, 10 checks
+               nothing, and the middle is where jobs live. Omit to follow the
+               settings page's cron default, which is nearly always right. Only
+               set 10 if the user asks for that job to skip checking entirely:
+               nobody is watching when a cron job runs, so an unchecked job runs
+               whatever it decides to, unattended. Going the other way costs
+               something too - a call rated above the number is DENIED, not
+               queued for anyone, so the job just doesn't finish that step.
+- safety_extra: OPTIONAL, a sentence or two of extra rules for the safety check
+               on THIS job - "sending the digest email is this job's normal
+               work". The check is already told what the job was asked to do, so
+               this is only for what that doesn't make obvious. Use it in
+               preference to raising `safety`.
 
 action "remove" - delete a job by name:
 - name: the job to remove.
@@ -74,10 +80,10 @@ action "remove" - delete a job by name:
 action "edit" - change a job:
 - name: the job to change.
 - Then only the fields you want to change, using the same field names as
-  "add" (start, interval, prompt, provider, model, temperature, safety).
-  Passing `interval` as an empty string turns a repeating job into a one-off;
-  passing `temperature` or `safety` as an empty string clears it back to the
-  default.
+  "add" (start, interval, prompt, provider, model, temperature, safety,
+  safety_extra). Passing `interval` as an empty string turns a repeating job
+  into a one-off; passing `temperature`, `safety` or `safety_extra` as an empty
+  string clears it back to the default.
 
 A run happens at start, then start+interval, then start+2*interval, and so on.
 A schedule that has already gone past is never caught up: a job added at 9am
@@ -123,11 +129,18 @@ SCHEMA = {
         "temperature": {"type": "number", "description":
             "Optional, 0-2 - 0 is most predictable, higher is more random. "
             "For edit, an empty string clears it back to the default."},
-        "safety": {"type": "string", "enum": ["on", "off"], "description":
-            "Optional - whether this job's tool calls go through the safety "
-            "check. Omit to follow the settings page. Only set \"off\" if the "
-            "user asks for it: the job then runs unattended with nothing "
+        "safety": {"type": "string", "description":
+            "Optional - a whole number 0-10, the highest danger rating a tool "
+            "call of this job's can be given and still run. Same scale as a "
+            "chat's safety number: 0 stops on everything, 10 checks nothing. "
+            "Omit to follow the settings page's cron default. Only set 10 if "
+            "the user asks for it: the job then runs unattended with nothing "
             "vetting what it does. For edit, an empty string clears it."},
+        "safety_extra": {"type": "string", "description":
+            "Optional - a sentence or two of extra rules for the safety check "
+            "on this job (\"sending the digest email is this job's normal "
+            "work\"). The check already knows what the job was asked to do. "
+            "For edit, an empty string clears it."},
     },
     "required": ["action"],
 }
@@ -137,7 +150,7 @@ CRON_FILE = Path(__file__).resolve().parent.parent / "cron.json"
 # The order a job's keys are written in, so a hand-read file always looks the
 # same: what it is, when it runs, what it runs on, then the long text.
 _ORDER = ["name", "start", "interval", "provider", "model", "temperature",
-          "safety", "safety_prompt", "prompt"]
+          "safety", "safety_extra", "safety_prompt", "prompt"]
 
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
@@ -271,11 +284,25 @@ def _check_temperature(temperature):
 
 def _check_safety(safety):
     """None or "" (not given, or given blank to clear it back to the settings
-    page's setting) is fine - only an actual value has to be on/off."""
+    page's cron default) is fine - only an actual value has to be a whole number
+    on the 0-10 scale. Typed as a string in the schema so a model can send
+    either 7 or "7"; both land on the same int below."""
     if safety is None or not str(safety).strip():
         return None
-    if str(safety).strip().lower() not in ("on", "off"):
-        return "'safety' must be \"on\" or \"off\". Got: " + repr(safety)
+    if _safety_number(safety) is None:
+        return ("'safety' must be a whole number from 0 to 10 - the highest "
+                "danger rating this job runs unasked. Got: " + repr(safety))
+
+
+def _safety_number(safety):
+    """`safety` as an int 0-10, or None if it isn't one. The one place the value
+    is read, so the check above and the two writes below can't disagree about
+    what counts."""
+    try:
+        number = int(str(safety).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if 0 <= number <= 10 else None
 
 
 # --- reading and writing cron.json -----------------------------------------
@@ -287,7 +314,7 @@ def _read():
     if not CRON_FILE.exists():
         return {"jobs": []}, [], None
     try:
-        data = json.loads(CRON_FILE.read_text())
+        data = json.loads(CRON_FILE.read_text(encoding="utf-8"))
     except OSError as e:
         return None, None, "ERROR: could not read " + str(CRON_FILE) + " - " + str(e)
     except json.JSONDecodeError as e:
@@ -304,7 +331,8 @@ def _read():
 
 def _write(data):
     try:
-        CRON_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        CRON_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                             encoding="utf-8")
     except OSError as e:
         return "ERROR: could not write " + str(CRON_FILE) + " - " + str(e)
 
@@ -312,14 +340,21 @@ def _write(data):
 def _tidy(job):
     """One job with its keys in the house order, and empty ones dropped -
     an unset field is an ABSENT field, so nothing has to remember that "" means
-    "follow the settings page". Unknown keys are kept, at the end."""
-    out = {k: job[k] for k in _ORDER if k in job and job[k] not in (None, "")}
+    "follow the settings page". Unknown keys are kept, at the end.
+
+    `is None` rather than a falsiness test, because 0 is a real value for two of
+    these fields: temperature 0 is the most predictable setting there is, and
+    safety 0 is the strictest. Dropping either as "empty" would silently hand
+    the job the default instead - the opposite end of the scale, in safety's
+    case."""
+    out = {k: job[k] for k in _ORDER
+           if k in job and job[k] is not None and job[k] != ""}
     out.update({k: v for k, v in job.items() if k not in _ORDER})
     return out
 
 
 def run(action=None, name=None, start=None, interval=None, prompt=None, provider=None,
-        model=None, temperature=None, safety=None):
+        model=None, temperature=None, safety=None, safety_extra=None):
     action = (action or "").strip().lower()
     if action not in ("list", "add", "remove", "edit"):
         return "ERROR: 'action' must be one of list, add, remove, edit. Got: " + repr(action)
@@ -340,10 +375,16 @@ def run(action=None, name=None, start=None, interval=None, prompt=None, provider
             # settings page has nothing of its own to report here.
             safe = ""
             if j.get("safety") is not None:
-                safe = ", safety " + ("on" if j["safety"] else "off")
+                safe = ", safety " + str(j["safety"])
+            if j.get("safety_extra"):
+                safe += ", own safety rules"
             if j.get("safety_prompt"):
                 safe += ", own safety prompt"
-            lines.append("- " + str(j.get("name", "?")) + "  [" + _when(j) + ", " + who
+            # An absent "enabled" means on, so only a job actually switched
+            # off says anything - and it has to, or the schedule printed beside
+            # it reads as something that is still going to happen.
+            off = "" if j.get("enabled", True) else "SWITCHED OFF, "
+            lines.append("- " + str(j.get("name", "?")) + "  [" + off + _when(j) + ", " + who
                          + safe + "]\n    " + str(j.get("prompt", ""))[:140])
         return "\n".join(lines)
 
@@ -380,7 +421,8 @@ def run(action=None, name=None, start=None, interval=None, prompt=None, provider
             "provider": (provider or "").strip(),
             "model": (model or "").strip(),
             "temperature": float(temperature) if temperature not in (None, "") else None,
-            "safety": {"on": True, "off": False}.get((safety or "").strip().lower()),
+            "safety": _safety_number(safety) if str(safety or "").strip() else None,
+            "safety_extra": " ".join((safety_extra or "").split()) or None,
             "prompt": " ".join(prompt.split()),
         })
         data["jobs"].append(job)
@@ -400,9 +442,10 @@ def run(action=None, name=None, start=None, interval=None, prompt=None, provider
     if not found:
         return ('ERROR: no job called "' + str(name).strip() + '". Existing: '
                 + (", ".join(str(j.get("name")) for j in jobs) or "none"))
-    if all(v is None for v in (start, interval, prompt, provider, model, temperature, safety)):
+    if all(v is None for v in (start, interval, prompt, provider, model, temperature,
+                               safety, safety_extra)):
         return ("ERROR: nothing to change - pass start, interval, prompt, provider, "
-                "model, temperature and/or safety.")
+                "model, temperature, safety and/or safety_extra.")
 
     if start is not None:
         at, err = _parse_start(start)
@@ -437,8 +480,12 @@ def run(action=None, name=None, start=None, interval=None, prompt=None, provider
         err = _check_safety(safety)
         if err:
             return "ERROR: " + err
-        # "" clears it back to the settings page, same as the fields above.
-        found["safety"] = {"on": True, "off": False}.get(str(safety).strip().lower())
+        # "" clears it back to the cron default, same as the fields above.
+        found["safety"] = _safety_number(safety) if str(safety).strip() else None
+    if safety_extra is not None:
+        # Kept as one line like every other text this tool writes, so the file
+        # stays readable; "" clears it.
+        found["safety_extra"] = " ".join(safety_extra.split()) or None
 
     # Rebuilt in place, so the job keeps its position in the file and its own
     # safety_prompt (and anything else hand-written on it) rides along. Found

@@ -81,7 +81,7 @@ def _token():
     address. Read the same way provider.py reads its keys - straight out of
     .env - except that a missing one is a normal state here, not an error."""
     try:
-        for line in ENV_FILE.read_text().splitlines():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line.startswith("GITHUB_TOKEN="):
                 return line.split("=", 1)[1].strip().strip("\"'")
@@ -379,7 +379,7 @@ def install(repo, path):
             return False, "could not download it: " + type(e).__name__ + " - " + str(e)
         try:
             root.parent.mkdir(parents=True, exist_ok=True)
-            root.write_text(source)
+            root.write_text(source, encoding="utf-8")
         except OSError as e:
             return False, "could not save it: " + str(e)
         return True, ("installed " + entry["name"] + " - it is switched on and "
@@ -418,7 +418,7 @@ def install(repo, path):
                            + " - " + str(e))
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(body)
+            target.write_text(body, encoding="utf-8")
         except OSError as e:
             _remove(root)
             return False, "could not save " + rel + ": " + str(e)

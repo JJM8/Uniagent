@@ -231,7 +231,7 @@ def env(name):
     if value:
         return value
     try:
-        for line in ENV_FILE.read_text().splitlines():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line.startswith(name + "="):
                 return line.split("=", 1)[1].strip().strip("\"'")
@@ -247,7 +247,7 @@ def _env_keys():
     restarted - same reason env() above prefers the file as a fallback."""
     names = set(os.environ)
     try:
-        for line in ENV_FILE.read_text().splitlines():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 names.add(line.split("=", 1)[0].strip())

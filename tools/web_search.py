@@ -55,7 +55,12 @@ def run(query):
         return ("ERROR: the search engine returned HTTP " + str(r.status_code)
                 + " (it may be rate limiting us). Nothing was searched.")
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    # r.content, not r.text: asked for text, requests decodes with ISO-8859-1
+    # whenever a text/* response named no charset, which turns every accented
+    # or curly-quoted snippet into mojibake. Handed the raw bytes instead,
+    # BeautifulSoup reads the page's own declared encoding and falls back to a
+    # sniff, so a result title keeps the characters it was written with.
+    soup = BeautifulSoup(r.content, "html.parser")
     out = []
 
     for result in soup.select(".result")[:MAX_RESULTS]:

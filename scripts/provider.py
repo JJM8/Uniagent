@@ -15,12 +15,13 @@ from pathlib import Path
 import requests
 
 import turnctx
+import wires
 
 # --- Fallback defaults. The real choices live with the callers: the main
 # agent's model in main.py, the safety-check model in tool_validation.py. These
 # are only used if get_response is called without an explicit provider/model. ---
-PROVIDER = "deepseek"           # must match a "name" in PROVIDERS below
-MODEL = "deepseek-v4-flash"
+PROVIDER = "local"           # must match a "name" in PROVIDERS below
+MODEL = "nanbeige4.2-3b"
 TEMPERATURE = 0                 # 0 = most predictable, higher = more random
 
 # Bedrock reads AWS credentials from ~/.aws (or AWS_* env vars); its region
@@ -53,7 +54,7 @@ def _key(name):
     nothing hiding in the shell environment. Raises a clear error if it's not
     set there, rather than crashing deeper in the request."""
     try:
-        for line in ENV_FILE.read_text().splitlines():
+        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line.startswith(name + "="):
                 value = line.split("=", 1)[1].strip().strip("\"'")
@@ -73,12 +74,30 @@ def _bearer(key):
     return {"Authorization": "Bearer " + key} if key else {}
 
 
+class Dropped(Exception):
+    """The provider hung up mid-stream before saying anything.
+
+    Distinct from a network error on the way out, and from a stop: the request
+    was accepted, the headers came back 200, and then the connection died with
+    no reply on it. Free endpoints do this under load. It is separate from
+    every other failure because it is the one that can safely be retried -
+    nothing was yielded, so re-sending duplicates nothing."""
+
+
 def _check(r):
     """Raise if the request failed. On failure the providers reply with plain
     text (e.g. '401 Authentication Fails'), which would otherwise blow up as an
-    opaque JSONDecodeError - turn it into a clear message."""
+    opaque JSONDecodeError - turn it into a clear message.
+
+    The body is decoded here rather than read off r.text, because r.text asks
+    requests what the encoding is and requests answers ISO-8859-1 for any
+    text/* that named no charset - so an error sentence with a quote mark or an
+    accent in it arrived mangled. UTF-8 is what these endpoints actually send;
+    "replace" keeps a genuinely undecodable body readable instead of raising a
+    second error on top of the one being reported."""
     if r.status_code != 200:
-        raise RuntimeError("provider returned HTTP " + str(r.status_code) + ": " + r.text[:300])
+        body = r.content.decode("utf-8", "replace")[:300]
+        raise RuntimeError("provider returned HTTP " + str(r.status_code) + ": " + body)
 
 
 def _pause(seconds):
@@ -165,6 +184,46 @@ def _stream_post(url, **kwargs):
     return r
 
 
+def _error_text(err):
+    """The one sentence in an error payload that a person can act on.
+
+    Endpoints wrap their errors, sometimes twice. LM Studio is the worst of
+    them: the sentence that says what actually went wrong arrives as JSON
+    embedded in the message string of an outer JSON error -
+
+        {"error": {"message": "Engine protocol predict request returned 400:
+         {\\"error\\":{\\"message\\":\\"request (11142 tokens) exceeds the
+         available context size (8192 tokens), try increasing it\\"}}"}}
+
+    so this peels: down through "error" keys, and into any JSON object found
+    inside a message, until what is left is prose. Bounded, because a payload
+    that nests forever must still answer something."""
+    for _ in range(8):
+        if isinstance(err, dict):
+            inner = err.get("error")
+            if inner and isinstance(inner, (dict, str)):
+                err = inner
+                continue
+            text = err.get("message") or err.get("detail") or json.dumps(err)
+        else:
+            text = str(err)
+        embedded = re.search(r"\{.*\}", text, re.S)
+        if embedded:
+            try:
+                inner = json.loads(embedded.group(0))
+            except ValueError:
+                inner = None
+            # Only when it is plainly another error envelope. A message can
+            # quote JSON for its own reasons ("invalid schema: {...}"), and
+            # unwrapping that would throw away the sentence explaining it and
+            # hand back the fragment being complained about.
+            if isinstance(inner, dict) and (inner.get("error") or inner.get("message")):
+                err = inner
+                continue
+        return text.strip()
+    return str(err)
+
+
 def _sse(r):
     """The JSON payload of each `data:` line of a Server-Sent Events response.
 
@@ -172,31 +231,85 @@ def _sse(r):
     Blank lines are separators, `event:` lines only name what follows (the same
     name is in the payload), and OpenAI-style APIs end with a literal [DONE].
 
+    An error inside a 200 is raised here rather than passed on. All four wires
+    can fail AFTER the headers have gone out - the request was accepted, the
+    model was then asked to run it and refused - and they all say so the same
+    way, as a frame carrying an "error" object instead of a chunk. No reader
+    looks at that key, so an error delivered this way used to be dropped on the
+    floor: the stream simply ended, and a turn that failed for a stated reason
+    reached the user as "(no reply)". A local server hits this constantly,
+    because "this prompt is bigger than the context I loaded the model with" is
+    only discovered once the engine has the prompt.
+
     The read is wrapped in the turn's cancellation watch, so /stop breaks the
     connection rather than waiting politely for the next frame. A cancelled
     turn's socket error is not an error - the context says the turn was
     stopped, so it is re-raised as Stopped and nothing reports a network
     failure the user never had.
+
+    The frames are read as BYTES and decoded here, rather than letting requests
+    do it, because letting requests do it was wrong twice over on any endpoint
+    that omits a charset - which LM Studio, and every llama.cpp server behind
+    it, does: it answers "text/event-stream" with nothing after it.
+
+    Wrong the first time because requests then falls back to ISO-8859-1 for
+    any text/* type (RFC 2616's default, which the web has long since stopped
+    meaning), so a reply's UTF-8 came back decoded one byte at a time - an
+    emoji reaching the user as four characters of mojibake.
+
+    Wrong the second time, and worse, because iter_lines splits a decoded str
+    with str.splitlines(), which breaks on far more than "\\n": \\x0b, \\x0c,
+    \\x1c-\\x1e, \\x85, and U+2028/U+2029. A mis-decoded emoji produces \\x85
+    regularly (it is the last byte of U+1F605 among many others), so a frame
+    carrying one was cut in half, failed to parse, and was dropped by the
+    handler below as if it were a keep-alive. That silently lost the model's
+    text mid-reply, which is the part of this no one could see happening.
+
+    Splitting on b"\\n" alone avoids all of that: a line break is a byte
+    boundary, so each frame arrives whole and decodes as the UTF-8 it always
+    was. Trailing \\r on a CRLF endpoint is taken off by the strip below.
+
+    A connection that dies PART WAY THROUGH is handled on how much of the reply
+    had already made it out, because the two cases want opposite things. Having
+    yielded nothing, this raises Dropped and the caller sends the request again
+    - no text existed to duplicate. Having yielded something, the reply is
+    truncated but real, so the stream simply ends and the turn keeps what it
+    got: re-sending there would repeat everything already on screen, and
+    raising would throw away a paragraph the user can see.
     """
     _check(r)
+    sent = False
     with turnctx.watch(r, closer=lambda: _break_open(r)):
         try:
-            for line in r.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
+            for raw in r.iter_lines(delimiter=b"\n"):
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", "replace")
+                if not line.startswith("data:"):
                     continue
                 body = line[5:].strip()
                 if body == "[DONE]":
                     return
                 try:
-                    yield json.loads(body)
+                    event = json.loads(body)
                 except json.JSONDecodeError:
                     continue  # a keep-alive or a partial frame - nothing to read
+                if isinstance(event, dict) and event.get("error"):
+                    raise RuntimeError(_error_text(event))
+                sent = True
+                yield event
         except turnctx.Stopped:
             raise
+        except (requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError) as e:
+            # The socket dying BECAUSE this turn was stopped is the stop
+            # working, and check() raises Stopped for it before anything here
+            # reads it as the provider's fault.
+            turnctx.check()
+            if sent:
+                return  # a short reply beats no reply - see the docstring
+            raise Dropped(type(e).__name__ + ": " + str(e))
         except Exception:
-            # The socket dying BECAUSE this turn was stopped is not a provider
-            # failure - it is the stop working. Anything else is a real error
-            # and goes up as itself.
             turnctx.check()
             raise
 
@@ -324,6 +437,32 @@ _NATIVE_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
 # before this was captured has no reasoning_content to give, and "" replays it
 # rather than stranding the chat on a permanent 400.
 _REASONING_KEY = "reasoning_content"
+
+
+def _thought(reasoning, part):
+    """One reasoning fragment, collected and (if anyone is watching) forwarded.
+
+    The `reasoning` dict a caller passes in is the channel a thinking model's
+    working comes back on. It has always collected that text under "content";
+    what it grows here is an optional "on_delta" callback the caller may put in
+    it, called with each fragment the moment it lands.
+
+    The callback rides IN the dict rather than arriving as another parameter
+    because the dict is already threaded through every provider function, every
+    wire and every reader in this file - adding a parameter would mean editing
+    a dozen signatures that have no opinion about it, which is exactly the kind
+    of churn that makes a thing not worth doing. Callers that want the finished
+    text and nothing else pass the same plain dict they always did.
+
+    Nothing here is ever yielded as reply text. Thinking is not the answer -
+    see _read_openai's tail for the one exception, a model that puts its whole
+    reply in the reasoning field and never sends a content chunk at all."""
+    if reasoning is None or not part:
+        return
+    reasoning["content"] = reasoning.get("content", "") + part
+    watching = reasoning.get("on_delta")
+    if watching:
+        watching(part)
 
 
 def _native_messages(prompt, reasoning=False):
@@ -563,177 +702,157 @@ def _flatten(prompt):
     return "\n".join(lines)
 
 
-def _anthropic(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool_call=None,
-               reasoning=None, on_call_delta=None,
-               base_url="https://api.anthropic.com", key=None):
-    # `base_url`/`key` default to Anthropic's own endpoint and the key in
-    # .env, which is the built-in "anthropic" provider. A custom provider on
-    # the anthropic wire (see custom_providers()) passes its own of each -
-    # that is the only difference between the two, so they share this body
-    # rather than a near-copy of it that would drift.
+# --- Dialects: the one part of a wire that cannot be data. ------------------
+#
+# Everything ABOUT a request - where it goes, what carries the key, which keys
+# the body has and in what order - is data now, and lives in wires.json (see
+# scripts/wires.py). What is left here is the two halves that are genuinely
+# structure rather than arrangement:
+#
+#   the history    a flat messages list carrying tool_calls (openai), versus
+#                  content blocks (anthropic), versus parts holding
+#                  functionCall/functionResponse (gemini). These are not one
+#                  object with three sets of key names; they nest differently,
+#                  which is why the three converters above are three functions.
+#   the response   where the text is in each streamed event, where the token
+#                  counts are, and whether a tool call arrives as fragments to
+#                  be accumulated or whole in a single event.
+#
+# There are three dialects, and between them they cover essentially every
+# endpoint anyone ships - the openai one alone is spoken by OpenRouter, Groq,
+# Together, xAI, Mistral, Fireworks, Cerebras, Ollama, vLLM and LM Studio. So
+# adding a provider is an entry in wires.json and no Python whatsoever, while
+# adding a genuinely new RESPONSE FORMAT is the rare thing it actually is, and
+# is honest about needing a reader written here.
+#
+# A dialect is named by a spec's "dialect" and nothing else. Nothing in this
+# file knows the word "openrouter", or "groq", or any other company's name.
+
+
+def _dialect_turns(dialect, prompt, tools, spec):
+    """(system_text, messages) for `prompt` in `dialect`'s own shape.
+
+    `tools` present means this turn is on native tool-calling, so the history
+    goes over in the API's own shape - a call the provider itself made has to
+    come back as that call. Without tools (a one-shot string prompt: the safety
+    check, compaction, a connectivity test) there is no history to be faithful
+    to, and the folded plain-text form is right.
+
+    The openai dialect returns "" for the system text because it carries the
+    system message inside the messages array like any other turn; anthropic and
+    gemini split it out into a field of its own, which is why their body
+    templates have a $system and openai's does not."""
+    if dialect == "anthropic":
+        return _anthropic_messages(prompt) if tools else _compat(_messages(prompt))
+
+    if dialect == "gemini":
+        if tools:
+            return _gemini_contents(prompt)
+        system, turns = _compat(_messages(prompt))
+        # Gemini calls the assistant's role "model", not "assistant".
+        return system, [{"role": "model" if t["role"] == "assistant" else "user",
+                         "parts": [{"text": t["content"]}]} for t in turns]
+
+    # openai. Two spec flags, both DeepSeek's, both expressed as data rather
+    # than as an `if wire == "deepseek"` that would have to be edited every
+    # time somebody points a card at a DeepSeek-compatible host:
     #
-    # With `tools` the history goes over in Anthropic's own content-block
-    # shape, so a tool_use it produced comes back as a tool_use. Without them
-    # (a one-shot string prompt - a safety check, compaction) there is no
-    # history to preserve and _compat's plain text is right.
-    system, turns = (_anthropic_messages(prompt) if tools
-                     else _compat(_messages(prompt)))
-    body = {
-        "model": model,
-        "max_tokens": 1024,
-        "temperature": temperature,
-        "stop_sequences": STOP,
-        "stream": True,
-        "messages": turns,
-    }
-    if system:
-        body["system"] = system
+    #   replay_reasoning  its thinking models refuse to replay an assistant
+    #                     turn that made a tool call unless that turn carries
+    #                     its reasoning_content back - see _REASONING_KEY.
+    #   prepend_system    it answers in Chinese without being told not to.
+    #
+    # Anywhere else, both are absent and this is the plain OpenAI wire.
     if tools:
-        body["tools"] = tools
-    r = _stream_post(
-        base_url.rstrip("/") + "/v1/messages",
-        headers={
-            "x-api-key": _key("ANTHROPIC_API_KEY") if key is None else key,
-            "anthropic-version": "2023-06-01",
-        },
-        json=body,
-        stream=True,
-    )
-    for event in _sse(r):
-        etype = event.get("type")
-        # Real counts, not an estimate: message_start carries the input side
-        # (it's known before a single output token exists), message_delta
-        # carries the running output count, updated as the reply grows.
-        if usage is not None:
-            if etype == "message_start":
-                u = event.get("message", {}).get("usage", {})
-                usage["input_tokens"] = u.get("input_tokens")
-                usage["output_tokens"] = u.get("output_tokens")
-            elif etype == "message_delta":
-                out = event.get("usage", {}).get("output_tokens")
-                if out is not None:
-                    usage["output_tokens"] = out
-        # A tool_use content block starts empty ({"type":"tool_use","id":...,
-        # "name":...,"input":{}}) and its `input` arrives afterward as
-        # incremental input_json_delta fragments - accumulated into a plain
-        # JSON-text string here, same shape _openai_style builds from
-        # OpenAI's own tool_calls fragments, so main.py reads one shape
-        # regardless of which provider answered.
-        if tool_call is not None and etype == "content_block_start":
-            block = event.get("content_block", {})
-            if block.get("type") == "tool_use":
-                tool_call["id"] = block.get("id")
-                tool_call["name"] = block.get("name")
-                tool_call["arguments"] = ""
-                # Watched being written, same as the OpenAI wire - see
-                # _openai_style's on_call_delta comment. Without it a native
-                # turn shows nothing at all for its whole length, because a
-                # tool_use block is never yielded as reply text.
-                if on_call_delta:
-                    on_call_delta((block.get("name") or "") + "(")
-        if etype == "content_block_delta":
-            delta = event.get("delta", {})
-            text = delta.get("text")
-            if text:
-                yield text
-            elif tool_call is not None:
-                partial = delta.get("partial_json")
-                if partial:
-                    tool_call["arguments"] = tool_call.get("arguments", "") + partial
-                    if on_call_delta:
-                        on_call_delta(partial)
-    if on_call_delta and tool_call and tool_call.get("name"):
-        on_call_delta(")")
+        messages = _native_messages(prompt,
+                                    reasoning=bool(spec.get("replay_reasoning")))
+    else:
+        messages = _plain_messages(prompt)
+    lead = spec.get("prepend_system")
+    if lead:
+        messages = [{"role": "system", "content": str(lead)}] + messages
+    return "", messages
 
 
-def _openai_style(url, headers, body, usage=None, tools=None, tool_call=None, reasoning=None,
-                  on_call_delta=None):
-    """OpenAI and DeepSeek speak the same wire format, so they share this.
+def _read_openai(r, usage=None, tool_call=None, reasoning=None, on_call_delta=None):
+    """The OpenAI/DeepSeek streamed response, yielding the reply text.
 
-    Newer OpenAI models REJECT parameters older ones expect - gpt-5.x refuses
-    'stop' (and non-default 'temperature') with a 400 naming the parameter.
-    Rather than keep a list of which model takes what (unknowable, goes
-    stale), any such 400 drops the named parameter and retries - so one code
-    path serves every generation, current and future. stream_options is
-    dropped the same defensive way if a backend rejects it (some local
-    servers don't support it) - usage just stays unpopulated for that call,
-    it doesn't fail the turn over it."""
-    body = dict(body)
-    if tools:
-        body["tools"] = tools
-    if usage is not None:
-        # Without this, a streamed response never carries a usage block at
-        # all - real counts arrive in one extra final SSE event with an
-        # empty choices list, not on every chunk.
-        body["stream_options"] = {"include_usage": True}
-    flaky = 0
-    while True:
-        r = _stream_post(url, headers=headers, json=body, stream=True)
-        if r.status_code == 200:
-            break
-        try:
-            err = r.json().get("error", {})
-        except ValueError:
-            err = {}
-        param = err.get("param")
-        if err.get("code") in ("unsupported_parameter", "unsupported_value") and param in body:
-            del body[param]  # each retry removes one param, so this terminates
-            continue
-        # OpenAI's reasoning models refuse function tools on this endpoint
-        # while reasoning is on, and say so in as many words: "Function tools
-        # with reasoning_effort are not supported for gpt-5.6-terra in
-        # /v1/chat/completions. To use function tools, use /v1/responses or
-        # set reasoning_effort to 'none'." Measured on gpt-5.6-terra.
-        #
-        # The retry above can't catch this one: `param` names reasoning_effort,
-        # which is NOT in the body - it's the model's own default that's the
-        # problem, so there is nothing to delete. Setting it explicitly is the
-        # remedy the error itself names, and the cheaper of the two it offers
-        # (the other, /v1/responses, is a different API shape end to end).
-        #
-        # The trade is real and worth knowing: that model does no reasoning on
-        # a turn that carries tools. Tools are the whole point of a native turn
-        # though, so a thinking model with no tools is the worse end of it.
-        # Set once, so this terminates.
-        if tools and param == "reasoning_effort" and body.get("reasoning_effort") != "none":
-            body["reasoning_effort"] = "none"
-            continue
-        # OpenAI's gpt-5.x endpoints intermittently 401 with "insufficient
-        # permissions" - measured at roughly 1 request in 3 on the same key
-        # and model that succeed moments later. A couple of paced retries turn
-        # that from a dead turn into a pause. A genuinely bad key fails all
-        # three times and still raises, just a few seconds later.
-        if r.status_code == 401 and flaky < 2:
-            flaky += 1
-            _pause(1.5 * flaky)
-            continue
-        _check(r)  # not fixable - raise with the provider's own message
+    Two things a thinking model does that a plain one never does are handled
+    at the bottom of this function, and both of them used to end as silence:
+
+      - it answers in the wrong field. Some builds stream the whole reply as
+        reasoning_content and never send a content chunk at all, so a reader
+        that only looks at content sees an empty reply.
+      - it thinks until it runs out of room. A small model given a big prompt
+        can spend every token it has left on reasoning and stop before writing
+        a word of the answer, which the endpoint reports as finish_reason
+        "length" and nothing else.
+
+    Neither is a network failure and neither raised anything, which is why a
+    local reasoning model reached the user as "(no reply)" - the one message
+    that says nothing about what to do next."""
+    said = False   # any reply text at all - the difference between the cases below
+    thought = ""   # this turn's reasoning, kept only in case nothing else arrives
+    cut = False    # the endpoint said the reply stopped at a token limit
     for event in _sse(r):
         if usage is not None and event.get("usage"):
             u = event["usage"]
             usage["input_tokens"] = u.get("prompt_tokens")
             usage["output_tokens"] = u.get("completion_tokens")
+            # How much of that input was served from the provider's own prompt
+            # cache. Nothing here asks for caching - both of these wires do it
+            # by themselves and simply report what they hit - so this is
+            # observation, not a feature. Two spellings because DeepSeek
+            # answers on the OpenAI wire without using OpenAI's field:
+            # prompt_cache_hit_tokens is its own. Both are a SUBSET of
+            # prompt_tokens above, already counted in it, and recorded
+            # separately only because cached input is cheaper than fresh.
+            details = u.get("prompt_tokens_details") or {}
+            cached = details.get("cached_tokens")
+            if cached is None:
+                cached = u.get("prompt_cache_hit_tokens")
+            if isinstance(cached, int):
+                usage["cache_read"] = cached
+            # How many of those output tokens were thinking rather than reply.
+            # Reported by OpenAI's reasoning models and by several local
+            # servers; a SUBSET of completion_tokens above, never an addition
+            # to it. Recorded so a thinking model's two streams can be given
+            # their own honest speeds instead of one figure that is wrong for
+            # both - see timing.py's header, and main._split_output.
+            out_details = u.get("completion_tokens_details") or {}
+            thinking = out_details.get("reasoning_tokens")
+            if isinstance(thinking, int):
+                usage["reasoning_tokens"] = thinking
         for choice in event.get("choices") or []:
-            text = choice.get("delta", {}).get("content")
+            if choice.get("finish_reason") == "length":
+                cut = True
+            delta = choice.get("delta", {})
+            text = delta.get("content")
             if text:
+                said = True
                 yield text
             # A thinking model streams its reasoning as its own delta field,
             # alongside (and ahead of) the content and tool_calls fragments -
             # accumulated, never yielded, because it is not part of the reply.
-            # It exists only to be handed straight back on the next request:
-            # see _REASONING_KEY.
-            if reasoning is not None:
-                part = choice.get("delta", {}).get("reasoning_content")
-                if part:
-                    reasoning["content"] = reasoning.get("content", "") + part
+            # It exists only to be handed straight back on the next request
+            # (see _REASONING_KEY), and to answer for the reply if no reply
+            # ever comes - the two cases at the end of this function.
+            # Two spellings, because the local servers disagree and a model
+            # that thinks in silence is the whole thing this is here to show.
+            # llama.cpp, LM Studio and DeepSeek send reasoning_content;
+            # OpenRouter and several vLLM builds send plain `reasoning` on the
+            # same wire. Whichever arrives is the same text.
+            part = delta.get("reasoning_content") or delta.get("reasoning")
+            if isinstance(part, str) and part:
+                thought += part
+                _thought(reasoning, part)
             if tool_call is not None:
                 # Streamed as fragments: id/function.name arrive once (on the
                 # first fragment for that index), function.arguments arrives
                 # piecemeal and is concatenated into one JSON-text string,
-                # same shape _anthropic builds from its own input_json_delta
-                # fragments. index != 0 is a second parallel call - ignored,
-                # same one-call-per-turn rule the text-embedded path already
-                # enforces (see _span()'s "first call only" comment above).
+                # same shape _read_anthropic builds from its own
+                # input_json_delta fragments. index != 0 is a second parallel
+                # call - ignored, one call per turn.
                 for frag in choice.get("delta", {}).get("tool_calls") or []:
                     if frag.get("index", 0) != 0:
                         continue
@@ -742,11 +861,10 @@ def _openai_style(url, headers, body, usage=None, tools=None, tool_call=None, re
                     fn = frag.get("function") or {}
                     # on_call_delta gets the same fragments as readable text as
                     # they land - "name(", then the arguments piecemeal - so a
-                    # native call can be WATCHED being written, the way a
-                    # text-embedded one always could. Without it a native turn
-                    # shows nothing at all until the whole stream ends, since
-                    # none of this is yielded as reply text. The closing ")"
-                    # goes on after the loop.
+                    # native call can be WATCHED being written. Without it a
+                    # native turn shows nothing at all until the whole stream
+                    # ends, since none of this is yielded as reply text. The
+                    # closing ")" goes on after the loop.
                     if fn.get("name"):
                         tool_call["name"] = fn["name"]
                         if on_call_delta:
@@ -758,155 +876,171 @@ def _openai_style(url, headers, body, usage=None, tools=None, tool_call=None, re
     # Closed off once the stream is done, so what was watched being written
     # ends up as the same text the turn is stored and redrawn with - see
     # main.py's _parse_call.
+    called = bool(tool_call and tool_call.get("name"))
+    if on_call_delta and called:
+        on_call_delta(")")
+
+    # A turn that made a tool call is complete with no prose at all - the call
+    # IS the turn - so nothing below applies to it.
+    if said or called:
+        return
+    if cut:
+        # Nothing was written and the endpoint says it stopped at a limit.
+        # Handing over the truncated thinking would be no use to anyone, so
+        # what goes back is the reason and the fix. Raised rather than
+        # yielded: this is a failed turn, and main.py files a raised message
+        # into the history where it can still be read afterwards.
+        raise RuntimeError(
+            "the model ran out of room before it wrote a reply"
+            + (" - it spent the whole response thinking ("
+               + str(len(thought)) + " characters of reasoning) and was cut off"
+               if thought else "")
+            + ". Give it more room to answer in: load it with a longer context "
+              "length, /compact this chat, or use a model that thinks less.")
+    if thought:
+        # The answer is there, just in the wrong field: this model puts
+        # everything in reasoning_content and never sends a content chunk.
+        # Only ever reached when NO reply text arrived, so a model that thinks
+        # and then answers properly is untouched - its thinking stays out of
+        # the reply, which is where it belongs.
+        #
+        # It is therefore no longer thinking, and is un-collected here. Left
+        # in, the same words would be stored on the turn twice - once as
+        # reasoning_content and once as the reply - and a page that draws a
+        # thinking block would show the whole answer inside it and then again
+        # underneath. "reclassified" tells the caller the span that was
+        # measured as thinking was really the reply being written, so the two
+        # can be swapped over (main._stream, timing.Phases.reclassify).
+        if reasoning is not None:
+            reasoning["content"] = ""
+            reasoning["reclassified"] = True
+        yield thought
+
+
+def _anthropic_usage(u):
+    """Anthropic's message_start usage block as the shape everything else here
+    uses - which needs one correction, not just a rename.
+
+    Anthropic reports `input_tokens` EXCLUSIVE of anything served from cache:
+    a request whose whole prompt was a cache hit reports input_tokens: 3 and
+    cache_read_input_tokens: 40000. Every other wire reports the inclusive
+    figure (OpenAI's cached_tokens is a subset of prompt_tokens, not an
+    addition to it). Left as-is, the same conversation would read as 40k of
+    input on DeepSeek and 3 on Anthropic, the context-window bar in the panel
+    would go quiet the moment caching kicked in, and the usage tab would
+    quietly stop counting most of what was sent.
+
+    So the total is put back together here, and the cache figures are kept
+    alongside it as the sub-counts they are everywhere else. `input_tokens`
+    then means the same thing on every provider: everything that went in."""
+    fresh = u.get("input_tokens")
+    read = u.get("cache_read_input_tokens")
+    written = u.get("cache_creation_input_tokens")
+    out = {"output_tokens": u.get("output_tokens")}
+    if isinstance(read, int):
+        out["cache_read"] = read
+    if isinstance(written, int):
+        out["cache_write"] = written
+    if isinstance(fresh, int):
+        out["input_tokens"] = fresh + (read or 0) + (written or 0)
+    else:
+        out["input_tokens"] = fresh  # not reported at all - stays unreported
+    return out
+
+
+def _read_anthropic(r, usage=None, tool_call=None, reasoning=None, on_call_delta=None):
+    """Anthropic's streamed response, yielding the reply text."""
+    for event in _sse(r):
+        etype = event.get("type")
+        # Real counts, not an estimate: message_start carries the input side
+        # (it's known before a single output token exists), message_delta
+        # carries the running output count, updated as the reply grows.
+        if usage is not None:
+            if etype == "message_start":
+                u = event.get("message", {}).get("usage", {})
+                usage.update(_anthropic_usage(u))
+            elif etype == "message_delta":
+                out = event.get("usage", {}).get("output_tokens")
+                if out is not None:
+                    usage["output_tokens"] = out
+        # A tool_use content block starts empty ({"type":"tool_use","id":...,
+        # "name":...,"input":{}}) and its `input` arrives afterward as
+        # incremental input_json_delta fragments - accumulated into a plain
+        # JSON-text string here, the same shape _read_openai builds from
+        # OpenAI's own tool_calls fragments, so main.py reads one shape
+        # regardless of which provider answered.
+        if tool_call is not None and etype == "content_block_start":
+            block = event.get("content_block", {})
+            if block.get("type") == "tool_use":
+                tool_call["id"] = block.get("id")
+                tool_call["name"] = block.get("name")
+                tool_call["arguments"] = ""
+                if on_call_delta:
+                    on_call_delta((block.get("name") or "") + "(")
+        if etype == "content_block_delta":
+            delta = event.get("delta", {})
+            text = delta.get("text")
+            if text:
+                yield text
+            elif delta.get("thinking"):
+                # Extended thinking, which arrives as its own block type and
+                # was previously read as nothing at all - the reply simply went
+                # quiet for however long the model thought for. Collected on the
+                # same channel as every other provider's reasoning, so one
+                # shape reaches main.py whoever answered.
+                _thought(reasoning, delta["thinking"])
+            elif tool_call is not None:
+                partial = delta.get("partial_json")
+                if partial:
+                    tool_call["arguments"] = tool_call.get("arguments", "") + partial
+                    if on_call_delta:
+                        on_call_delta(partial)
     if on_call_delta and tool_call and tool_call.get("name"):
         on_call_delta(")")
 
 
-def _openai(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool_call=None,
-            reasoning=None, on_call_delta=None,
-            base_url="https://api.openai.com/v1", key=None):
-    # Same switch _deepseek makes: `tools` present means this turn is on native
-    # tool-calling, so the history goes over in the API's own shape rather than
-    # folded to plain text - a call the provider itself made has to come back
-    # as that call. Without tools it's a prompted-format turn, unchanged.
-    #
-    # NOT reasoning=True. That is DeepSeek's own requirement (its thinking
-    # models 400 unless a calling turn replays its reasoning_content); here the
-    # key is simply unrecognised, and an unrecognised message key is itself a
-    # 400 - see _REASONING_KEY. `reasoning` is still forwarded below, because
-    # capturing what a model streams costs nothing and the dict is only ever
-    # replayed by the provider that asks for it.
-    messages = _native_messages(prompt) if tools else _plain_messages(prompt)
-    yield from _openai_style(
-        base_url.rstrip("/") + "/chat/completions",
-        # key=None means "the built-in openai provider" and reads .env; a
-        # custom provider always passes its own, and passes "" when it has
-        # none - which _bearer turns into no auth header at all rather than
-        # borrowing OPENAI_API_KEY, which would be nobody's intention.
-        _bearer(_key("OPENAI_API_KEY") if key is None else key),
-        {
-            "model": model,
-            "temperature": temperature,
-            "stop": STOP,
-            "stream": True,
-            "messages": messages,
-        },
-        usage=usage, tools=tools, tool_call=tool_call, reasoning=reasoning,
-        on_call_delta=on_call_delta,
-    )
-
-
-def _deepseek(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool_call=None,
-              reasoning=None, on_call_delta=None,
-              base_url="https://api.deepseek.com", key=None):
-    # `tools` present means this turn is on native tool-calling, so the
-    # history goes over in the API's own shape (_native_messages) rather than
-    # folded to plain text - the call the provider itself made has to come
-    # back as that call. Without tools it's a prompted-format turn and nothing
-    # changes. _openai and _local share this wire and now make the same switch;
-    # what stays DeepSeek-only is the reasoning_content round-trip below.
-    #
-    # reasoning=True is DeepSeek-only: its thinking models demand their own
-    # reasoning_content back on any turn that made a call (_REASONING_KEY).
-    messages = (_native_messages(prompt, reasoning=True) if tools
-                else _plain_messages(prompt))
-    yield from _openai_style(
-        base_url.rstrip("/") + "/chat/completions",
-        _bearer(_key("DEEPSEEK_API_KEY") if key is None else key),
-        {
-            "model": model,
-            "temperature": temperature,
-            "stop": STOP,
-            "stream": True,
-            # DeepSeek defaults to Chinese without this - its own leading
-            # system message, since it's a DeepSeek quirk, not something
-            # every provider needs.
-            "messages": [{"role": "system", "content": "Always respond in English."}]
-                        + messages,
-        },
-        usage=usage, tools=tools, tool_call=tool_call, reasoning=reasoning,
-        on_call_delta=on_call_delta,
-    )
-
-
-def _local(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool_call=None,
-           reasoning=None, on_call_delta=None):
-    # A local server on the user's own machine, not a paid API - no key needed,
-    # and whatever model is loaded in LM Studio right now is what answers,
-    # named exactly as LM Studio shows it.
-    #
-    # Native tool-calling, same switch as _openai/_deepseek - LM Studio serves
-    # the OpenAI wire, tools array included, for any loaded model whose
-    # template supports it. Whether the model actually USES it is the model's
-    # business: a small one that ignores the schemas and writes a call as
-    # prose simply doesn't call anything, and main.py nudges it (see
-    # tool_processor.looks_like_call). There is no prompted fallback to put it
-    # on any more - a model that can't do native tool calls can't use tools.
-    #
-    # reasoning is forwarded, not replayed. Locally-run thinking models
-    # (deepseek-r1 builds especially) do stream reasoning_content, so capturing
-    # it is worth it - but no reasoning=True on _native_messages: LM Studio
-    # never demands the round-trip, and handing an unknown key to whichever
-    # backend is loaded is a needless way to fail a turn.
-    messages = _native_messages(prompt) if tools else _plain_messages(prompt)
-    yield from _openai_style(
-        LMSTUDIO_URL + "/chat/completions",
-        {},
-        {
-            "model": model,
-            "temperature": temperature,
-            "stop": STOP,
-            "stream": True,
-            "messages": messages,
-        },
-        usage=usage, tools=tools, tool_call=tool_call, reasoning=reasoning,
-        on_call_delta=on_call_delta,
-    )
-
-
-def _gemini(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool_call=None,
-            reasoning=None, on_call_delta=None,
-            base_url="https://generativelanguage.googleapis.com/v1beta", key=None):
-    # alt=sse is what makes Gemini stream as Server-Sent Events; without it the
-    # streaming endpoint sends one big JSON array instead.
-    #
-    # With `tools`, the history goes over as functionCall/functionResponse
-    # parts (_gemini_contents) rather than _compat's plain text. Gemini's
-    # tools array is ALREADY one Tool object holding every declaration - it
-    # refuses several non-search Tool objects in one request - so it goes on
-    # the body as-is; see tool_processor.tools_schema.
-    if tools:
-        system, contents = _gemini_contents(prompt)
-    else:
-        system, turns = _compat(_messages(prompt))
-        # Gemini calls the assistant's role "model", not "assistant".
-        contents = [{"role": "model" if t["role"] == "assistant" else "user",
-                     "parts": [{"text": t["content"]}]} for t in turns]
-    body = {
-        "generationConfig": {"temperature": temperature, "stopSequences": STOP},
-        "contents": contents,
-    }
-    if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
-    if tools:
-        body["tools"] = tools
-    r = _stream_post(
-        base_url.rstrip("/") + f"/models/{model}:streamGenerateContent?alt=sse",
-        headers={"x-goog-api-key": _key("GEMINI_API_KEY") if key is None else key},
-        json=body,
-        stream=True,
-    )
+def _read_gemini(r, usage=None, tool_call=None, reasoning=None, on_call_delta=None):
+    """Gemini's streamed response, yielding the reply text."""
     for event in _sse(r):
         if usage is not None:
             u = event.get("usageMetadata")
             if u:
                 usage["input_tokens"] = u.get("promptTokenCount")
-                usage["output_tokens"] = u.get("candidatesTokenCount")
+                # Gemini is the odd one out on the output side, the way
+                # Anthropic is on the input side: thoughtsTokenCount is NOT
+                # part of candidatesTokenCount, it sits beside it. Left alone,
+                # a Gemini thinking model's whole reasoning bill went
+                # unrecorded - the ledger counted the reply and nothing else,
+                # and the tokens you are actually charged for were invisible.
+                # So the total is put back together here and the thinking kept
+                # alongside it as the sub-count it is everywhere else, which is
+                # what makes "output_tokens" mean the same thing on every wire:
+                # everything that came out.
+                written = u.get("candidatesTokenCount")
+                thinking = u.get("thoughtsTokenCount")
+                if isinstance(thinking, int):
+                    usage["reasoning_tokens"] = thinking
+                    usage["output_tokens"] = (written or 0) + thinking
+                else:
+                    usage["output_tokens"] = written
+                # Already part of promptTokenCount, same as OpenAI's - see
+                # _anthropic_usage on why Anthropic is the odd one out.
+                cached = u.get("cachedContentTokenCount")
+                if isinstance(cached, int):
+                    usage["cache_read"] = cached
         for candidate in event.get("candidates", []):
             for part in candidate.get("content", {}).get("parts", []):
                 text = part.get("text")
                 if text:
-                    yield text
+                    # Gemini does not give thinking a part type of its own - a
+                    # thought is an ordinary text part carrying thought: true.
+                    # Untested for, its summarised thinking was yielded INTO
+                    # the reply, which is how a Gemini answer could arrive with
+                    # its own working printed above it.
+                    if part.get("thought"):
+                        _thought(reasoning, text)
+                    else:
+                        yield text
                     continue
                 # A functionCall part arrives WHOLE - its args are a real JSON
                 # object in one event, not the fragment stream Anthropic and
@@ -923,6 +1057,161 @@ def _gemini(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool
                     tool_call["arguments"] = json.dumps(fn.get("args") or {})
                     if on_call_delta:
                         on_call_delta(tool_call["name"] + "(" + tool_call["arguments"] + ")")
+
+
+READERS = {
+    "openai": _read_openai,
+    "anthropic": _read_anthropic,
+    "gemini": _read_gemini,
+}
+
+
+def _post_stream(url, headers, body):
+    """POST a streaming request and hand back the response, having first got
+    past the failures that are worth another go.
+
+    All three are recognised by what the endpoint says back, never by which
+    provider is being called, so they cost nothing on a wire that never
+    produces them and protect a custom wire nobody had thought of yet.
+
+    1. A REJECTED PARAMETER is dropped and the request retried. Newer OpenAI
+       models refuse parameters older ones expect - gpt-5.x rejects 'stop', and
+       a non-default 'temperature' - with a 400 that names the parameter.
+       Keeping a table of which model takes what is unknowable and goes stale,
+       so the named parameter is simply removed. Each retry removes exactly
+       one, so this terminates. stream_options goes the same way on the local
+       servers that don't implement it: usage stays unpopulated for that call
+       rather than the turn failing over it.
+
+    2. REASONING REFUSING TOOLS is retried with reasoning switched off.
+       OpenAI's reasoning models refuse function tools on /chat/completions and
+       say so in as many words: "To use function tools, use /v1/responses or
+       set reasoning_effort to 'none'". Rule 1 cannot catch this one, because
+       the parameter it names is not in the body - it is the model's own
+       default that is the problem, so there is nothing to delete. The trade is
+       real: that model does no reasoning on a turn carrying tools. Tools are
+       the point of a native turn though, so a thinking model with no tools is
+       the worse end of it. Set once, so this terminates.
+
+    3. A FLAKY 401 is retried twice, paced. OpenAI's gpt-5.x endpoints
+       intermittently 401 with "insufficient permissions" - measured at roughly
+       one request in three on the same key and model that succeed moments
+       later. A genuinely bad key fails all three times and still raises, just
+       a few seconds later."""
+    body = dict(body)
+    flaky = 0
+    while True:
+        r = _stream_post(url, headers=headers, json=body, stream=True)
+        if r.status_code == 200:
+            return r
+        try:
+            err = r.json().get("error", {})
+        except ValueError:
+            err = {}
+        param = err.get("param")
+        if err.get("code") in ("unsupported_parameter", "unsupported_value") and param in body:
+            del body[param]
+            continue
+        if (param == "reasoning_effort" and body.get("tools")
+                and body.get("reasoning_effort") != "none"):
+            body["reasoning_effort"] = "none"
+            continue
+        if r.status_code == 401 and flaky < 2:
+            flaky += 1
+            _pause(1.5 * flaky)
+            continue
+        _check(r)  # not fixable - raise with the endpoint's own message
+
+
+def _read_retrying(reader, url, headers, body, **kw):
+    """Send the request, read the reply, and send it again if the provider
+    hangs up before a single frame comes back.
+
+    This is the other half of Dropped. _sse only raises it when nothing was
+    yielded, so re-sending here cannot duplicate text the user has already
+    seen, and cannot double-count usage or a half-built tool call - the reader
+    never got far enough to touch either. A stream that dies after real content
+    ends there instead and never reaches this.
+
+    Three attempts, paced, because a free or overloaded endpoint dropping the
+    connection is transient by nature; a provider that is genuinely down drops
+    all three and raises with the last reason it gave. _pause is used rather
+    than sleep so /stop still lands during the wait."""
+    for attempt in range(3):
+        try:
+            yield from reader(_post_stream(url, headers, body), **kw)
+            return
+        except Dropped as e:
+            if attempt == 2:
+                raise RuntimeError(
+                    "the provider hung up before sending anything, three times "
+                    "over - " + str(e))
+            _pause(1.5 * (attempt + 1))
+
+
+def _openai_style(url, headers, body, usage=None, tools=None, tool_call=None,
+                  reasoning=None, on_call_delta=None):
+    """Send an OpenAI-wire request and read the reply. The spec path builds its
+    own body and calls the two halves directly; this is kept because it is the
+    smallest possible thing that exercises _stream_post, _sse and a reader
+    together, which is exactly what scripts/test_stop.py wants of it."""
+    body = dict(body)
+    if tools:
+        body["tools"] = tools
+    if usage is not None:
+        body["stream_options"] = {"include_usage": True}
+    yield from _read_retrying(_read_openai, url, headers, body, usage=usage,
+                              tool_call=tool_call, reasoning=reasoning,
+                              on_call_delta=on_call_delta)
+
+
+def _spec_wire(wire):
+    """The provider function for a wire described in wires.json.
+
+    This is the whole of what used to be five near-identical functions. It
+    builds the turn's values, hands them to the spec to be rendered into a
+    request in the order that spec asks for, sends it, and reads the answer
+    with the dialect's reader. Nothing in it is specific to any endpoint.
+
+    The spec is re-read per call rather than captured, so editing a wire on the
+    settings page takes effect on the very next turn - no restart, and no stale
+    copy held by a provider object that was built when the server started."""
+    def call(model, prompt, temperature=TEMPERATURE, usage=None, tools=None,
+             tool_call=None, reasoning=None, on_call_delta=None,
+             base_url="", key="", setup=None):
+        spec = wires.spec_for(wire)
+        if not spec:
+            raise RuntimeError("no wire called " + wire + " - it was removed "
+                               "from wires.json while a provider still used it.")
+        dialect = spec.get("dialect") or "openai"
+        reader = READERS.get(dialect)
+        if reader is None:
+            raise RuntimeError(wire + ' names dialect "' + str(dialect)
+                               + '", which Uniagent cannot read. Known: '
+                               + ", ".join(READERS) + ".")
+
+        system, messages = _dialect_turns(dialect, prompt, tools, spec)
+        url, headers, body = wires.build(spec, {
+            "model": model,
+            "messages": messages,
+            "system": system,
+            "temperature": temperature,
+            "tools": tools,
+            "stop": STOP,
+            "max_tokens": spec.get("max_tokens"),
+            # Without this the OpenAI wire never reports usage at all: the real
+            # counts arrive in one extra final SSE event, which the endpoint
+            # only sends when asked. Absent when nobody wants counts, which
+            # prunes the whole stream_options object out of the body.
+            "want_usage": True if usage is not None else None,
+            "key": key,
+            "base_url": base_url,
+            "setting": setup or {},
+        })
+        yield from _read_retrying(reader, url, headers, body, usage=usage,
+                                  tool_call=tool_call, reasoning=reasoning,
+                                  on_call_delta=on_call_delta)
+    return call
 
 
 def _bedrock_client(service, base_url=None, setup=None):
@@ -1037,6 +1326,15 @@ def _bedrock(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, too
             u = event["metadata"].get("usage", {})
             usage["input_tokens"] = u.get("inputTokens")
             usage["output_tokens"] = u.get("outputTokens")
+            # Bedrock reports cache tokens on the side, like Anthropic does -
+            # but inputTokens here is already the inclusive total, so these are
+            # recorded and not added on (see _anthropic_usage for the wire
+            # where that isn't true).
+            for field, key in (("cacheReadInputTokens", "cache_read"),
+                               ("cacheWriteInputTokens", "cache_write")):
+                value = u.get(field)
+                if isinstance(value, int):
+                    usage[key] = value
         # A tool call opens with contentBlockStart carrying its id and name,
         # then its input arrives as contentBlockDelta toolUse.input fragments -
         # a JSON-text string built up piece by piece, exactly like Anthropic's
@@ -1053,6 +1351,11 @@ def _bedrock(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, too
         text = delta.get("text")
         if text:
             yield text
+        # converse's own name for the same thing Anthropic calls a thinking
+        # block. Nested one level deeper and otherwise identical.
+        thinking = (delta.get("reasoningContent") or {}).get("text")
+        if thinking:
+            _thought(reasoning, thinking)
         use = delta.get("toolUse")
         if use and tool_call is not None:
             partial = use.get("input")
@@ -1130,11 +1433,18 @@ def _claude_subscription(model, prompt, temperature=TEMPERATURE, usage=None, too
     which owns its own login - there is no endpoint to point it at and no key
     to hand it, so both boxes on its card do nothing.
 
-    tools/tool_call accepted, not used: the Agent SDK runs its OWN tool loop
-    (see the options below, all of which switch that loop OFF) - fighting it
-    with a second, custom tools schema would conflict rather than add to it.
-    A stray ToolUseBlock is already logged and ignored further down for the
-    same reason. Left on the old prompted-text path deliberately.
+    THIS IS THE ONE-SHOT PATH ONLY. A chat turn on this provider does not come
+    here at all: main.run() sends it to claude_session.py instead, which keeps
+    a Claude Code session alive per chat and lets it run its own tool loop
+    under Uniagent's approval gate. What still arrives here is everything that
+    asks this provider ONE question and wants one block of text back - the
+    safety check, compaction, a connectivity test - none of which have tools,
+    a conversation, or anything to keep warm afterwards.
+
+    tools/tool_call are accepted and not used for exactly that reason: nothing
+    that reaches this function passes any. A stray ToolUseBlock is logged and
+    ignored further down, since with no tools configured there should never be
+    one.
 
     Claude Code's own runtime, driven through the Agent SDK, signed in as the
     Claude subscription already logged in on this machine. Every other provider
@@ -1144,19 +1454,15 @@ def _claude_subscription(model, prompt, temperature=TEMPERATURE, usage=None, too
     of lifting the OAuth token and calling api.anthropic.com with it is not.
 
     The SDK's whole purpose is to run an *agent*: its own tools, its own loop,
-    its own system prompt. All of that is switched off below, because Uniagent
-    is the agent - it runs its own loop and executes its own tools, and needs
-    this to be nothing more than the plain text-completion endpoint every other
-    function in this file talks to.
+    its own system prompt. All of that is switched off below, because none of
+    it belongs on a one-shot question - this has to be nothing more than the
+    plain text-completion endpoint every other function in this file is.
 
-    Two things the other providers get that this one cannot, because the SDK
-    exposes no way to ask for them: TEMPERATURE and STOP. The missing stop
-    sequences are the one that costs something. They exist so generation halts
-    at the first tool call instead of barrelling on inventing tool results, and
-    without them this model does barrel on. It stays affordable only because
-    _stream in main.py breaks at the first complete call - which closes this
-    generator, which kills the CLI process mid-sentence. So the tail is cut,
-    just a beat later than a stop sequence would cut it.
+    TEMPERATURE is the one thing the other providers get that this cannot: the
+    SDK exposes no way to ask for it, so a chat's temperature setting means
+    nothing here and the wire's card says so. Stop sequences are missing too
+    and no longer matter - they existed to halt generation at a tool call, and
+    nothing that reaches this function has any tools to call.
     """
     # Imported here, not at module scope, so the SDK is only needed if you
     # actually use this provider - same as boto3 in _bedrock above.
@@ -1243,8 +1549,7 @@ def _claude_subscription(model, prompt, temperature=TEMPERATURE, usage=None, too
                     if usage is not None:
                         if etype == "message_start":
                             u = event.get("message", {}).get("usage", {})
-                            usage["input_tokens"] = u.get("input_tokens")
-                            usage["output_tokens"] = u.get("output_tokens")
+                            usage.update(_anthropic_usage(u))
                         elif etype == "message_delta":
                             out = event.get("usage", {}).get("output_tokens")
                             if out is not None:
@@ -1323,14 +1628,28 @@ def _claude_error(e):
     return RuntimeError("claude-subscription failed: " + text[:300])
 
 
+def _piper(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool_call=None,
+           reasoning=None, on_call_delta=None, base_url=None, key=None, setup=None):
+    """Piper is a text-to-speech engine, not a chat model - it has no way to
+    answer a prompt. This exists so a piper provider is a real, selectable
+    provider (it shows up on the voice tab and can be picked as the speaker)
+    without pretending it can hold a conversation. If it is ever chosen as a
+    chat provider, this is the clear, immediate answer rather than a hang or a
+    confusing empty reply."""
+    raise RuntimeError("piper is a text-to-speech engine, not a chat model - "
+                       "it can read replies out loud but cannot answer them. "
+                       "Pick a chat provider on the providers tab.")
+
+
 # --- Providers.
 #
 # There is no built-in provider, and nothing here creates one. Every provider
 # is one object in .env's LLM_PROVIDERS - a name, a wire, a base URL, a key and
 # an optional model list - and every one of them can be renamed, repointed,
 # re-keyed or deleted from the settings page. The code below supplies WIRES
-# (how to talk to a shape of API) and nothing else; the list of providers is
-# whatever the user has put in .env, up to and including nothing at all.
+# (how to talk to a shape of API, most of them described in wires.json rather
+# than written here) and nothing else; the list of providers is whatever the
+# user has put in .env, up to and including nothing at all.
 #
 # They live in ONE .env variable as a JSON list, exactly like EMAIL_ACCOUNTS
 # (tools/_email.py) and for the same reason: a flat NAME=value file cannot
@@ -1342,184 +1661,137 @@ def _claude_error(e):
 CUSTOM_VAR = "LLM_PROVIDERS"
 
 # Which function drives a provider, chosen by its "wire" - the protocol its
-# endpoint speaks, not the company running it. "openai" is the OpenAI
-# /chat/completions shape, which is what nearly every third-party endpoint
-# serves (OpenRouter, Groq, Together, xAI, Mistral, Ollama, vLLM, LM Studio).
-# "deepseek" is that same wire plus DeepSeek's own two quirks - its leading
-# "answer in English" system message and the reasoning_content round-trip its
-# thinking models demand, see _deepseek - so a DeepSeek key wants this rather
-# than plain "openai", which would 400 on deepseek-reasoner.
+# endpoint speaks, not the company running it.
 #
-# bedrock and claude-subscription are wires like any other here, so they can be
-# named, moved and deleted like any other provider. What they ignore is the key
-# and the URL: bedrock signs with the AWS credentials on this machine (and
-# reads its base URL box as a region), claude-subscription drives the Claude
-# Code CLI, which owns its own login.
-WIRES = {
-    "openai": _openai,
-    "deepseek": _deepseek,
-    "anthropic": _anthropic,
-    "gemini": _gemini,
+# ALMOST EVERY WIRE IS DATA. wires.json describes them - endpoint, auth, the
+# body template and the order of it - and _spec_wire() turns any such
+# description into a provider function on demand. Adding OpenRouter, Groq,
+# xAI, Together, an in-house gateway or a model server nobody has built yet is
+# an entry in that file and no code at all.
+#
+# What is hardcoded below is the two wires that are not HTTP-and-JSON, and so
+# have no request to describe: bedrock signs each call with AWS SigV4 through
+# boto3, and claude-subscription drives the Claude Code CLI as a subprocess.
+# They are wires like any other to everything outside this module - nameable,
+# movable and deletable as providers - they simply cannot be expressed as a
+# template, and wires.json marks them "native": true so the settings page
+# explains that instead of offering an editor that could not work.
+NATIVE_WIRES = {
     "bedrock": _bedrock,
     "claude-subscription": _claude_subscription,
-    # Byte for byte the openai wire. It exists as a separate name only so that
-    # provider_Request_Template.json has somewhere to say "this one is a server
-    # address and nothing else" - a local model server takes no key, and a key
-    # box on its form is a box that can only be filled in wrongly. Same
-    # function, so nothing about the request differs.
-    "local": _openai,
+    "piper": _piper,
 }
 
-# Where each wire points when a provider names no base URL of its own. These
-# MUST match the same-named defaults on the functions above. The two that
-# authenticate without a URL have nothing to put here.
-WIRE_DEFAULT_URL = {
-    "openai": "https://api.openai.com/v1",
-    "deepseek": "https://api.deepseek.com",
-    "anthropic": "https://api.anthropic.com",
-    "gemini": "https://generativelanguage.googleapis.com/v1beta",
-    "bedrock": "",
-    "claude-subscription": "",
-    "local": LMSTUDIO_URL,
-}
 
-# Wires that don't authenticate with a key. A provider on one of these counts
-# as configured on its own credentials rather than on anything typed into its
-# card - see available().
-KEYLESS_WIRES = frozenset({"bedrock", "claude-subscription", "local"})
+def wire_call(wire):
+    """The function that drives `wire`, or None if no such wire exists.
 
-# The picture a provider shows on the settings page when it hasn't been given
-# one of its own. Keyed by wire for the same reason WIRE_MODELS is: a wire is
-# the one thing about a provider that survives every edit made to it, so a
-# card renamed from "deepseek" to "cheap-and-fast" keeps looking like what it
-# actually talks to.
-#
-# These are paths, exactly like a provider's own "icon" - they name files in
-# web/icons/ that the server hands out under /icons/. Anything on a wire not
-# listed here falls through to the question mark, which is the honest answer:
-# the openai wire is spoken by a dozen companies and guessing a logo for it
-# would be wrong more often than right.
-WIRE_ICONS = {
-    "openai": "/icons/openai.svg",
-    "deepseek": "/icons/deepseek.svg",
-    "anthropic": "/icons/claude.svg",
-    "claude-subscription": "/icons/claude.svg",
-    "bedrock": "/icons/bedrock.svg",
-}
+    Looked up per call rather than held in a dict built at import, because
+    wires.json is editable while the server runs: a wire added on the settings
+    page has to be callable on the very next turn, and one whose body template
+    was just corrected has to send the corrected body."""
+    if wire in NATIVE_WIRES:
+        return NATIVE_WIRES[wire]
+    if wire in wires.specs():
+        return _spec_wire(wire)
+    return None
+
+
+def wire_names():
+    """Every wire that exists - shipped, then yours. The settings page's wire
+    dropdown, in the order it shows them."""
+    return wires.names()
+
 
 UNKNOWN_ICON = "/icons/unknown.svg"
+
+
+def wire_default_url(wire):
+    """Where `wire` points when a provider names no base URL of its own.
+
+    LMSTUDIO_URL is honoured over the local wire's shipped default, because
+    that variable is how someone with LM Studio on another machine has always
+    pointed Uniagent at it, and a refactor must not quietly stop reading it."""
+    if wire == "local" and os.environ.get("LMSTUDIO_URL"):
+        return os.environ["LMSTUDIO_URL"]
+    return str(wires.spec_for(wire).get("default_base_url") or "")
+
+
+def wire_icon(wire):
+    """The picture a provider on `wire` shows when it hasn't got one of its
+    own, or None. Anything unlisted falls through to the question mark, which
+    is the honest answer: the openai wire is spoken by a dozen companies and
+    guessing a logo for it would be wrong more often than right."""
+    return wires.spec_for(wire).get("icon") or None
+
+
+def suggested_models(wire):
+    """Model ids to offer for `wire` before its endpoint has been asked.
+
+    Suggestions ONLY - never a whitelist. Nothing rejects a model for being
+    absent: the settings page's model box is free text with these as
+    autocomplete hints, and the model is passed to the provider exactly as
+    typed, so a model released after this was written works with no change.
+
+    ORDER MATTERS in one narrow way: the first entry is that wire's default -
+    what cron falls back to when a job names a provider but no model, and what
+    a blank model setting is filled in with.
+
+    Keyed by WIRE and by nothing else. It used to be keyed by provider name,
+    which quietly made a handful of names privileged: a provider called
+    "openai" inherited the list and had its own shadowed by it, while renaming
+    it to "openai-work" took the list away. A wire is a property no rename can
+    touch - see floor_models()."""
+    got = wires.spec_for(wire).get("suggested_models")
+    return [str(m) for m in got] if isinstance(got, list) else []
+
 
 # --- Per-wire setup forms.
 #
 # Every provider gets two boxes: a base URL and an API key. That is the whole
-# shape of nearly every wire here, so nearly every wire says nothing about it -
+# shape of nearly every wire, so nearly every wire says nothing about it -
 # openai, deepseek, anthropic and gemini are all "point it at a host, hand it a
-# bearer token" and are deliberately absent from the file below.
+# bearer token" and name no fields at all.
 #
-# A wire that authenticates some OTHER way needs different boxes, and needs to
-# say so somewhere the settings page can read: Bedrock signs with AWS
-# credentials and has no URL or key at all, claude-subscription drives a CLI
-# and needs to be told where that CLI is. provider_Request_Template.json is that
-# somewhere - which fields, what each is called, what it means, and crucially
-# the ENVIRONMENT VARIABLE NAME each one corresponds to.
+# A wire that authenticates some OTHER way needs different boxes and says so in
+# its own entry in wires.json: which fields, what each is called, what it
+# means, and crucially the ENVIRONMENT VARIABLE NAME each corresponds to.
 #
 # That name is doing real work. It is what the page labels the box with, so
-# what you type into "AWS_REGION" is obviously the same thing as the
-# AWS_REGION you might already export - and it is what provider_setting()
-# falls back to reading out of the real environment when a provider leaves the
-# box empty. So a machine with ~/.aws set up keeps working untouched, and a
-# provider that fills the boxes in gets its own credentials instead.
-TEMPLATE_FILE = Path(__file__).parent.parent / "provider_Request_Template.json"
-
-_templates_cache = (None, None)     # (mtime, data)
-
-
-def templates():
-    """{wire: template} out of provider_Request_Template.json.
-
-    Re-read whenever the file changes, cached otherwise: this is asked for on
-    every settings page load and on every Bedrock call, and it is a file that
-    changes about once a year.
-
-    Never raises. A missing file means "every wire uses the default form",
-    which is true and is the state most installs are in; a malformed one is
-    reported through template_error() and otherwise treated the same, because
-    a typo'd bracket must not stop every provider from working."""
-    global _templates_cache, _template_error
-    try:
-        mtime = TEMPLATE_FILE.stat().st_mtime
-    except OSError:
-        _template_error = None
-        return {}
-    if _templates_cache[0] == mtime:
-        return _templates_cache[1]
-    try:
-        data = json.loads(TEMPLATE_FILE.read_text())
-    except (OSError, json.JSONDecodeError) as e:
-        _template_error = (TEMPLATE_FILE.name + " could not be read (" + str(e)
-                           + ") - every wire is using the default form until it is fixed.")
-        _templates_cache = (mtime, {})
-        return {}
-    _template_error = None
-    clean = {}
-    if isinstance(data, dict):
-        for wire, entry in data.items():
-            # "_readme" and anything else that isn't a wire this code speaks is
-            # skipped rather than refused - the file is meant to be read by a
-            # person, and notes in it are welcome.
-            if wire in WIRES and isinstance(entry, dict):
-                clean[wire] = entry
-    _templates_cache = (mtime, clean)
-    return clean
-
-
-_template_error = None
+# what you type into "AWS_REGION" is obviously the same thing as the AWS_REGION
+# you might already export - and it is what provider_setting() falls back to
+# reading out of the real environment when a provider leaves the box empty. So
+# a machine with ~/.aws set up keeps working untouched, and a provider that
+# fills the boxes in gets its own credentials instead.
 
 
 def template_error():
-    templates()
-    return _template_error
+    """Whichever wires file last failed to parse, as a sentence for the
+    settings page, or None when both are fine."""
+    return wires.error()
 
 
 def template_for(wire):
-    """The setup form for `wire` - {} for the wires that use the default one."""
-    return templates().get(wire, {})
+    """`wire`'s whole spec - its form, and for a spec wire its request too."""
+    return wires.spec_for(wire)
 
 
 def template_fields(wire):
     """The extra boxes `wire` asks for, each settled into a full dict so
-    neither the page nor provider_setting() has to guess at missing keys. A
-    field with no "env" is dropped: the variable name is the one thing that
-    cannot be defaulted, since it is what the value is looked up by."""
-    out = []
-    for f in template_for(wire).get("fields") or []:
-        if not isinstance(f, dict):
-            continue
-        env = str(f.get("env") or "").strip()
-        if not env:
-            continue
-        out.append({
-            "env": env,
-            "label": str(f.get("label") or env),
-            "help": str(f.get("help") or ""),
-            "secret": bool(f.get("secret")),
-            "required": bool(f.get("required")),
-            "default": str(f.get("default") or ""),
-            "placeholder": str(f.get("placeholder") or ""),
-        })
-    return out
+    neither the page nor provider_setting() has to guess at missing keys."""
+    return wires.fields(wires.spec_for(wire))
 
 
 def wants_key(wire):
-    """Whether this wire's form has an API key box. Templates say key: false
-    for the wires that don't authenticate with one; everything else does."""
+    """Whether this wire's form has an API key box. A spec says key: false for
+    the wires that don't authenticate with one; everything else does."""
     return template_for(wire).get("key", True) is not False
 
 
 def base_url_label(wire):
     """What this wire calls its base-URL box, or None when it hasn't got one.
 
-    The counterpart of wants_key. A template says base_url: false for the wires
+    The counterpart of wants_key. A spec says base_url: false for the wires
     that authenticate without a URL at all (bedrock signs with the AWS
     credentials on the machine, claude-subscription drives a CLI that owns its
     own login), or names the box when "base URL" would be the wrong words for
@@ -1532,7 +1804,7 @@ def base_url_label(wire):
 
 def wire_label(wire):
     """The human name for a wire - "Amazon Bedrock" rather than "bedrock" -
-    falling back to the wire's own name when no template names it."""
+    falling back to the wire's own name when its spec names none."""
     return str(template_for(wire).get("label") or wire)
 
 
@@ -1606,7 +1878,7 @@ def _normalize_custom(entry):
         return None
     name = str(entry.get("name") or "").strip().lower()
     wire = str(entry.get("wire") or "openai").strip().lower()
-    if not _NAME_OK.match(name) or wire not in WIRES:
+    if not _NAME_OK.match(name) or wire_call(wire) is None:
         return None
     models = entry.get("models")
     return {
@@ -1765,13 +2037,13 @@ def icon_for(p):
     A path, never image data - the page turns it into a URL it can load (see
     server._icon_url), because a picture living on this machine can't be
     reached from an https: page without coming back through the server."""
-    return p.get("icon") or WIRE_ICONS.get(p["wire"]) or UNKNOWN_ICON
+    return p.get("icon") or wire_icon(p["wire"]) or UNKNOWN_ICON
 
 
 def custom_base_url(p):
     """Where `p` actually points - its own base URL, or its wire's default
     host when it named none."""
-    return p["base_url"] or WIRE_DEFAULT_URL[p["wire"]]
+    return p["base_url"] or wire_default_url(p["wire"])
 
 
 def custom_key(p):
@@ -1828,9 +2100,9 @@ def save_custom_provider(name, wire="openai", base_url="", key=None, models=None
         raise ValueError("a provider name must start with a letter or digit and use only "
                          "lowercase letters, digits, dots, dashes and underscores - "
                          "so 'deepseek-work', not " + repr(name))
-    if wire not in WIRES:
+    if wire_call(wire) is None:
         raise ValueError("unknown wire " + repr(wire) + " - it must be one of: "
-                         + ", ".join(sorted(WIRES)))
+                         + ", ".join(wire_names()))
     entries = custom_providers()
     old = (rename_from or name).strip().lower()
     if name != old and any(p["name"] == name for p in entries):
@@ -1908,7 +2180,7 @@ def _fold_models_onto_id(old_name, provider_id):
             changed = True
     if changed:
         data[provider_id] = current
-        CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n")
+        CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def _clean_config(config):
@@ -1944,28 +2216,21 @@ def resolved_setup(p):
     return {f["env"]: provider_setting(p, f["env"]) for f in template_fields(p["wire"])}
 
 
-# The wire functions that take a `setup` argument - the ones with a form in
-# provider_Request_Template.json to fill it from. Kept as an explicit set rather
-# than read off the template file, because it describes these functions'
-# SIGNATURES: a wire listed here that doesn't accept setup= would raise on
-# every call, and that is a code fact, not a configuration one.
-SETUP_WIRES = frozenset({"bedrock", "claude-subscription"})
-
-
 def _custom_call(p):
-    """`p`'s provider function: its wire's, with the base URL and the key
-    baked in. The key goes over as a string even when it is empty, which is
-    what tells the wire function to send no auth header rather than reach for
-    a key in .env that this provider never claimed.
+    """`p`'s provider function: its wire's, with the base URL, the key and
+    this provider's own setup answers baked in. The key goes over as a string
+    even when it is empty, which is what tells the wire to send no auth header
+    rather than reach for a key in .env that this provider never claimed.
 
-    The wires with a setup form also get it resolved and baked in, so a
-    Bedrock provider carrying its own AWS credentials calls with those and one
-    carrying none falls through to the machine's."""
-    call = functools.partial(WIRES[p["wire"]],
-                             base_url=custom_base_url(p), key=custom_key(p))
-    if p["wire"] in SETUP_WIRES:
-        call = functools.partial(call, setup=resolved_setup(p))
-    return call
+    `setup` goes to every wire, not to a list of wires that were known to
+    accept it. It used to be the latter, and that was a standing trap: a wire
+    that grew a field had to be added to a frozenset in this file too, or its
+    boxes silently did nothing. Now a wire declares its fields in wires.json
+    and they arrive, which is the whole of adding one - and $setting:NAME in a
+    body template is how a spec wire reads them back."""
+    return functools.partial(wire_call(p["wire"]),
+                             base_url=custom_base_url(p), key=custom_key(p),
+                             setup=resolved_setup(p))
 
 
 def providers():
@@ -1995,80 +2260,6 @@ def wire_for(name):
     by."""
     p = custom_provider(name)
     return p["wire"] if p else name
-
-# Suggestions ONLY - never a whitelist. Nothing rejects a model for being
-# absent from here: the settings page's model box is free text with these as
-# autocomplete hints, and the model is passed to the provider exactly as
-# typed. So a model released after this was written works with no code change,
-# which is the point - these lists cannot be kept complete (nobody can list
-# every OpenAI or Bedrock model) and must not be treated as if they were.
-#
-# Keyed by WIRE and by nothing else. It used to be keyed by provider name,
-# which quietly made a handful of names privileged: a provider called
-# "openai" inherited this list and had its own model list shadowed by it,
-# while renaming that provider to "openai-work" took the list away. A wire is
-# a property of the object that no rename can touch, so keying on it is what
-# makes a name genuinely free to change - see floor_models().
-#
-# ORDER MATTERS in one narrow way: the first entry is a provider's default -
-# what cron falls back to when a job names a provider but no model, and what
-# a blank model setting is filled in with. Add below the first entry unless
-# you mean to change that default.
-WIRE_MODELS = {
-    "anthropic": [
-        "claude-opus-4-8",
-        "claude-fable-5",
-        "claude-sonnet-5",
-        "claude-opus-4-7",
-        "claude-opus-4-6",
-        "claude-opus-4-5",
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-5",
-        "claude-haiku-4-5",
-    ],
-    "openai": [
-        "gpt-4o",
-        "gpt-4o-mini",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4.1-nano",
-        "o3",
-        "o3-mini",
-        "o4-mini",
-    ],
-    "deepseek": [
-        "deepseek-v4-flash",
-        "deepseek-chat",
-        "deepseek-reasoner",
-    ],
-    "gemini": [
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-1.5-pro",
-        "gemini-1.5-flash",
-    ],
-    # Bedrock takes inference-profile ids, which depend on what's enabled in
-    # the account and region (BEDROCK_REGION above), so this is only the two
-    # known to work rather than a guess at the full catalogue.
-    "bedrock": [
-        "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-        "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    ],
-    # The Claude Code CLI takes these aliases as well as full model ids, and
-    # the aliases are the better default: they follow whatever the
-    # subscription currently entitles you to without this list going stale.
-    # sonnet leads deliberately - a subscription pays in usage window rather
-    # than per token, and opus empties that window several times faster.
-    "claude-subscription": [
-        "sonnet",
-        "opus",
-        "haiku",
-    ],
-}
-
 
 def find_model(name):
     """The provider that owns model `name`, or None if nothing has it. Used by
@@ -2101,27 +2292,26 @@ def _filter_chat(ids):
 
 
 def _fetch_live_custom(p):
-    """A custom provider's own catalogue, asked for the way its wire asks.
-    Nearly every OpenAI-compatible endpoint serves /models, which is what
-    makes adding one a matter of a URL and a key rather than also typing out
-    every model id by hand - the object's own "models" list is the fallback
-    for the few that don't."""
-    base = custom_base_url(p).rstrip("/")
-    key = custom_key(p)
-    if p["wire"] in ("openai", "deepseek", "local"):
-        r = requests.get(base + "/models", headers=_bearer(key), timeout=5)
-        _check(r)
-        return _filter_chat(sorted(m["id"] for m in r.json().get("data", [])))
-    if p["wire"] == "anthropic":
-        r = requests.get(base + "/v1/models",
-                         headers={"x-api-key": key,
-                                  "anthropic-version": "2023-06-01"}, timeout=5)
-        _check(r)
-        return [m["id"] for m in r.json().get("data", [])]
-    r = requests.get(base + "/models", headers={"x-goog-api-key": key}, timeout=5)
+    """A provider's own catalogue, asked for the way its wire's spec says to
+    ask - the endpoint, the auth and where the ids sit in the reply are all in
+    wires.json (see wires.models_request/parse_models).
+
+    Nearly every OpenAI-compatible endpoint serves /models, which is what makes
+    adding a provider a matter of a URL and a key rather than typing out every
+    model id by hand. A wire whose spec names no catalogue endpoint, or one
+    whose endpoint answers with something unexpected, simply yields nothing:
+    the caller treats that as "no live list" and falls back to the wire's
+    suggestions and the provider's own models, which is a working provider with
+    a shorter dropdown rather than an error."""
+    spec = wires.spec_for(p["wire"])
+    ctx = {"model": "", "key": custom_key(p), "base_url": custom_base_url(p),
+           "setting": resolved_setup(p)}
+    url, headers = wires.models_request(spec, ctx)
+    if not url:
+        return []
+    r = requests.get(url, headers=headers, timeout=5)
     _check(r)
-    return [m["name"].removeprefix("models/") for m in r.json().get("models", [])
-            if "generateContent" in m.get("supportedGenerationMethods", [])]
+    return wires.parse_models(spec, r.json())
 
 
 def _fetch_live(name):
@@ -2159,7 +2349,7 @@ def _custom():
     Keyed by provider ID, not name - see _models_key(). Older files are keyed
     by name and still read, because _models_key() falls back to the name."""
     try:
-        data = json.loads(CUSTOM_FILE.read_text())
+        data = json.loads(CUSTOM_FILE.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
@@ -2209,7 +2399,7 @@ def remember_model(name, model):
     models = data.setdefault(key, {})
     if model not in models:
         models[model] = {}
-        CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n")
+        CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def model_config(name, model):
@@ -2237,16 +2427,24 @@ def context_window(name, model):
     """This model's max input context in tokens, or None if it isn't known -
     the UI shows "tokens / ?" for that case rather than a guessed number.
 
-    Asked of the provider first, then of its WIRE (_window_on_wire), and that
-    second half is what makes this survive the settings page. A provider's
-    name is a label a person typed and can change at any moment; its wire is
-    what it actually is. Rename "deepseek" to "test" and the card is still a
-    deepseek endpoint serving deepseek-v4-flash, with the same tokenizer and
-    the same million-token window - so the window has to be found by what the
-    provider IS, not by what it is currently called."""
+    Asked of the provider first, then of its WIRE (_window_on_wire), then of
+    the server itself (_served_window). The middle one is what makes this
+    survive the settings page. A provider's name is a label a person typed and
+    can change at any moment; its wire is what it actually is. Rename
+    "deepseek" to "test" and the card is still a deepseek endpoint serving
+    deepseek-v4-flash, with the same tokenizer and the same million-token
+    window - so the window has to be found by what the provider IS, not by
+    what it is currently called.
+
+    The last one is only for a local server, and it is the only one of the
+    three that can be right about a local model: the window there is not a
+    property of the model at all, it is whatever number was on the slider when
+    somebody loaded it, and it changes every time they load it again."""
     value = model_config(name, model).get("context_window")
     if not isinstance(value, int):
         value = _window_on_wire(wire_of(name), model)
+    if not isinstance(value, int):
+        value = _served_window(name, model)
     return value if isinstance(value, int) else None
 
 
@@ -2292,13 +2490,97 @@ def _window_on_wire(wire, model):
     return min(found) if found else None
 
 
+# A local server's model windows, keyed by the URL asked, as
+# (fetched_at, {model id: window}). Short-lived on purpose: context_window()
+# is called on every status poll, so this must not become a request per poll,
+# and the number itself goes stale the moment somebody reloads a model in
+# LM Studio with the slider somewhere else.
+_served_cache = {}
+_SERVED_TTL = 30
+
+# This machine, or a machine on the same home network - the two places a model
+# server can be. Hostname-based rather than resolved, because the question is
+# only "is it worth one cheap request to ask this thing a local-server
+# question", and a DNS lookup per status poll to answer it would cost more
+# than the request would.
+_LAN_HOST = re.compile(r"""^(
+      localhost | .*\.local |
+      127\.\d+\.\d+\.\d+ | 0\.0\.0\.0 | \[?::1\]? |
+      10\.\d+\.\d+\.\d+ |
+      192\.168\.\d+\.\d+ |
+      172\.(1[6-9]|2\d|3[01])\.\d+\.\d+
+    )$""", re.X | re.I)
+
+
+def _on_this_network(url):
+    """Whether `url` points at this machine or this LAN - i.e. at something
+    somebody is running themselves, rather than at a service on the internet."""
+    host = (url or "").split("//")[-1].split("/")[0].rsplit("@", 1)[-1].strip()
+    if host.startswith("["):          # [::1]:1234 - an IPv6 literal owns the
+        host = host.split("]")[0] + "]"   # colons, so only the brackets end it
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return bool(_LAN_HOST.match(host))
+
+
+def _served_window(name, model):
+    """What the local server says it loaded `model` with, or None.
+
+    This exists because a local model's context window is not knowable from
+    the outside. "nanbeige4.2-3b" can be 8k on this machine and 128k on the
+    next one - same name, same weights, different slider - so there is nothing
+    to hardcode and nothing another provider's entry can tell us. The number
+    has to come from the server holding the model.
+
+    LM Studio publishes it on its own REST API, alongside the OpenAI-shaped
+    one: /api/v0/models carries max_context_length (what the file supports)
+    and loaded_context_length (what it was actually loaded with). The loaded
+    figure is the real ceiling and is preferred; max is the fallback for a
+    model sitting on disk that nothing has loaded yet.
+
+    Only asked of a provider pointed at this machine or this network, and NOT
+    of the "local" wire alone - a card for LM Studio is just as often the
+    openai wire with localhost typed into its URL box, because that is the
+    same protocol and it works. What decides is where the card points, which
+    is also what keeps a doomed request off a paid endpoint on every status
+    poll. Never raises: no server, an older LM Studio, Ollama or vLLM in its
+    place - all of them mean "not known", which is what context_window()
+    already handles by drawing a "?"."""
+    p = custom_provider(name)
+    if not p or not _on_this_network(custom_base_url(p)):
+        return None
+    # The /v1 on the end is the OpenAI-compatible API; the native one is a
+    # sibling of it, not a child.
+    root = custom_base_url(p).rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    hit = _served_cache.get(root)
+    if not hit or time.time() - hit[0] > _SERVED_TTL:
+        windows = {}
+        try:
+            r = requests.get(root + "/api/v0/models", timeout=3)
+            if r.status_code == 200:
+                for entry in r.json().get("data") or []:
+                    window = entry.get("loaded_context_length") \
+                        or entry.get("max_context_length")
+                    if isinstance(window, int) and entry.get("id"):
+                        windows[entry["id"]] = window
+        except Exception:
+            pass  # not LM Studio, or not running - see the docstring
+        # Cached even when empty, so a server that will never answer this is
+        # asked once every TTL rather than on every poll.
+        hit = (time.time(), windows)
+        _served_cache[root] = hit
+    return hit[1].get(model)
+
+
 def floor_models(name):
     """Provider `name`'s starting model list. The head entry is that
     provider's default model, so order matters.
 
     Its own "models" first - a list typed on its card is the user saying what
     this endpoint serves, and it outranks anything guessed here. Then the
-    WIRE_MODELS suggestions for its wire, but only when it still points at
+    suggested_models() for its wire, but only when it still points at
     that wire's own host: the openai wire is what OpenRouter, Groq, vLLM and
     LM Studio all speak, and offering gpt-4o to a laptop running LM Studio
     would be noise. Those endpoints have live catalogues, which known_models()
@@ -2307,8 +2589,8 @@ def floor_models(name):
     if not p:
         return []
     out = list(p["models"])
-    if not p["base_url"] or p["base_url"] == WIRE_DEFAULT_URL.get(p["wire"]):
-        for m in WIRE_MODELS.get(p["wire"], []):
+    if not p["base_url"] or p["base_url"] == wire_default_url(p["wire"]):
+        for m in suggested_models(p["wire"]):
             if m not in out:
                 out.append(m)
     return out
@@ -2439,7 +2721,7 @@ def _at_wire_host(p):
     the company the wire is named after, not a third party speaking the same
     protocol."""
     return not p["base_url"] or p["base_url"].rstrip("/") == \
-        WIRE_DEFAULT_URL.get(p["wire"], "").rstrip("/")
+        wire_default_url(p["wire"]).rstrip("/")
 
 
 def _fetch_stt(p):
@@ -2563,7 +2845,7 @@ def transcribe(name, model, clip, filename):
 #                              requested as audio instead of text.
 #   anthropic / bedrock /      nothing. Claude produces no audio, and Polly is
 #   claude-subscription        a separate AWS service with its own workflow.
-TTS_WIRES = frozenset({"openai", "deepseek", "local", "gemini"})
+TTS_WIRES = frozenset({"openai", "deepseek", "local", "gemini", "piper"})
 
 # What a provider is offered before its catalogue has been read - and after,
 # for endpoints that don't list their speech models. Suggestions, never a
@@ -2581,12 +2863,154 @@ TTS_FLOOR = {
 # enough in LM Studio/vLLM catalogues to be worth naming.
 _TTS_WORDS = ("tts", "text-to-speech", "kokoro", "orpheus")
 
-# Which voice reads it. Not a setting: the voice tab is a provider and a model
-# and nothing else, and every endpoint here has a working default anyway - this
-# just has to be a name each one recognises. OpenAI takes it as a plain voice
-# id, Gemini as a prebuilt voice name.
-TTS_VOICE = "alloy"
-TTS_VOICE_GEMINI = "Kore"
+# Which voice reads it. A setting now - the voice tab picks one - but the same
+# rules as the model boxes apply: these lists are suggestions for the dropdown,
+# never a whitelist, and a blank setting means "whatever this wire's own default
+# is" so an install that has never opened the picker sounds exactly as it did.
+#
+# OpenAI takes the voice as a plain id on /audio/speech; Gemini as a prebuilt
+# voice name inside the speech config.
+TTS_VOICE_DEFAULT = {"openai": "alloy", "gemini": "Kore"}
+
+# The voices, each with a few words on how it sounds - "alloy" on its own tells
+# you nothing, and the alternative to a description is picking one at random and
+# listening to a whole reply to find out. Order is the order they are offered
+# in, so the plainest ones come first.
+#
+# The two halves are NOT sourced the same way, which is worth knowing before
+# editing them:
+#
+#   gemini   Google's own one-word labels, straight from its speech-generation
+#            docs. Authoritative - if they change, change these.
+#   openai   OpenAI publishes no descriptions at all, only the ids. These are
+#            written here from how each one actually reads, so treat them as a
+#            rough guide rather than a spec. openai.fm plays samples of all of
+#            them if the wording here doesn't match what someone hears.
+#
+# The four newest OpenAI voices - ballad, verse, marin, cedar - only exist on
+# the models that came with them; the older tts-1 pair rejects a request naming
+# one, so TTS_VOICES_LEGACY below is what those two are offered instead.
+TTS_VOICES = {
+    "openai": {
+        "alloy": "neutral and even - the default",
+        "echo": "calm and measured, lower",
+        "sage": "soft and unhurried",
+        "ash": "warm, with some expression",
+        "nova": "bright and brisk",
+        "shimmer": "light and airy",
+        "coral": "friendly and clear",
+        "fable": "storytelling, faintly British",
+        "onyx": "deep and authoritative",
+        "ballad": "soft and emotive",
+        "verse": "conversational, wide range",
+        "marin": "natural and relaxed - one of the two newest",
+        "cedar": "natural and grounded - one of the two newest",
+    },
+    # Gemini's prebuilt voices, as its speech config names them - capitalised,
+    # and each one a fixed character rather than a tone you ask for. Style is
+    # steered by what you SAY to the model instead; see _speak_gemini.
+    "gemini": {
+        "Kore": "firm - the default",
+        "Puck": "upbeat",
+        "Charon": "informative",
+        "Zephyr": "bright",
+        "Fenrir": "excitable",
+        "Leda": "youthful",
+        "Orus": "firm",
+        "Aoede": "breezy",
+        "Callirrhoe": "easy-going",
+        "Autonoe": "bright",
+        "Enceladus": "breathy",
+        "Iapetus": "clear",
+        "Umbriel": "easy-going",
+        "Algieba": "smooth",
+        "Despina": "smooth",
+        "Erinome": "clear",
+        "Algenib": "gravelly",
+        "Rasalgethi": "informative",
+        "Laomedeia": "upbeat",
+        "Achernar": "soft",
+        "Alnilam": "firm",
+        "Schedar": "even",
+        "Gacrux": "mature",
+        "Pulcherrima": "forward",
+        "Achird": "friendly",
+        "Zubenelgenubi": "casual",
+        "Vindemiatrix": "gentle",
+        "Sadachbia": "lively",
+        "Sadaltager": "knowledgeable",
+        "Sulafat": "warm",
+    },
+}
+
+# What tts-1 and tts-1-hd take - the nine that predate the newer models. Asked
+# for one of the other four they fail the whole request, so the picker has to
+# know the difference rather than offering all thirteen everywhere.
+TTS_VOICES_LEGACY = ("alloy", "echo", "sage", "ash", "nova", "shimmer",
+                     "coral", "fable", "onyx")
+
+# The models that only take those nine, and that cannot be told how to read.
+# The voice half of that is enforced by OpenAI - naming one of the newer four
+# is a 400 and no audio at all - while the instructions half is not: these two
+# accept the field and ignore it, which is worse, because a direction that is
+# silently doing nothing looks exactly like one that is working badly.
+# Matched on the id because that is all there is to go on.
+TTS_LEGACY_MODELS = ("tts-1", "tts-1-hd")
+
+
+def _tts_legacy(model):
+    """True for an OpenAI speech model from before instructions and the newer
+    voices existed. Exact ids rather than a prefix match: a third-party endpoint
+    serving something called "tts-1-turbo" is not one of these two."""
+    return (model or "").strip().lower() in TTS_LEGACY_MODELS
+
+
+def tts_voices(name, model=""):
+    """The voices provider `name` can be asked for on `model`, as a list of
+    {"id", "says"} - the name to send and a few words on how it sounds, which
+    is what the dropdown puts beside each one. [] for a provider on a wire that
+    cannot speak, or one whose wire has no published voice list: a local
+    endpoint serving kokoro has its own names and nothing here knows them.
+
+    No network: this is a table lookup, unlike tts_models() above, so the page
+    may ask again on every keystroke in the model box without it costing
+    anything."""
+    p = custom_provider(name)
+    if not p or p["wire"] not in TTS_WIRES:
+        return []
+    if p["wire"] == "gemini":
+        said = TTS_VOICES["gemini"]
+    elif p["wire"] == "piper":
+        # Piper's voices are the .onnx files in its voice directory - read
+        # live, since the folder can change while the server runs.
+        return _piper_voices(resolved_setup(p))
+    # openai/deepseek/local all speak OpenAI's shape, but only a provider
+    # actually pointed at OpenAI's own host serves OpenAI's voices - the same
+    # reasoning TTS_FLOOR is limited by, see _at_wire_host.
+    elif p["wire"] != "openai" or not _at_wire_host(p):
+        return []
+    elif _tts_legacy(model):
+        said = {v: TTS_VOICES["openai"][v] for v in TTS_VOICES_LEGACY}
+    else:
+        said = TTS_VOICES["openai"]
+    return [{"id": v, "says": says} for v, says in said.items()]
+
+
+def tts_instructable(name, model=""):
+    """Whether `model` on provider `name` can be told HOW to speak - tone,
+    accent, pace. gpt-4o-mini-tts and its successors take it as a field; Gemini
+    has no field for it but can be told the same thing in the prompt (see
+    _speak_gemini); the tts-1 pair accepts the field and ignores it, which
+    counts as no. So: true for everything that can actually be steered, by
+    whichever mechanism."""
+    p = custom_provider(name)
+    if not p or p["wire"] not in TTS_WIRES:
+        return False
+    if p["wire"] == "piper":
+        # Piper's voices are fixed recordings - there is no way to tell it a
+        # tone, accent or pace, so the instructions box is disabled.
+        return False
+    return p["wire"] == "gemini" or not _tts_legacy(model)
 
 # Synthesis is slower than a chat request - a long answer is a minute of audio
 # to generate - but it is not slower than transcription, which has to be waited
@@ -2665,6 +3089,11 @@ def tts_models(name):
     p = custom_provider(name)
     if not p or p["wire"] not in TTS_WIRES:
         return []
+    if p["wire"] == "piper":
+        # Piper's "models" are its voices - the .onnx stems. Read live from
+        # the voice directory, since the folder can change while the server
+        # runs and there is no catalogue to cache.
+        return [v["id"] for v in _piper_voices(resolved_setup(p))]
     out = list(TTS_FLOOR.get(p["wire"], [])) if _at_wire_host(p) else []
     for m in p["models"]:
         if _looks_tts(m) and m not in out:
@@ -2683,33 +3112,49 @@ def tts_models(name):
     return out
 
 
-def _speak_openai(p, model, text):
+def _speak_openai(p, model, text, voice, instructions):
     """OpenAI's /audio/speech, which is the shape every endpoint serving TTS
     copies. Asks for mp3 because that is the one format every browser plays and
-    the smallest thing to send to a phone."""
+    the smallest thing to send to a phone.
+
+    `instructions` is how gpt-4o-mini-tts is told the tone, accent and pace to
+    read in. It is left out of the body when empty, and when the model is one of
+    the tts-1 pair: those two take the field and do nothing with it, so sending
+    it would only put a setting on the wire that has no effect. The voice tab
+    says as much next to the box rather than letting it look like it works."""
+    body = {"model": model, "input": text,
+            "voice": voice or TTS_VOICE_DEFAULT["openai"],
+            "response_format": "mp3"}
+    if instructions and not _tts_legacy(model):
+        body["instructions"] = instructions
     r = requests.post(custom_base_url(p).rstrip("/") + "/audio/speech",
-                      headers=_bearer(custom_key(p)),
-                      json={"model": model, "input": text, "voice": TTS_VOICE,
-                            "response_format": "mp3"},
+                      headers=_bearer(custom_key(p)), json=body,
                       timeout=TTS_TIMEOUT)
     _check(r)
     return r.content, "audio/mpeg"
 
 
-def _speak_gemini(p, model, text):
+def _speak_gemini(p, model, text, voice, instructions):
     """Gemini has no speech endpoint - audio comes back from an ordinary
     generateContent turn asked to answer in sound instead of words.
+
+    That also means there is no instructions FIELD: how it should read is said
+    in the prompt, above the words to be read, which is the way Google
+    documents it. The separator matters - without a line marking where the
+    direction stops, a short instruction gets read out as part of the text.
 
     What arrives is headerless 16-bit PCM, which no browser will play on its
     own, so it is wrapped in a WAV container here. The sample rate is read off
     the part's own mime type ("audio/L16;codec=pcm;rate=24000") rather than
     assumed, since that is the one part of it Google has ever varied."""
+    said = (instructions.strip() + "\n\nRead this out, and nothing else:\n"
+            + text) if instructions.strip() else text
     body = {
-        "contents": [{"parts": [{"text": text}]}],
+        "contents": [{"parts": [{"text": said}]}],
         "generationConfig": {
             "responseModalities": ["AUDIO"],
             "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig":
-                             {"voiceName": TTS_VOICE_GEMINI}}},
+                             {"voiceName": voice or TTS_VOICE_DEFAULT["gemini"]}}},
         },
     }
     r = requests.post(custom_base_url(p).rstrip("/") + "/models/" + model
@@ -2753,8 +3198,136 @@ def _wav(pcm, rate):
     return header + pcm
 
 
-def speak(name, model, text):
+def _piper_binary(setup):
+    """The piper executable to run, from the provider's PIPER_PATH box, the
+    environment, or PATH. Returns a path string, or None if it can't be found."""
+    path = (setup or {}).get("PIPER_PATH") or ""
+    if path:
+        return path
+    # Not on PATH either? shutil.which returns None and the caller says so.
+    import shutil
+    return shutil.which("piper") or ""
+
+
+def _piper_voices(setup):
+    """The voice names a piper provider can be asked for, as a list of
+    {"id", "says"} - the .onnx stem, and a few words on how it sounds.
+
+    Piper voices live as <name>.onnx files (each with a matching .onnx.json) in
+    the voice directory. The id sent to piper is the .onnx stem. The description
+    is read from the .onnx.json's "audio" object when it has one - piper's own
+    metadata - and falls back to a plain "a piper voice" otherwise."""
+    import json as _json
+    voice_dir = (setup or {}).get("PIPER_VOICE_DIR") or ""
+    if not voice_dir:
+        return []
+    d = Path(voice_dir).expanduser()
+    if not d.is_dir():
+        return []
+    out = []
+    for onnx in sorted(d.glob("*.onnx")):
+        stem = onnx.stem
+        says = "a piper voice"
+        meta = onnx.with_suffix(".onnx.json")
+        try:
+            data = _json.loads(meta.read_text(encoding="utf-8"))
+            audio = data.get("audio", {})
+            if isinstance(audio, dict):
+                says = (audio.get("quality") or audio.get("sample_rate")
+                        or "a piper voice")
+        except (OSError, ValueError):
+            pass
+        out.append({"id": stem, "says": says})
+    return out
+
+
+def _speak_piper(p, model, text, voice, instructions):
+    """Piper's local neural TTS, run as a subprocess. No API key, no network -
+    the audio is made on this machine by the piper binary.
+
+    `model` is the voice to use - the .onnx stem, e.g. "en_US-lessac-medium" -
+    and `voice` is accepted as an alias for it (the voice tab's picker sends
+    the same thing). Piper reads the .onnx and its matching .onnx.json from the
+    voice directory, and writes 16-bit mono PCM at the model's sample rate,
+    which is wrapped in a WAV header here so a browser can play it.
+
+    `instructions` (tone, accent, pace) is not something piper can be told -
+    its voices are fixed recordings. It is accepted and ignored, matching how
+    the tts-1 pair behaves, so the voice tab doesn't pretend a direction works
+    when it can't."""
+    import shutil
+    import subprocess
+
+    setup = resolved_setup(p)
+    binary = _piper_binary(setup)
+    if not binary:
+        raise RuntimeError("piper can't be found. Install it (pip install piper-tts "
+                           "or the piper release for your OS), or put the full path "
+                           "in this provider's PIPER_PATH box on the providers tab.")
+    voice_dir = (setup or {}).get("PIPER_VOICE_DIR") or ""
+    if not voice_dir:
+        raise RuntimeError("piper needs a voice model directory - set this "
+                           "provider's PIPER_VOICE_DIR box on the providers tab "
+                           "to the folder holding your .onnx voices.")
+    d = Path(voice_dir).expanduser()
+    if not d.is_dir():
+        raise RuntimeError("the piper voice directory " + str(d) + " doesn't exist - "
+                           "point PIPER_VOICE_DIR at a real folder of .onnx voices.")
+
+    # The voice to use: the model box, or the voice box, or the first .onnx in
+    # the directory. Piper needs the .onnx stem, and both boxes carry it.
+    stem = (model or voice or "").strip()
+    if not stem:
+        first = sorted(d.glob("*.onnx"))
+        if not first:
+            raise RuntimeError("no .onnx voice models in " + str(d) + " - download "
+                               "one (e.g. en_US-lessac-medium) and put it there.")
+        stem = first[0].stem
+    onnx = d / (stem if stem.endswith(".onnx") else stem + ".onnx")
+    if not onnx.is_file():
+        raise RuntimeError("no piper voice called " + stem + " in " + str(d)
+                           + " - pick one from the voice tab's list.")
+
+    # Piper writes to stdout when no output file is given. The sample rate is
+    # read from the model's .onnx.json so the WAV header is right.
+    rate = 22050
+    meta = onnx.with_suffix(".onnx.json")
+    try:
+        import json as _json
+        data = _json.loads(meta.read_text(encoding="utf-8"))
+        audio = data.get("audio", {})
+        if isinstance(audio, dict) and audio.get("sample_rate"):
+            rate = int(audio["sample_rate"])
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        proc = subprocess.run(
+            [binary, "--model", str(onnx), "--output_raw"],
+            input=text.encode("utf-8"), capture_output=True, timeout=TTS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("piper took longer than " + str(TTS_TIMEOUT)
+                           + "s to read that out - giving up")
+    except OSError as e:
+        raise RuntimeError("could not run piper at " + binary + ": " + str(e))
+    if proc.returncode != 0:
+        raise RuntimeError("piper failed: " + (proc.stderr or b"").decode(
+            "utf-8", "replace")[:300])
+    pcm = proc.stdout
+    if not pcm:
+        raise RuntimeError("piper produced no audio for that text")
+    return _wav(pcm, rate), "audio/wav"
+
+
+def speak(name, model, text, voice="", instructions=""):
     """`text` read aloud by provider `name` on `model`, as (audio bytes, mime).
+
+    `voice` is a name off tts_voices() and "" means the wire's own default, so
+    an install that has never touched the picker sounds unchanged.
+    `instructions` says HOW to read - tone, accent, pace - and is passed to
+    whichever mechanism the wire has for it, or dropped where there is none.
+    Neither is checked against a list here: the voice tab's boxes are
+    suggestions, exactly like its model box, and a voice added after this
+    release should work without a code change.
 
     Raises RuntimeError with a sentence meant to be read by a person, exactly
     like transcribe() above - the server puts that straight in front of whoever
@@ -2775,8 +3348,10 @@ def speak(name, model, text):
     if not said:
         raise RuntimeError("nothing to read out")
     if p["wire"] == "gemini":
-        return _speak_gemini(p, model, said)
-    return _speak_openai(p, model, said)
+        return _speak_gemini(p, model, said, voice, instructions)
+    if p["wire"] == "piper":
+        return _speak_piper(p, model, said, voice, instructions)
+    return _speak_openai(p, model, said, voice, instructions)
 
 
 # The API-key variables in .env. NOT a provider table any more - a provider's
@@ -2817,7 +3392,31 @@ def _wire_ready(p):
         # _claude_error names the fix.
         return bool(_claude_cli(resolved_setup(p))
                     and importlib.util.find_spec("claude_agent_sdk"))
-    return False
+    if wire == "piper":
+        # Needs the piper binary and a voice directory. Both are cheap to check
+        # (a PATH lookup and a folder stat), so it's done here rather than at
+        # request time - a piper provider with no voices is a dead end on the
+        # voice tab, and saying so on the card beats a silent failure later.
+        setup = resolved_setup(p)
+        binary = (setup.get("PIPER_PATH") or "").strip()
+        if not binary:
+            import shutil
+            binary = shutil.which("piper") or ""
+        voice_dir = (setup.get("PIPER_VOICE_DIR") or "").strip()
+        return bool(binary and voice_dir and Path(voice_dir).expanduser().is_dir())
+    # A wire whose spec says it takes no key is ready on its own: there is no
+    # credential to be missing, and its own default URL is somewhere real. This
+    # is what lets a local model server card work with every box left empty,
+    # and it holds for any keyless wire someone writes later rather than for a
+    # list of the ones that existed when this was written.
+    return not wants_key(wire)
+
+
+def keyless_wires():
+    """The wires that authenticate without an API key - read off the specs
+    rather than listed, so a wire added later is included by saying key: false
+    and nothing else."""
+    return [w for w in wire_names() if not wants_key(w)]
 
 
 def available():
@@ -2909,7 +3508,7 @@ def env_names():
     which is what _key() would find."""
     with _env_lock:
         try:
-            lines = ENV_FILE.read_text().splitlines()
+            lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
         except OSError:
             lines = []
     found = {}
@@ -2954,13 +3553,13 @@ def set_env(name, value):
         raise ValueError("a value cannot contain a line break")
     with _env_lock:
         try:
-            lines = ENV_FILE.read_text().splitlines()
+            lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
         except OSError:
             lines = []
         lines = [line for line in lines if not line.strip().startswith(name + "=")]
         if value:
             lines.append(name + "=" + value)
-        ENV_FILE.write_text("\n".join(lines) + ("\n" if lines else ""))
+        ENV_FILE.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
         # Secrets: readable by this user and nobody else. A fresh file would
         # otherwise be born world-readable under the default umask.
         try:
@@ -3269,6 +3868,115 @@ def delete_workspace(wsid):
     save_workspaces(left)
 
 
+# --- mojibake ----------------------------------------------------------------
+#
+# A reply's UTF-8 decoded one byte at a time, so "\u2192" (E2 86 92) arrives as
+# the three characters "\u00e2\u0086\u0092" - which shows as "\u00e2" and two
+# invisibles. _sse no longer does that (see its docstring), but the endpoint at
+# the far end can: a serving stack that decodes each TOKEN's bytes on its own
+# splits every multi-byte character the same way, and the mojibake is then in
+# the text it sends, not in anything we did to it. Old transcripts hold plenty
+# of it from before the _sse fix, and it is worth repairing on the way in rather
+# than being saved a second time.
+#
+# The lead character of a mis-decoded sequence, then its continuations. Ranges
+# are the UTF-8 ones read as Latin-1: C2-F4 leads a 2-to-4 byte sequence, 80-BF
+# continues one.
+_MOJI = re.compile("[\u00c2-\u00f4][\u0080-\u00bf]{1,3}")
+# How many characters the sequence that lead starts should have, all told.
+_MOJI_LEN = ((0xc2, 0xdf, 2), (0xe0, 0xef, 3), (0xf0, 0xf4, 4))
+# A run at the very end that may only be half-arrived - see _mended.
+_MOJI_TAIL = re.compile("[\u00c2-\u00f4][\u0080-\u00bf]{0,2}$")
+# How many times over text may have been mangled - see repair_mojibake. Two is
+# what actually turns up on disk (saved mangled, read back and mangled again);
+# the third is slack.
+_MOJI_PASSES = 3
+
+
+def _wanted(lead):
+    """How many characters a mis-decoded sequence starting with `lead` has."""
+    for low, high, size in _MOJI_LEN:
+        if low <= ord(lead) <= high:
+            return size
+    return 0
+
+
+def repair_mojibake(text):
+    """`text` with any Latin-1-decoded UTF-8 in it put back, and everything else
+    left exactly as it was.
+
+    Run by run, not whole-string, and only where the bytes actually say so: a
+    run is repaired when re-encoding it as Latin-1 and decoding that as UTF-8
+    succeeds STRICTLY. That test is what makes this safe on ordinary text -
+    "cor\u00e7\u00e3o" or "caf\u00e9 \u00bd" is not valid UTF-8 once
+    re-encoded, so it fails and is left alone, while "\u00e2\u0086\u0092" is
+    and becomes "\u2192". Whole-string repair would also give up entirely on a
+    reply that mixes the two - one emoji that came through fine and one arrow
+    that didn't - because the good character cannot be Latin-1-encoded at all.
+
+    Text with nothing to repair comes back as the same object, so the common
+    case costs one regex scan and no allocation.
+
+    Applied until it stops changing anything, because text can be mis-decoded
+    TWICE - saved mangled once, read back and mangled again - and one pass then
+    only gets halfway: "\u00c3\u00a2\u00c2\u0086\u00c2\u0092" becomes
+    "\u00e2\u0086\u0092", which is still the arrow nobody can read. Each pass
+    can only shorten the text, so this converges; the cap is there because a
+    loop over model output should have one whatever the maths says."""
+    def fix(match):
+        run = match.group(0)
+        try:
+            return run.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return run
+
+    for _ in range(_MOJI_PASSES):
+        if not _MOJI.search(text):
+            break
+        mended = _MOJI.sub(fix, text)
+        if mended == text:
+            break
+        text = mended
+    return text
+
+
+def _mended(pieces):
+    """`pieces` with the mojibake repaired ACROSS the joins.
+
+    Repairing each piece on its own would miss the case that matters: the
+    endpoints that do this decode one token at a time, so the three characters
+    of a broken arrow arrive as three separate pieces and no single piece is a
+    repairable run. So a run still short of the length its lead announces is
+    held back and carried into the next piece.
+
+    Nothing is held for longer than that. A piece ending on a COMPLETE run goes
+    out repaired, a piece ending on nothing repairable goes out untouched, and
+    whatever is being held when the stream ends is yielded as it stands - a
+    stream that stops mid-character must still show what it had.
+
+    The repair comes BEFORE the hold-back, not after, because a pass can reveal
+    an incomplete run that wasn't visible as one: text mangled twice arrives as
+    "\u00c3\u00a2" - a complete-looking run - and only once that is mended to
+    "\u00e2" is it apparent that two more characters are owed. Repairing first
+    means each pass's leftovers are held the same way the original's are.
+
+    The cost of a hold is that a reply ending on an ordinary accented letter -
+    "caf\u00e9" - waits for the next piece before it is shown, and for the end
+    of the stream if there is no next piece. A few characters late on the last
+    word of a reply, and never wrong, is the right side of that trade."""
+    hold = ""
+    for piece in pieces:
+        text = repair_mojibake(hold + piece)
+        hold = ""
+        tail = _MOJI_TAIL.search(text)
+        if tail and len(tail.group(0)) < _wanted(tail.group(0)[0]):
+            text, hold = text[:tail.start()], tail.group(0)
+        if text:
+            yield text
+    if hold:
+        yield repair_mojibake(hold)
+
+
 def _guarded(model, prompt, temperature, call, usage=None, tools=None, tool_call=None,
              reasoning=None, on_call_delta=None):
     """Wrap a provider's streaming generator so a stopped turn stops it. Yields
@@ -3284,13 +3992,22 @@ def _guarded(model, prompt, temperature, call, usage=None, tools=None, tool_call
 
     `usage`, `tool_call` and `reasoning` are passed straight through to the
     provider function, which fills them in place as its own events report them
-    - token counts, a native tool call, a thinking model's reasoning_content."""
-    for piece in call(model, prompt, temperature, usage=usage, tools=tools,
-                      tool_call=tool_call, reasoning=reasoning,
-                      on_call_delta=on_call_delta):
+    - token counts, a native tool call, a thinking model's reasoning_content.
+
+    It is also where mojibake is mended, for the same reason the stop check is
+    here: every provider's reply comes through this loop, so a wire that sends
+    Latin-1-decoded UTF-8 is repaired whichever one it is and whichever is added
+    next. See _mended, which holds a part-arrived character across the join."""
+    def pieces():
+        for piece in call(model, prompt, temperature, usage=usage, tools=tools,
+                          tool_call=tool_call, reasoning=reasoning,
+                          on_call_delta=on_call_delta):
+            turnctx.check()
+            yield piece
         turnctx.check()
+
+    for piece in _mended(pieces()):
         yield piece
-    turnctx.check()
 
 
 def stream_response(prompt, provider=PROVIDER, model=MODEL, temperature=TEMPERATURE,
