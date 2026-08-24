@@ -174,3 +174,7 @@ models/wake/*
 
 # autopush lock file - don't version or sync this
 .autopush.lock
+
+# temp conflict-demo scratch file
+.conflict-test.txt
+.conflict-test.txt.*
