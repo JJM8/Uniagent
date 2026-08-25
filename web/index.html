@@ -7608,14 +7608,18 @@ let wakeNode = null;     // whatever hands us frames - a worklet, or a script no
 // keeps one per session, and this is what says which is ours.
 let wakeId = "w-" + Math.random().toString(36).slice(2, 12);
 
-let wakeLive = false;    // a session is open: the phrase was heard and hasn't timed out
-let wakeParts = [];      // what has been said this session, one clip per entry
-let wakeSent = 0;        // how many of those have been sent to the model
-let wakeFresh = true;    // the next clip is the first after a wake - see withoutPhrase
-let wakeClips = 0;       // clips out at the transcriber right now
+let wakeLive = false;    // a session is open: capturing, between the phrase and the silence
+let wakeBusy = false;    // the session just ended and the last word of it is being sent
+let wakeClipFrames = []; // every frame captured this session, start to finish - never cut up
+let wakeClipMs = 0;      // its running length, against WAKE_MAX_CLIP_MS
+let wakeGrew = false;    // new audio since the last poll - skip a poll without any
+let wakeHeardText = "";  // the latest full re-transcription, shown in the popup
+let wakePolling = false; // a poll's request is in flight right now
+let wakePollSeq = 0;     // guards a slow poll from clobbering a newer one's answer
+let wakeApplied = 0;     // the seq of the last result actually shown
 let wakeScore = 0;       // what the model last scored the room at, for the slider
-let wakeSubmitTimer = null;
-let wakeSessionTimer = null;
+let wakeSilenceTimer = null;
+let wakePollTimer = null;
 
 // Waiting to go past the wake model.
 let scanRing = [];       // the run-up, kept while the room is quiet
@@ -7623,17 +7627,11 @@ let scanOut = [];        // frames collected for the next chunk
 let scanQuiet = 0;       // ms of silence since the last loud frame
 let scanBusy = false;    // a chunk is at the server right now
 
-// And the sentence collector, which only runs once a session is open. Simple on
-// purpose - loudness against a noise floor that follows the room - because it is
-// not being asked to decide whether something is speech, only where the gaps
-// are. What was said is the transcriber's job; whether it was for you was the
-// wake model's, and that question has already been answered by this point.
-let vadSpeaking = false;
+// The noise floor the loudness gate is measured against, adapted while the
+// room is quiet and frozen for the whole of a session (see wakeFrame) - a
+// floor that kept moving through a long sentence would slowly learn that
+// speech is silence.
 let vadFloor = 0.005;
-let vadFrames = [];
-let vadVoiced = 0;
-let vadQuiet = 0;
-let vadRing = [];
 
 // Runs on the audio thread and does nothing but hand frames back: every
 // decision below is made on the main thread, where the settings are.
