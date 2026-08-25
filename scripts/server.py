@@ -776,7 +776,7 @@ SPEAK_KINDS = {
 }
 
 
-def _speak_message(route, text, kind, batch=None):
+def _speak_message(route, text, kind, batch=None, client=None):
     """Read one finished message out, if the voice tab's mode wants that one.
     Called from inside the turn, as each message lands.
 
@@ -791,7 +791,7 @@ def _speak_message(route, text, kind, batch=None):
         return
     if kind not in SPEAK_KINDS.get(mode, ()):
         return
-    _speak_offer(route, [text], mode.startswith("summary"), batch)
+    _speak_offer(route, [text], mode.startswith("summary"), batch, client=client)
 
 
 def _speak_turn(agent, mark):
