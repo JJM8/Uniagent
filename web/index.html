@@ -6822,6 +6822,27 @@ document.addEventListener("copy", (e) => {
 // the turn is done the transcript is redrawn from the history, which is the
 // authority (it also brings in the tool results the stream doesn't carry).
 const events = new EventSource("/stream");
+
+// A drop this notices, however briefly - a phone's network switching
+// towers, a laptop waking up, anything short of the tab actually closing.
+// The browser reconnects on its own (that is EventSource's whole point) and
+// resends the id of the last event it read as Last-Event-ID, which lets the
+// server replay most of what was missed - see server.py's _stream/_backlog.
+// That backlog is bounded, though, and there is no reconnect at all for a
+// browser tab that was merely backgrounded rather than actually dropped -
+// on some platforms nothing here fires until it is foregrounded again. So
+// this end still calls refresh() itself the moment the connection comes
+// back from having been down, the same rebuild-from-source-of-truth already
+// used on load and on switching chats, as the backstop for whatever the
+// replay could not cover. Skipped on the very first connection (down is
+// still false then) - that would just repeat the refresh() the page's own
+// load already does.
+let down = false;
+events.onerror = () => { down = true; };
+events.onopen = () => {
+  if (down) { down = false; refresh(); }
+};
+
 events.onmessage = (e) => {
   const ev = JSON.parse(e.data);
   // The chat list moved: a chat appeared, was deleted or renamed, or started
