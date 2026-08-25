@@ -3500,18 +3500,42 @@
           </div>
         </div>
 
-        <!-- Listening for a phrase instead of holding a key. A model that
-             knows one phrase, running here - NOT a transcriber being asked what
-             was said and searched for a word, which is the same feature built
-             the expensive way round. -->
+        <!-- Listening for a phrase instead of holding a key. Two ways to do
+             it: a small model that knows one phrase (openWakeWord), or the
+             voice tab's own transcriber asked about short rolling clips -
+             which is normally the expensive way to build this (see
+             scripts/wake_word.py), except when that transcriber is already
+             local and free, which is what "stt" below is for. -->
         <div class="field">
+          <label for="s-wake-provider">wake engine</label>
+          <select id="s-wake-provider">
+            <option value="oww">a small trained model (openWakeWord)</option>
+            <option value="stt">the transcriber above, listening for words you type</option>
+          </select>
+          <div class="model-hint" id="s-wake-provider-hint"></div>
+        </div>
+
+        <div class="field" id="s-wake-model-field">
           <label for="s-wake-model">wake word</label>
           <select id="s-wake-model"></select>
           <div class="model-hint" id="s-wake-model-hint"></div>
         </div>
 
+        <div class="field" id="s-wake-words-field" hidden>
+          <label>words to listen for</label>
+          <div class="list-edit" id="s-wake-words"></div>
+          <button type="button" class="ghost list-add" data-add="s-wake-words">+ add a word</button>
+          <div class="model-hint">
+            Matched as substrings of what gets transcribed, so "computer" also
+            catches "hey computer". Nothing extra is loaded for this - it's the
+            same transcriber POST /voice already uses, asked about a few
+            seconds of rolling audio roughly once a second instead of one
+            finished clip.
+          </div>
+        </div>
+
         <div id="s-wake-more" hidden>
-          <div class="field">
+          <div class="field" id="s-wake-threshold-field">
             <label for="s-wake-threshold">how sure it has to be</label>
             <div class="row temp-row">
               <input type="range" id="s-wake-threshold" min="0" max="1" step="0.05">
