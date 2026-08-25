@@ -8422,19 +8422,26 @@ async function launchReader() {
 // Left/right arrow keys, over the same cross-chat timeline stopSpeaking and
 // launchReader work in: right skips whatever's playing now (the manual
 // version of the ordinary auto-advance), left goes back and replays the
-// clip before it. Both just set where the reader should go next and force a
-// restart - launchReader's own planNext is what actually reads jumpTo.
+// clip before it. Both just set where the reader should go next (or leave
+// it unset, for the "there is no next" case below) and force a restart -
+// launchReader's own planNext is what actually reads jumpTo.
 function speakSkip(direction) {
   if (direction < 0) {
     if (speakPos <= 0) return;   // nothing before the first clip
     jumpTo = speakPos - 1;
-  } else {
-    // Forward into history already decided (stepped back into, now catching
-    // back up) plays that; otherwise there has to be something pending to
-    // skip to, or there is nothing to do at all.
-    if (speakPos + 1 < speakHistory.length) jumpTo = speakPos + 1;
-    else if (speakPending.size === 0) return;
+  } else if (speakPos + 1 < speakHistory.length) {
+    jumpTo = speakPos + 1;   // something already decided further ahead - go there
+  } else if (!speakBusy) {
+    return;   // already idle at the live edge - nothing playing to skip
   }
+  // Else: the LAST clip is the one live right now and nothing is queued
+  // behind it - jumpTo is left unset on purpose. Cancelling below stops it,
+  // and with nothing pending, launchReader's planNext finds nothing to
+  // replace it with and goes idle - which is exactly "skip the last one and
+  // go quiet" rather than looping back to it or refusing to do anything.
+  // Pressing right again from there is the !speakBusy branch above: nothing
+  // is playing any more, so there is nothing left to skip. A new clip
+  // arriving after that plays on its own, the same as it always would.
   speakRun++;
   if (speaking) {
     speaking.pause();
