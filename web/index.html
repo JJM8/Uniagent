@@ -7573,10 +7573,11 @@ window.addEventListener("blur", releaseTalk);
 //
 // Speech then has a problem typing does not: a person pauses in the middle of a
 // sentence, and nothing can tell that pause from the end of one. So this does
-// not pretend to - it waits a beat, sends, and corrects itself if you turn out
-// not to have finished, by stopping the turn and re-sending the whole thing
-// with the late words marked as a continuation. What makes the wait affordable
-// is that nothing idles through it: each clip is transcribed WHILE it runs.
+// not pretend to - it waits for wake_silence_ms of quiet, judged locally by
+// loudness (see wakeArmSilence), and only then sends, once, whatever the whole
+// clip turned out to be. Nothing about that wait costs anything: the optional
+// live captions (wake_captions, off by default) are a nicety layered on top,
+// not what the wait is measured against.
 
 const wake = document.getElementById("wake");
 const heard = document.getElementById("heard");
