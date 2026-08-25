@@ -3026,7 +3026,8 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         on_tool_call=None, on_tool_result=None, on_safety=None, pinned=None,
         safety=None, safety_prompt=None, inject=None, workspace_id=None,
         safety_threshold=None, safety_extra=None, on_message=None,
-        on_reasoning=None, on_timing=None, on_request=None, on_thought=None):
+        on_reasoning=None, on_timing=None, on_request=None, on_thought=None,
+        on_reclassify=None):
     """Run one turn over `history` and return the updated history: reply to text,
     and work through any tool calls it makes.
 
