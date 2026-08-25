@@ -57,7 +57,7 @@ SAMPLE_RATE = 16000   # what the browser sends, same as wake_word.py
 SAMPLE_WIDTH = 2       # bytes per sample, int16
 CHANNELS = 1
 
-_WORD_RE = re.compile(r"[^a-z0-9 ]+")
+_WORD_RE = re.compile(r"[^a-z0-9]+")
 
 _lock = threading.Lock()
 _sessions = {}   # id -> {"buf": bytearray, "used", "checked", "fired"}
