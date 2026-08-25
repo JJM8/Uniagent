@@ -3531,6 +3531,22 @@
             <label for="s-wake-auto">open the microphone as soon as a page loads</label>
           </div>
 
+          <div class="field toggle">
+            <input type="checkbox" id="s-wake-captions">
+            <label for="s-wake-captions">show live captions while listening</label>
+            <div class="model-hint">
+              Re-transcribes the whole clip roughly once a second so you can see
+              what it's heard so far, above the message box. Off by default -
+              it's not needed to notice when you've stopped talking (that's
+              judged locally, for free, by loudness) and it multiplies what a
+              session bills: talking for ten seconds bills roughly what
+              fifty-five would normally cost, since every poll re-sends
+              everything said so far, not just what's new. The one
+              transcription that always runs, captions or not, is the single
+              pass once you go quiet.
+            </div>
+          </div>
+
           <div class="field">
             <label for="s-wake-silence-ms">a pause this long after your last word sends it</label>
             <div class="row temp-row">
@@ -3538,11 +3554,9 @@
               <span id="s-wake-silence-ms-value" class="temp-value"></span>
             </div>
             <div class="model-hint">
-              The whole clip since the wake word is re-transcribed roughly once a
-              second while you talk, shown live below the message box, so there's
-              nothing to cut into pieces and nothing else to tune - this is the
-              only wait in the whole feature. Too short and it sends mid-thought;
-              too long and it sits there after you've already finished.
+              Judged by loudness alone - no transcription involved. Too short
+              and it sends mid-thought; too long and it sits there after
+              you've already finished.
             </div>
           </div>
         </div>
