@@ -1029,14 +1029,21 @@ def _run_turn(text, kind="user", target=None):
                       # whole answer came back on the reasoning channel and
                       # main._stream is handing it over as the reply instead
                       # of on_text, to avoid streaming the same words a
-                      # second time (see main._stream's on_reclassify and
-                      # provider.py's _read_openai tail). No text on this
-                      # broadcast: the page already has it, in the thinking
-                      # block on_reasoning built - this just says to turn
-                      # that block into the reply rather than sealing it and
-                      # opening a second one underneath with the same words.
-                      on_reclassify=lambda: _broadcast({"type": "reclassify",
-                                                         "chat": route}),
+                      # second time as their own new "chunk" broadcast (see
+                      # main._stream's on_reclassify and provider.py's
+                      # _read_openai tail). The live record follows: the
+                      # thinking this turn accumulated is cleared - it is the
+                      # reply now, not thinking a redraw should fold into its
+                      # own block - and the same text goes into `partial`
+                      # exactly as stream_chunk records a normal reply, so a
+                      # window that rejoins mid-turn rebuilds a reply bubble
+                      # rather than a thinking block.
+                      on_reclassify=lambda text: (
+                          _live_set(route, thinking=""),
+                          _live_add(route, "partial", text),
+                          _live_phase(route, "writing"),
+                          _broadcast({"type": "reclassify", "text": text,
+                                      "chat": route})),
                       # A request going out. The page starts counting the wait
                       # from here - which on a local model with a long
                       # conversation is the longest stretch of a turn and the
