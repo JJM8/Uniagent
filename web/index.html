@@ -7737,6 +7737,24 @@ function wakeWav(frames, rate) {
   return new Blob([buf], { type: "audio/wav" });
 }
 
+// Down to 16k, what the wake model and the transcriber both want. The
+// AudioContext is left at whatever rate the microphone actually captures at
+// (see wakeStart) rather than asked to be 16k itself, so this is the one
+// place - not every browser - that does the conversion.
+function resampleTo16k(samples, rate) {
+  if (rate === 16000) return samples;
+  const ratio = rate / 16000;
+  const out = new Float32Array(Math.round(samples.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const at = i * ratio;
+    const lo = Math.floor(at);
+    const hi = Math.min(lo + 1, samples.length - 1);
+    const frac = at - lo;
+    out[i] = samples[lo] * (1 - frac) + samples[hi] * frac;
+  }
+  return out;
+}
+
 // One frame of audio off the microphone, and the fork the whole feature turns
 // on: before a wake it goes to the model and nowhere else, after one it is
 // collected into a sentence for the transcriber.
@@ -7754,6 +7772,8 @@ function wakeFrame(samples, rate) {
     scanRing = [];
     return;
   }
+
+  if (rate !== 16000) { samples = resampleTo16k(samples, rate); rate = 16000; }
 
   // A reply being read out is the conversation still happening, so the session
   // clock is held open through it - otherwise a long answer would time out the
