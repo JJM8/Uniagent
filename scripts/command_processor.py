@@ -444,11 +444,16 @@ def _temperature(arg, chat):
     return "this chat's temperature is now " + _fmt_temp(value) + "."
 
 
-def _workspace_listing(current):
+def _workspace_listing(current, by_user=True):
     """Every configured workspace, with the one this chat is in marked. The
     list is provider.workspaces() - what the settings page writes and what the
     picker in the corner of the chat window is filled from - and it is never
-    empty: the Uniagent folder itself is always the first entry."""
+    empty: the Uniagent folder itself is always the first entry.
+
+    `by_user` only changes the line at the bottom saying HOW to move, because
+    the two readers move differently: a person types /workspace <id> into the
+    chat box, and the model calls the `workspace` tool with an id. Telling
+    either one the other's way is telling it to do something it cannot."""
     lines = []
     for w in provider.workspaces():
         marks = []
@@ -462,10 +467,13 @@ def _workspace_listing(current):
             marks.append("on " + w["ssh"])
         lines.append("  " + w["id"] + " (" + w["name"] + ") - " + w["path"]
                      + (("  [" + ", ".join(marks) + "]") if marks else ""))
-    return ("workspaces:\n" + "\n".join(lines)
-            + "\n\nmove this chat with /workspace <id or name>.\n"
-            "'/workspace default' moves it back to the default one.\n"
-            "New ones are added on the settings page - this only moves between "
+    how = ("move this chat with /workspace <id or name>.\n"
+           "'/workspace default' moves it back to the default one.\n"
+           if by_user else
+           "move this chat by calling the workspace tool with that id.\n"
+           "id \"default\" moves it back to the default one.\n")
+    return ("workspaces:\n" + "\n".join(lines) + "\n\n" + how
+            + "New ones are added on the settings page - this only moves between "
             "the ones above.")
 
 
@@ -500,7 +508,7 @@ def _workspace(arg, chat, by_user=True):
     current = chat.workspace or ""
 
     if not arg:
-        return _workspace_listing(current)
+        return _workspace_listing(current, by_user)
 
     wanted = arg.strip().lower()
     if wanted in ("default", "clear", "unpin"):
@@ -512,7 +520,7 @@ def _workspace(arg, chat, by_user=True):
             match = next((w for w in entries if w["name"].strip().lower() == wanted), None)
         if match is None:
             return ("there is no workspace called " + arg + ".\n\n"
-                    + _workspace_listing(current))
+                    + _workspace_listing(current, by_user))
         target = match["id"]
 
     ws = workspace_mod.get(target)
