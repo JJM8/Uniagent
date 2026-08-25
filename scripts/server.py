@@ -1025,6 +1025,18 @@ def _run_turn(text, kind="user", target=None):
                           _live_set(route, thought=spent),
                           _broadcast({"type": "thought", "timing": spent,
                                       "chat": route})),
+                      # A model that never sent a content chunk at all - its
+                      # whole answer came back on the reasoning channel and
+                      # main._stream is handing it over as the reply instead
+                      # of on_text, to avoid streaming the same words a
+                      # second time (see main._stream's on_reclassify and
+                      # provider.py's _read_openai tail). No text on this
+                      # broadcast: the page already has it, in the thinking
+                      # block on_reasoning built - this just says to turn
+                      # that block into the reply rather than sealing it and
+                      # opening a second one underneath with the same words.
+                      on_reclassify=lambda: _broadcast({"type": "reclassify",
+                                                         "chat": route}),
                       # A request going out. The page starts counting the wait
                       # from here - which on a local model with a long
                       # conversation is the longest stretch of a turn and the
