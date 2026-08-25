@@ -76,7 +76,10 @@ def _reap(now):
 
 
 def _normalize(text):
-    return _WORD_RE.sub("", text.lower()).strip()
+    # Punctuation becomes a space, not nothing: "co-worker" collapsing to
+    # "coworker" would let it falsely match a wake word split across the
+    # hyphen, which a space between the two halves can't do.
+    return _WORD_RE.sub(" ", text.lower()).strip()
 
 
 def _matches(text, words):
