@@ -1173,7 +1173,7 @@ def _run_turn(text, kind="user", target=None):
                 said, summarise = [], False
                 _speak_note(route, "nothing was read out: " + type(e).__name__
                             + ": " + str(e))
-            _speak_offer(route, said, summarise, batch)
+            _speak_offer(route, said, summarise, batch, client=c.last_prompt_client)
             # A turn moves the token count and may have read files into the
             # conversation (read_skill), so the context panel is stale now.
             _broadcast_context(c)
