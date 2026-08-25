@@ -7736,7 +7736,8 @@ const WAKE_POLL_MS = 1000;
 // that has not read the settings cannot know whether it is meant to listen at
 // all. Re-read from the reply when the tab is saved, so a model or a timing
 // changed there is live in every open window without a reload.
-let wakeCfg = { wake_model: "", wake_threshold: 0.5, wake_auto: false,
+let wakeCfg = { wake_provider: "oww", wake_model: "", wake_words: [],
+                wake_threshold: 0.5, wake_auto: false,
                 wake_captions: false, wake_silence_ms: 1200 };
 
 let wakeOn = false;      // the microphone is open and the phrase is being listened for
