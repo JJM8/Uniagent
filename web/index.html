@@ -7085,6 +7085,15 @@ events.onmessage = (e) => {
     // What the voice tab's speed slider is saved as, as of this message. Set
     // before playing, so the first clip of a turn is already at the right pace.
     if (ev.speed) setSpeakSpeed(ev.speed);
+    // `client` names the tab that last prompted this chat (see chatQuery's
+    // CLIENT_PARAM and main.py's last_prompt_client) - the only one that
+    // should read this reply out loud. Every open window on the chat still
+    // gets this event (that's how the chat-filter above works at all), so
+    // the ones that aren't it just stay quiet here instead of racing to
+    // speak over each other. No `client` at all - a cron chat, or one no
+    // browser has ever posted to - keeps the old behaviour of every window
+    // playing it.
+    if (ev.client && ev.client !== CLIENT_ID) return;
     if (ev.ids && ev.ids.length) playSpoken(ev.ids);
   } else if (ev.type === "speaknote") {
     // Reading it out went wrong in a way that isn't silence - the summarising
