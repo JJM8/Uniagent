@@ -7803,79 +7803,33 @@ async function wakeScan(frames) {
   }
 }
 
-// The model said yes. From here until the session closes, what is said is
-// collected and transcribed.
+// The model said yes. From here until the silence at the end, everything said
+// is captured whole and re-transcribed as it grows - see wakeCapture.
 function wakeWoke() {
   wakeLive = true;
-  wakeParts = [];
-  wakeSent = 0;
-  wakeFresh = true;
+  wakeClipFrames = [];
+  wakeClipMs = 0;
+  wakeGrew = false;
+  wakeHeardText = "";
+  wakePollSeq = 0;
+  wakeApplied = 0;
   scanOut = [];
   scanRing = [];
-  // A clean start for the sentence collector: the phrase has just finished, and
-  // what comes after it is the message.
-  vadSpeaking = false;
-  vadFrames = [];
-  vadRing = [];
   drawHeard();
-  wakeTouch();
+  wakeArmSilence();
+  wakePollLoop();
 }
 
-// After a wake. Cut what is said into sentences on silence and send each one to
-// be transcribed the moment it ends - which is what makes the wait before
-// submitting cost nothing but the silence itself.
-function wakeSentenceFrame(samples, rate, loud, ms) {
-  if (!vadSpeaking) {
-    vadRing.push(samples);
-    while (vadRing.length * ms > WAKE_PREROLL_MS) vadRing.shift();
-    if (!loud) return;
-    vadSpeaking = true;
-    vadFrames = vadRing.slice();   // the run-up goes in with it
-    vadRing = [];
-    vadVoiced = 0;
-    vadQuiet = 0;
-    // Somebody started talking again, so nothing is finished - see wakeArm.
-    clearTimeout(wakeSubmitTimer);
-  }
-
-  vadFrames.push(samples);
-  if (loud) {
-    vadVoiced += ms;
-    vadQuiet = 0;
-  } else {
-    vadQuiet += ms;
-  }
-
-  const tooLong = vadFrames.length * ms >= WAKE_MAX_CLIP_MS;
-  if (vadQuiet < wakeCfg.wake_endpoint_ms && !tooLong) return;
-
-  const clip = vadFrames;
-  vadSpeaking = false;
-  vadFrames = [];
-  if (vadVoiced >= WAKE_MIN_VOICED_MS) wakeClip(clip, rate);
-  else wakeArm();   // a cough is still a silence, and silence is what sends
-}
-
-// One finished sentence, off to be transcribed. The count of clips in flight is
-// what stops a message going while half of it is still words nobody has read
-// yet - see wakeArm.
-async function wakeClip(frames, rate) {
-  wakeClips++;
-  clearTimeout(wakeSubmitTimer);
-  try {
-    const r = await fetch("/voice", {
-      method: "POST",
-      headers: { "Content-Type": "audio/wav" },
-      body: wakeWav(frames, rate),
-    });
-    if (r.ok) wakeHeard(((await r.json()).text || "").trim());
-    else line("error", "voice: " + (await r.text()));
-  } catch (e) {
-    line("error", "voice: could not reach the server");
-  } finally {
-    wakeClips--;
-    wakeArm();
-  }
+// After a wake. No cutting into sentences and nothing to decide frame by frame
+// - every frame captured is kept, in order, for as long as the session lasts,
+// and what it amounts to is worked out by re-transcribing the whole thing (see
+// wakePollLoop) rather than by guessing where the gaps are first.
+function wakeCapture(samples, ms, loud) {
+  wakeClipFrames.push(samples);
+  wakeClipMs += ms;
+  wakeGrew = true;
+  if (loud) wakeArmSilence();
+  if (wakeClipMs >= WAKE_MAX_CLIP_MS) wakeFinish();
 }
 
 // The wake phrase off the front of a transcript, if it is there at all. The
