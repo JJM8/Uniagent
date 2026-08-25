@@ -8270,13 +8270,17 @@ function wakeStop() {
 
 // New settings, from the load below or from the voice tab being saved.
 function wakeSettings(values) {
-  const was = wakeCfg.wake_model;
+  const was = wakeCfg.wake_provider + "|" + wakeCfg.wake_model + "|"
+    + (wakeCfg.wake_words || []).join(",");
   wakeCfg = Object.assign({}, wakeCfg, values || {});
-  // A different model is a different session as far as the server is concerned,
-  // and no model at all turns the microphone off rather than leaving a page
-  // listening for something that can never now be said.
-  if (!wakeCfg.wake_model && wakeOn) wakeStop();
-  else if (wakeCfg.wake_model !== was && wakeOn) wakeEnd();
+  const now = wakeCfg.wake_provider + "|" + wakeCfg.wake_model + "|"
+    + (wakeCfg.wake_words || []).join(",");
+  // A different engine, model or word list is a different session as far as
+  // the server is concerned, and nothing configured at all turns the
+  // microphone off rather than leaving a page listening for something that
+  // can never now be said.
+  if (!wakeConfigured() && wakeOn) wakeStop();
+  else if (now !== was && wakeOn) wakeEnd();
   drawWakeButton();
 }
 
