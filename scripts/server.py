@@ -72,6 +72,7 @@ import wires
 import workspace
 import turnctx
 import voice_input
+import wake_stt
 import wake_word
 # Not "from tools import _discovery": tools/ was never on sys.path as a
 # package (there's no tools/__init__.py) - it's tool_processor's own import
