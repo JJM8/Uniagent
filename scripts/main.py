@@ -2621,7 +2621,7 @@ def _split_output(provider_name, model, thought, reply, usage, counted=None):
 
 def _stream(messages, provider_name, model, temperature, on_text, should_stop=None, usage=None,
             native_call=None, reasoning=None, phases=None, on_request=None,
-            on_thought=None):
+            on_thought=None, on_reclassify=None):
     """One model response, read as it's written. Returns everything received.
 
     Shows each piece the moment it arrives - printed here, or handed to on_text
