@@ -165,12 +165,6 @@ scripts/.edagent
 # Dead code and old drafts kept around locally - not part of the project
 unused/
 
-# Wake word models. The folder is tracked so the app has somewhere to look;
-# what goes in it is not - they are a few hundred KB to a megabyte each, they
-# are downloaded rather than written here, and which one you use is a choice
-# about your house rather than about this project. See docs/wake-word.md.
-models/wake/*
-!models/wake/.gitkeep
 
 # autopush lock file - don't version or sync this
 .autopush.lock
