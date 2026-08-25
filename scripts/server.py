@@ -687,13 +687,19 @@ def _speak_batch():
         return "turn-" + str(_speak_batch_id)
 
 
-def _speak_offer(route, texts, summarise=False, batch=None):
+def _speak_offer(route, texts, summarise=False, batch=None, client=None):
     """Register each of `texts` as something to read out for chat `route`, in
     order, and tell every open page about the lot. `summarise` puts each
     message through the summarising model first, when the page comes to ask for
     its audio. `batch` ties them to the turn they came from - only used to keep
     one turn's complaints down to one. Does nothing at all when the voice tab
-    names no speaker, which is the default and means the page stays silent."""
+    names no speaker, which is the default and means the page stays silent.
+    `client` is the chat's last_prompt_client (see main.Agent) - the browser
+    tab that spoke last to this chat, and so the only one that should play
+    this reply out loud. Sent along on the broadcast rather than filtered here,
+    since every page still needs the "speak" event to know a reply landed;
+    None (a cron chat, or one no browser has ever posted to) falls back to the
+    old behaviour of every open window on the chat playing it."""
     global _speak_id
     if not texts:
         return
