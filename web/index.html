@@ -7858,105 +7858,124 @@ function wakeLabelOf(file) {
                      .replace(/[_-]+/g, " ").trim().toLowerCase();
 }
 
-function wakeHeard(text) {
-  if (!text || !wakeLive) return;
-  if (wakeFresh) {
-    wakeFresh = false;
-    text = withoutPhrase(text);
-    // "Computer." on its own is somebody about to say something: the session
-    // stays open with nothing in it and the next sentence is the message.
-    if (!text) return;
+// The wait that decides you've stopped talking. Restarted on every loud frame
+// (see wakeCapture), so it always counts from the last word rather than the
+// first - and it is the only clock this feature has: no separate "sentence
+// done" and "message done" any more, because there's no separate sentence
+// left to be done. When it fires uninterrupted, wakeFinish takes it from here.
+function wakeArmSilence() {
+  clearTimeout(wakeSilenceTimer);
+  wakeSilenceTimer = setTimeout(wakeFinish, wakeCfg.wake_silence_ms);
+}
+
+// Roughly once a second while a session is open, the whole clip captured so
+// far goes back to the transcriber and whatever it says REPLACES what's shown
+// - not appended to it, replaced, because a re-transcription of more audio is
+// a better answer than the last one was, not an addition to it. Skipped
+// whenever nothing has been said since the last poll, and never overlapped
+// with itself: a slow reply is worth waiting for rather than piling requests
+// up behind it. `final` is wakeFinish asking for one last, authoritative pass
+// over everything captured, once nothing further is coming.
+async function wakePoll(final) {
+  const frames = wakeClipFrames.slice();
+  if (!frames.length) return "";
+  const seq = ++wakePollSeq;
+  wakePolling = true;
+  let text = "";
+  try {
+    const r = await fetch("/voice", {
+      method: "POST",
+      headers: { "Content-Type": "audio/wav" },
+      body: wakeWav(frames, 16000),
+    });
+    if (r.ok) text = withoutPhrase(((await r.json()).text || "").trim());
+    else if (!final) line("error", "voice: " + (await r.text()));
+  } catch (e) {
+    if (!final) line("error", "voice: could not reach the server");
+  } finally {
+    wakePolling = false;
   }
-  wakeParts.push(text);
+  // A final pass is authoritative regardless of ordering; an ordinary one is
+  // dropped if a later poll's answer already made it to the screen first -
+  // every poll transcribes a superset of the one before it, so an older
+  // answer arriving late is never worth showing over a newer one.
+  if (final || seq > wakeApplied) {
+    wakeApplied = seq;
+    wakeHeardText = text;
+    drawHeard();
+  }
+  return text;
+}
+
+function wakePollLoop() {
+  wakePollTimer = setTimeout(async () => {
+    if (!wakeLive) return;
+    if (wakeGrew && !wakePolling) {
+      wakeGrew = false;
+      await wakePoll(false);
+    }
+    if (wakeLive) wakePollLoop();
+  }, WAKE_POLL_MS);
+}
+
+// Silence has run long enough: one last, complete re-transcription (a poll
+// mid-word can lag behind what was actually said by up to WAKE_POLL_MS), then
+// that text - if there's any left once the wake phrase is stripped off it -
+// goes as the one message this session ever sends.
+async function wakeFinish() {
+  if (!wakeLive) return;
+  clearTimeout(wakeSilenceTimer);
+  clearTimeout(wakePollTimer);
+  wakeLive = false;
+  wakeBusy = true;
   drawHeard();
-  wakeTouch();
-}
-
-// The wait that decides a message is finished. Restarted by everything that
-// could still change it - a clip arriving, a clip going out, somebody starting
-// to talk again - so it always counts from the last thing that happened rather
-// than from the first.
-function wakeArm() {
-  clearTimeout(wakeSubmitTimer);
-  if (!wakeLive || vadSpeaking || wakeClips) return;
-  if (wakeSent >= wakeParts.length) return;   // nothing new to send
-  wakeSubmitTimer = setTimeout(wakeSend, wakeCfg.wake_submit_ms);
-}
-
-// Restart the session clock. Called by anything that counts as still being in
-// the conversation - a word heard, a message sent, a reply being read out.
-function wakeTouch() {
-  clearTimeout(wakeSessionTimer);
-  wakeSessionTimer = setTimeout(wakeEnd, wakeCfg.wake_session_ms);
-  wakeArm();
-}
-
-async function wakeSend() {
-  if (!wakeLive || wakeSent >= wakeParts.length) return;
-  // Only a turn that is actually RUNNING can be interrupted, and only an
-  // interruption is a continuation. Words said after the answer came back are a
-  // follow-up - "thanks, and set a timer" - and sending those marked as the
-  // second half of the last sentence would be a plain lie about what was said.
-  const carryOn = turnBusy && wakeSent > 0;
-  const parts = carryOn ? wakeParts.slice() : wakeParts.slice(wakeSent);
-  const fresh = carryOn ? parts.length - wakeSent : parts.length;
-  wakeSent = wakeParts.length;
+  const text = await wakePoll(true);
+  wakeBusy = false;
+  wakeClipFrames = [];
   drawHeard();
-  // From the send, not from the last word: the window to carry on talking is
-  // the whole point of the session clock.
-  wakeTouch();
+  // "Computer." on its own, then silence, is somebody who didn't get to the
+  // rest of it - nothing said, nothing to send.
+  if (text) wakeSend(text);
+}
+
+async function wakeSend(text) {
   try {
     const q = "?chat=" + encodeURIComponent(requireChat());
     const r = await fetch("/voice/say" + q, {
       method: "POST",
-      body: JSON.stringify({ parts, fresh, interrupt: !!wakeCfg.wake_interrupt }),
+      body: JSON.stringify({ parts: [text], fresh: 1 }),
     });
-    if (!r.ok) {
-      line("error", "voice: " + (await r.text()));
-      return;
-    }
-    const reply = await r.json();
-    if (reply.stopped && !reply.merged) {
-      // The turn was stopped but not unwound, because it had already called
-      // something. Worth a line: the transcript now shows a stop nobody
-      // pressed, and the reason it is there is that the alternative was running
-      // that tool a second time.
-      line("system", "system: you were still talking, so the turn was stopped - but it "
-                   + "had already run something, so what it did was kept and the rest "
-                   + "of what you said went on top of it.");
-    }
+    if (!r.ok) line("error", "voice: " + (await r.text()));
   } catch (e) {
     line("error", "voice: could not reach the server");
   }
 }
 
-// The session closes and the microphone goes back to listening for the phrase.
-// Anything heard but never sent goes with it: it was said into a window that has
-// since shut, and sending it now - minutes later, into whatever the chat has
-// become - is worse than losing it.
+// The session is abandoned rather than finished - the microphone turned off,
+// or the model switched out from under it - so nothing captured is sent: it
+// was said into a window that's being closed, not one that ran its course.
 function wakeEnd() {
-  clearTimeout(wakeSessionTimer);
-  clearTimeout(wakeSubmitTimer);
+  clearTimeout(wakeSilenceTimer);
+  clearTimeout(wakePollTimer);
   wakeLive = false;
-  wakeParts = [];
-  wakeSent = 0;
-  vadSpeaking = false;
-  vadFrames = [];
-  vadRing = [];
+  wakeBusy = false;
+  wakeClipFrames = [];
+  wakeHeardText = "";
   drawHeard();
 }
 
 function drawHeard() {
-  heard.hidden = !wakeLive;
-  wake.classList.toggle("live", wakeLive);
-  if (!wakeLive) return;
+  const active = wakeLive || wakeBusy;
+  heard.hidden = !active;
+  wake.classList.toggle("live", active);
+  if (!active) return;
   // Built as elements, not markup: this is text from outside the page, by way
   // of a microphone and a speech model, and it has no business being parsed.
   heard.textContent = "";
   const tag = document.createElement("b");
-  tag.textContent = wakeSent ? "still listening" : "listening";
+  tag.textContent = wakeBusy ? "sending" : "listening";
   const said = document.createElement("span");
-  said.textContent = wakeParts.join(" ").trim() || "…";
+  said.textContent = wakeHeardText || "…";
   heard.append(tag, said);
 }
 
