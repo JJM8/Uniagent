@@ -6869,6 +6869,42 @@ events.onopen = () => {
   if (down) { down = false; refresh(); }
 };
 
+// A "speak"/"speaknote" event, for whichever chat it's about - called for
+// every chat this device is responsible for, not filtered down to the one on
+// screen first (see events.onmessage). Defined up here since that's the only
+// caller; queueSpoken/setSpeakSpeed live further down with the rest of the
+// speak queue (function declarations, so the order doesn't matter).
+function handleSpeak(ev) {
+  // `client` names the tab that last prompted this chat (see chatQuery's
+  // CLIENT_PARAM and main.py's last_prompt_client) - the only one that
+  // should read this reply out loud. Every device with this chat open still
+  // gets the event; the ones that aren't it just stay quiet here rather than
+  // racing to speak over each other. No `client` at all - a cron chat, or
+  // one no browser has ever posted to - keeps the old behaviour of every
+  // device that has it open playing it.
+  if (ev.client && ev.client !== CLIENT_ID) return;
+  if (ev.type === "speaknote") {
+    // Reading it out went wrong in a way that isn't silence - the summarising
+    // model couldn't be reached, so what you are hearing is the reply itself.
+    // Said out loud here because the alternative is a setting that looks on
+    // and hasn't been for a week. Labelled with its chat when that isn't the
+    // one on screen, same as a background chat's system/error lines are.
+    line("error", "speech" + (ev.chat && ev.chat !== currentChat ? " (" + ev.chat + ")" : "")
+                 + ": " + ev.text);
+    return;
+  }
+  // Something the agent said is ready to be read out - usually one message,
+  // arriving mid-turn the moment the model finished writing it, and queued
+  // behind whatever this device is already reading (its own chat's, or
+  // another one's - see queueSpoken). The fetch inside is what makes the
+  // audio (and, in the summary modes, the summary) at all, so ids nobody
+  // asks for cost nothing.
+  // What the voice tab's speed slider is saved as, as of this message. Set
+  // before playing, so the first clip of a turn is already at the right pace.
+  if (ev.speed) setSpeakSpeed(ev.speed);
+  if (ev.ids && ev.ids.length) queueSpoken(ev.chat, ev.ids);
+}
+
 events.onmessage = (e) => {
   const ev = JSON.parse(e.data);
   // The chat list moved: a chat appeared, was deleted or renamed, or started
