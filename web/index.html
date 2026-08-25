@@ -7571,9 +7571,6 @@ const heard = document.getElementById("heard");
 // works in; longer is cheaper and slower to notice you, and a third of a second
 // is not a wait anybody can feel.
 const WAKE_CHUNK_MS = 320;
-// The run-up kept in front of the first loud frame, so the microphone opening
-// is never what cuts the first syllable off the phrase.
-const WAKE_PREROLL_MS = 400;
 // And the run-up the WAKE MODEL is given, which is a different thing and much
 // longer. The model does not judge a frame on its own - it needs a second or so
 // of audio behind the phrase before its features mean anything, and given none
