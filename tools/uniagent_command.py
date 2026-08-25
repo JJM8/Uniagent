@@ -58,50 +58,12 @@ Supported commands:
   ledger. Answers "how much have I spent" without asking any provider anything.
 - /help - show help
 
-WHAT A WORKSPACE IS - READ THIS, IT DECIDES WHERE YOUR TOOLS ACT.
-
-A workspace is one saved place to work: A DEVICE and A DIRECTORY on it. This
-chat is in exactly one of them at a time, and that one workspace decides, for
-every tool call you make:
-- WHICH COMPUTER read_file, write_file, edit_file and ask_file read and write
-  on, and
-- WHICH COMPUTER the terminal's commands actually run on, and
-- WHICH DIRECTORY a relative path like "notes.md" or "src/" means.
-
-A workspace on another device is reached over ssh and is completely real: with
-this chat in it, `ls` lists that device's files, a file you write lands on that
-device's disk, and a process you start runs on that device. Nothing you do
-touches the machine Uniagent itself is running on. The reverse is just as true -
-while this chat is on another device, Uniagent's own folder (memories/,
-context/, skills/, tools/) is NOT reachable, because that folder is on the
-Uniagent machine. To read or write a memory from elsewhere, move to the Uniagent
-folder workspace, do it, and move back.
-
-You are told at the top of every turn which workspace this chat is in and which
-others exist - names, devices and paths. Read that before assuming where you
-are. If you are unsure, run "/workspace" with no name and it lists them.
-
-WHEN TO MOVE. Whenever the user means another one of their devices, move there
-first and then do the work. "What's in my downloads on the phone", "check the
-logs on the Pi", "is the server still running on the NAS", "build the site in my
-projects folder" - each of those is a workspace, and the user does NOT have to
-say the word "workspace" for it to be one. Naming any device they have saved is
-the request to work on it. Do not answer such a question from the device you
-happen to be on, do not guess what is on the other machine, and do not tell the
-user to go and look themselves - move and find out.
-
-HOW MOVING BEHAVES. It takes effect from your very next tool call, it affects
-this chat only, and it stays until changed again - so move once, do the work
-there, and move back when the work is genuinely somewhere else again. Do not
-flip back and forth mid-task. The terminal gets a fresh shell in the new place,
-so anything open in the old one (a running process, an activated venv, a
-directory you had cd'd into) is left behind there. The reply tells you whether
-the device is actually reachable; if it is not, say so plainly rather than
-retrying blindly.
-
-IT CANNOT CREATE ONE. Only the workspaces already saved exist. If the place the
-user means is not in the list, say so and let them add it on the settings page -
-it needs a path and, for another device, ssh access already set up.
+/workspace IS ITS OWN TOOL. Moving this chat to another device or directory has
+a named tool of its own - "workspace", with an `id` argument - and that is where
+the explanation of what a workspace is, and when to move, now lives. The command
+still works from here, because every command does, but prefer the tool: it is
+one typed argument instead of a string to spell, and its own description already
+tells you the part that matters.
 """
 
 # For native provider tool-calling.
