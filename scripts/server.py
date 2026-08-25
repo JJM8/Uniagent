@@ -3434,6 +3434,13 @@ class Handler(BaseHTTPRequestHandler):
                        "application/json")
             return
 
+        # Which browser tab this is, per its own localStorage id (see
+        # index.html's CLIENT_ID) - not who's logged in, just which open page.
+        # Recorded before dispatching below so a command or /continue counts
+        # as this device speaking up too, not just an ordinary turn.
+        q = parse_qs(urlparse(self.path).query)
+        c.set_last_prompt_client(q.get("client", [""])[0])
+
         # /continue is taken before the command table on purpose: it is not a
         # command that answers, it is a turn that starts with no message. The
         # button on the page posts this exact string, so the button and the
