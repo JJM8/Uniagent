@@ -160,12 +160,32 @@ COOKIE = "uniagent_session"
 _streams = []
 _streams_lock = threading.Lock()
 
+# Every broadcast, numbered, and kept here briefly - so a stream that drops
+# for a few seconds (a phone's network switching towers, a laptop waking up,
+# anything short of the tab actually closing) can be handed exactly what it
+# missed instead of just resuming live and leaving a gap. This is what the
+# SSE spec's "id:"/Last-Event-ID pair exists for: the browser remembers the
+# last id it read and resends it as a header the moment EventSource
+# reconnects, with no help from the page's own JS - see _stream() below.
+#
+# Bounded rather than kept forever: a client gone longer than this holds
+# gets what it can and is expected to reconcile the rest the way every
+# client already does on load and on switching chats - GET /history and
+# /live, which is the actual source of truth. This is a shock absorber for
+# the common case, not a guarantee.
+_seq = 0
+_backlog = collections.deque(maxlen=2000)
+
 
 def _broadcast(event):
+    global _seq
     data = json.dumps(event)
     with _streams_lock:
+        _seq += 1
+        seq = _seq
+        _backlog.append((seq, data))
         for q in _streams:
-            q.put(data)
+            q.put((seq, data))
 
 
 # ---- the response in flight ---------------------------------------------
