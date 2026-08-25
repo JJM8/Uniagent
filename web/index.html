@@ -8159,13 +8159,14 @@ function drawWakeScore() {
 }
 
 function drawWakeButton() {
-  const chosen = wakeCfg.wake_model || "";
-  // No model means no feature: the button is not there to be pressed at all,
-  // rather than sitting there doing nothing.
-  wake.hidden = !chosen;
+  // Nothing configured means no feature: the button is not there to be
+  // pressed at all, rather than sitting there doing nothing.
+  const configured = wakeConfigured();
+  wake.hidden = !configured;
   wake.classList.toggle("on", wakeOn);
-  wake.title = wakeOn ? 'listening for "' + wakeLabelOf(chosen) + '" - click to stop'
-                      : 'listen for "' + wakeLabelOf(chosen) + '"';
+  const label = wakeLabel();
+  wake.title = wakeOn ? 'listening for "' + label + '" - click to stop'
+                      : 'listen for "' + label + '"';
 }
 
 async function wakeStart(quiet) {
