@@ -8919,12 +8919,7 @@ async function loadSettings() {
   drawWakeModels(known.wake_model || "");
   F.wake_threshold.value = known.wake_threshold;
   F.wake_auto.checked = !!known.wake_auto;
-  // Defaulted the other way round to the checkbox above: interrupting is what
-  // this ships doing, so anything but an explicit false is on.
-  F.wake_interrupt.checked = known.wake_interrupt !== false;
-  F.wake_endpoint_ms.value = known.wake_endpoint_ms;
-  F.wake_submit_ms.value = known.wake_submit_ms;
-  F.wake_session_ms.value = known.wake_session_ms;
+  F.wake_silence_ms.value = known.wake_silence_ms;
   drawWakeFields();
   applyTheme(known.theme);
   accentValue = known.accent || "";
