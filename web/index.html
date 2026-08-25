@@ -4877,7 +4877,11 @@ function renderLive(live, box = messages, carried = null, said = null) {
   // keep streaming into.
   if (drawn(partial, written)) {
     streaming = line("agent", partial, box);
-    startElapsed(streaming.parentElement, phaseAge);
+    // Counting only while it is still being written. `done` is the record
+    // saying this response is finished and is only still here because the
+    // history has not been written yet - a timer ticking on a bubble nothing
+    // is being added to would be saying something untrue.
+    if (!live.done) startElapsed(streaming.parentElement, phaseAge);
   }
   // What is on screen now is this chat's, however it got here.
   liveChat = currentChat;
