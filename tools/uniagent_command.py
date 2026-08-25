@@ -18,29 +18,24 @@ NAME = "uniagent_command"
 # name, this description and its schema - and NOTHING else (see
 # tool_processor.tools_schema). The INSTRUCTIONS are only ever seen if something
 # goes and reads this file, which for a schema'd tool the model has no reason to
-# do. So everything it must know to use /workspace correctly - above all what a
-# workspace IS - has to be here, in the few hundred characters it is actually
-# given. The system prompt carries the other half: which workspaces exist right
-# now, with their devices and paths (see workspace.describe).
+# do.
+#
+# It used to spend nearly all of that budget teaching /workspace - what a
+# workspace is, when to move, that another device is real - because moving was
+# only reachable by spelling a slash command into this tool's free-text
+# `command` string. It has its own tool now (workspace_tool.py, NAME
+# "workspace") with a typed argument and room for that teaching, so this is back
+# to being what it says: the way to run a slash command. /workspace still works
+# here, as every command does, but the model is pointed at the named tool.
 DESCRIPTION = (
-    "Run a Uniagent slash command. Most important: /workspace, which CHANGES WHICH "
-    "DEVICE AND DIRECTORY THIS CHAT WORKS ON. A workspace is one saved place to work - "
-    "a computer, and a root directory on it. Whichever workspace this chat is in "
-    "decides, for every tool call you make, which machine read_file/write_file/"
-    "edit_file/ask_file read and write on, which machine the terminal's commands "
-    "actually run on, and what a relative path means. A workspace on another device is "
-    "reached over ssh and is real: there, `ls` lists THAT device's files and a file you "
-    "write lands on THAT device's disk, not on the machine running Uniagent - and "
-    "Uniagent's own folder (memories/, context/, skills/) is not reachable from there. "
-    "So whenever the user means another of their devices - \"what's on my phone\", "
-    "\"check the logs on the Pi\", \"is it still running on the server\" - move this "
-    "chat there first with /workspace <id> and then do the work, instead of answering "
-    "from the machine you happen to be on. They need not say the word \"workspace\". "
-    "The system prompt lists every workspace that exists with its device and path; "
-    "\"/workspace\" with no name lists them too, and it can only move between those - "
-    "it cannot create one. Moving affects this chat only, applies from your next tool "
-    "call, and lasts until changed. Other commands: /model, /stop, /history, /chats, "
-    "/load, /new, /help.")
+    "Run a Uniagent slash command - the same commands the user can type into the "
+    "chat box, run against THIS chat. /model [provider] [model] switches the model; "
+    "/usage [today|7d|30d|all] answers \"how much have I spent\" from the local "
+    "ledger, no provider asked; /history, /chats, /load <chat>, /new manage the "
+    "conversation itself; /stop, /help. Pass the whole command as one string, e.g. "
+    "\"/model bedrock haiku\". Note WHERE this chat works - which device and "
+    "directory its file tools and terminal act in - is the separate `workspace` "
+    "tool, not this one.")
 
 INSTRUCTIONS = """
 HOW TO CALL: use the tool-call syntax already given to you, with tool name "uniagent_command". Do not explain what you are doing first.
@@ -114,11 +109,9 @@ SCHEMA = {
     "type": "object",
     "properties": {
         "command": {"type": "string", "description":
-            "The slash command to execute. \"/workspace <id>\" moves this chat to "
-            "another saved device and directory - every file tool and the terminal "
-            "then act THERE, so use it whenever the user means another of their "
-            "machines; bare \"/workspace\" lists them. Also e.g. \"/model bedrock "
-            "haiku\", \"/history\", \"/stop\"."},
+            "The slash command to execute, e.g. \"/model bedrock haiku\", "
+            "\"/usage 7d\", \"/history\", \"/stop\". To change which device and "
+            "directory this chat works in, use the `workspace` tool instead."},
     },
     "required": ["command"],
 }
