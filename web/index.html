@@ -8892,6 +8892,7 @@ async function loadSettings() {
   drawWakeModels(known.wake_model || "");
   F.wake_threshold.value = known.wake_threshold;
   F.wake_auto.checked = !!known.wake_auto;
+  F.wake_captions.checked = !!known.wake_captions;
   F.wake_silence_ms.value = known.wake_silence_ms;
   drawWakeFields();
   applyTheme(known.theme);
