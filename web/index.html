@@ -6740,7 +6740,7 @@ subStop.addEventListener("click", async () => {
   // named in the request - so stopping a subagent belonging to another chat no
   // longer means dragging this window (and every other one) into that chat
   // first just to be allowed to say it.
-  const r = await (await fetch("/input?chat=" + encodeURIComponent(openedSub.chat), {
+  const r = await (await fetch("/input?chat=" + encodeURIComponent(openedSub.chat) + CLIENT_PARAM, {
     method: "POST", body: "/stop " + openedSub.name,
   })).json();
   line("system", "system: " + r.text);
