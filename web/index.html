@@ -9246,11 +9246,11 @@ async function loadSpeakVoices(wanted) {
 
 // ---- settings: hearing it ----------------------------------------------------
 // One press, one real synthesis, one clip. Its own Audio rather than the
-// speakQueue above: that queue belongs to the agent reading a turn out, runs
-// across turns, and is deliberately interruptible by nothing but stop - a
-// button on the settings overlay has no business emptying it. A second press
-// replaces the clip from the first, which is what you want when you are
-// stepping down a list of thirteen voices.
+// speak queue above: that queue belongs to the agent reading a turn out, runs
+// across turns and chats, and is deliberately interruptible by nothing but
+// stop or the arrow keys - a button on the settings overlay has no business
+// touching it. A second press replaces the clip from the first, which is
+// what you want when you are stepping down a list of thirteen voices.
 let speakTest = null;
 
 // What is sent is what is ON THE FORM, not what is saved, so a voice can be
