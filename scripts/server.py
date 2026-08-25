@@ -31,6 +31,7 @@ there is a shell on this machine. See auth.py for the password itself, and
 _serve_https() for why the app is https-only.
 """
 
+import collections
 import concurrent.futures as futures
 import datetime
 import hashlib
