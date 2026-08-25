@@ -2829,7 +2829,14 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
                                           on_call_delta=show_call):
         if should_stop and should_stop():
             break
-        if chunk:
+        # provider.py sets this immediately before yielding this exact chunk,
+        # in the one branch where the whole answer came back as reasoning and
+        # is being handed over as the reply - see _read_openai's tail. That
+        # text has already been shown, live, as thinking; it is not a new
+        # reply chunk arriving on top of it, so thinking_done()/on_text are
+        # both skipped for it and on_reclassify is told instead.
+        reclassified = bool(chunk) and reasoning is not None and reasoning.get("reclassified")
+        if chunk and not reclassified:
             thinking_done()
         if chunk and phases is not None:
             phases.writing()
@@ -2841,7 +2848,10 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
         # so there is nothing to scan, trim or break out of mid-stream: the
         # provider stops on its own once it has decided to call a tool.
         if chunk:
-            if on_text:
+            if reclassified:
+                if on_reclassify:
+                    on_reclassify()
+            elif on_text:
                 on_text(chunk)
             else:
                 print(chunk, end="", flush=True)
