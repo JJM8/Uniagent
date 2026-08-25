@@ -511,7 +511,7 @@ def describe(wsid=None):
             + ". A workspace is a device and a directory: moving to one is how you "
             "work somewhere else. When the user talks about another device they "
             "have - its files, its logs, running something on it - move this chat "
-            "to that device's workspace with the uniagent_command tool "
-            "(/workspace <id>) and carry on there, rather than answering from "
+            "to that device's workspace with the workspace tool (its id as the "
+            "`id` argument) and carry on there, rather than answering from "
             "where you happen to be. Only these exist; you cannot invent one.")
     return "\n".join(lines)
