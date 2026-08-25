@@ -1034,15 +1034,30 @@ def _run_turn(text, kind="user", target=None):
                       # them at the end-of-turn redraw. The same dict is
                       # stored on the turn, so the redraw agrees with it.
                       on_timing=lambda spent: (
-                          # This response is complete and is a turn in the
-                          # history now, so the record hands over to the next
-                          # one rather than disappearing - the turn is still
-                          # running, and whatever comes next (a safety check, a
-                          # tool, another request) is still something to wait
-                          # on. Its text is dropped here, which is what stops
-                          # the finished message being drawn twice: once from
-                          # the record and once from the history.
-                          _live_begin(route),
+                          # This response is complete, but the record is NOT
+                          # emptied here and its text is NOT dropped. It used
+                          # to be, on the grounds that the response is "a turn
+                          # in the history now" - and it is not, quite. run()
+                          # announces the timing BEFORE it decides what the
+                          # response was, so the turn is appended and written
+                          # some way after this, and between the two the reply
+                          # existed in neither place: not in the history, which
+                          # had not been written, and not in the record, which
+                          # had just been cleared. A window rebuilding in that
+                          # gap - switching to this chat, or coming back from a
+                          # dropped connection - drew the reply with its end
+                          # missing, and kept it that way until the next
+                          # redraw.
+                          #
+                          # So the record holds what it wrote until the NEXT
+                          # response begins (on_request below) or the turn ends
+                          # - it always overlaps the history now, never leaves a
+                          # gap before it. Drawing it twice is prevented where
+                          # it belongs, by the page checking whether the
+                          # history has already caught up (renderLive in
+                          # index.html), rather than by a window of time in
+                          # which the text does not exist anywhere.
+                          _live_set(route, done=True),
                           _broadcast({"type": "timing", "timing": spent,
                                       "chat": route})),
                       # Thinking has just ended, and these are its numbers.

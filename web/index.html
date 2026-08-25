@@ -3878,6 +3878,16 @@ const BOX_IDLE = input.placeholder;
 // The agent bubble the current turn is streaming into, if a turn is running.
 let streaming = null;
 
+// Which chat the live blocks above and below currently belong to. Needed for
+// exactly one thing: render() rescues the half-written reply off the screen
+// before it wipes the box (see `carried` there), and a redraw is also what a
+// chat SWITCH does - so without this the reply one chat was in the middle of
+// would be carried across and drawn into a different conversation. Stamped
+// from the broadcast that drew them, which has already been filtered down to
+// the chat this window is in, so it is always the chat that was on screen when
+// they appeared rather than the one that is on screen now.
+let liveChat = null;
+
 // The thinking block and the waiting line belonging to the response being
 // streamed right now - the handles thinkingLine()/waitedLine() return, not the
 // elements. Both are cleared by the "timing" broadcast that closes a response
@@ -4727,6 +4737,10 @@ function thinkingLine(box = messages, already = 0) {
   return {
     wrap: wrap,
     sealed: false,
+    // Everything appended so far. render() reads this before it wipes the box,
+    // so a rebuild that happens mid-thought puts back what this window was
+    // already shown rather than only what the server's record had reached.
+    text() { return body.textContent; },
     append(text) {
       const at = nearBottom(box);
       // Its own scroller (see .thinking-body), kept pinned to the bottom so
@@ -4783,8 +4797,44 @@ function sealedThinking(text, timing, box = messages) {
 // The counters resume where the phases actually are, not at zero: `now` and
 // the phase's own start come from the server's clock, so a model that has
 // been thinking for four minutes says so instead of starting again.
-function renderLive(live, box = messages) {
-  if (!live || box !== messages) return;
+// Whitespace taken out, for comparing two copies of the same text that took
+// different routes here. The record builds its copy out of the fragments as
+// they were broadcast and the history stores the reply and the call it made as
+// two separate fields, so the blank line between them is put in at different
+// moments and is the one thing the two honestly disagree about. Nothing else
+// about them can differ - they are the same characters from the same stream.
+function squash(text) { return (text || "").replace(/\s+/g, ""); }
+
+// `carried` is what this window already had on screen before the redraw wiped
+// it (see render()); `said` is the last assistant turn the transcript just
+// drew, or null. Between them they answer the two questions this has to get
+// right and used to get wrong in opposite directions: is there anything the
+// server's record has not caught up with, and is there anything here the
+// history has.
+function renderLive(live, box = messages, carried = null, said = null) {
+  carried = carried || { partial: "", thinking: "" };
+  // A record of null is a chat with nothing running - but the wipe may still
+  // have taken text off the screen that nothing else will put back, so the
+  // carried copy stands in for the record rather than being dropped with it.
+  live = live || {};
+  if (box !== messages) return;
+  // The longer of the two copies is the whole of it: both only ever grow, and
+  // neither can hold a character the other's stream did not carry.
+  const longest = (a, b) => ((a || "").length >= (b || "").length ? (a || "") : (b || ""));
+  const partial = longest(live.partial, carried.partial);
+  const thinking = longest(live.thinking, carried.thinking);
+  // ...unless the transcript above has it already. The record is kept until the
+  // next response starts precisely so that it overlaps the history instead of
+  // leaving a gap before it, so this is the ordinary end of a response, not an
+  // error - and if the two ever fail to match, the text is DRAWN. Showing a
+  // paragraph twice is a redraw away from being right; not showing it at all is
+  // what this whole path exists to stop.
+  const written = squash((said && said.content) || "") + squash((said && said.raw_call) || "");
+  const thought = squash((said && said.reasoning_content) || "");
+  const drawn = (text, into) => {
+    const want = squash(text);
+    return want && !into.includes(want);
+  };
   const since = (at) => (typeof at === "number" && typeof live.now === "number"
                          ? Math.max(0, (live.now - at) * 1000) : 0);
   const responseAge = since(live.started);
@@ -4807,21 +4857,23 @@ function renderLive(live, box = messages) {
   // The thinking. Open and counting if that is where it still is; folded with
   // its finished numbers if the reply has already started, which is exactly
   // the two states thinkingLine has.
-  if (live.thinking) {
+  if (drawn(thinking, thought)) {
     if (live.phase === "thinking") {
       thinkingNow = thinkingLine(box, phaseAge);
-      thinkingNow.append(live.thinking);
+      thinkingNow.append(thinking);
     } else {
-      sealedThinking(live.thinking, live.thought, box);
+      sealedThinking(thinking, live.thought, box);
     }
   }
 
   // And whatever of the reply has been written, in a bubble the rest will
   // keep streaming into.
-  if (live.partial) {
-    streaming = line("agent", live.partial, box);
+  if (drawn(partial, written)) {
+    streaming = line("agent", partial, box);
     startElapsed(streaming.parentElement, phaseAge);
   }
+  // What is on screen now is this chat's, however it got here.
+  liveChat = currentChat;
   if (box === messages) box.scrollTop = box.scrollHeight;
 }
 
@@ -4956,6 +5008,29 @@ function render(text, box = messages, vals = null, stamps = null, live = null) {
   // rather than the fresh scrollHeight it would otherwise land on.
   const stick = nearBottom(box);
   const prevScrollTop = box.scrollTop;
+  // What this window has ALREADY been shown of a response still being written,
+  // rescued off the DOM before the wipe below throws it away.
+  //
+  // This is the redraw's own race, and it is not the server's to close: the
+  // four fetches behind a refresh() take a round trip, the record they bring
+  // back was true when it was served, and every chunk that lands while they
+  // are in flight goes into a bubble this line is about to delete. The window
+  // is small and the loss was real - a rebuild mid-reply (switching to this
+  // chat, or a dropped connection coming back) chopped whatever had arrived
+  // since off the end.
+  //
+  // Both texts only ever grow, and the record's copy and this one are the same
+  // string arriving by two routes, so the longer of the two is the whole of it.
+  // Taking it from the page cannot lose anything the page had; renderLive
+  // below decides whether it still needs drawing at all.
+  //
+  // Only ever this chat's own: a redraw is also what switching chat does, and
+  // carrying the reply another conversation was mid-way through into this one
+  // would be a far worse bug than the one this fixes. See liveChat.
+  const carried = (box === messages && liveChat === currentChat)
+    ? { partial: streaming ? (streaming.dataset.raw || "") : "",
+        thinking: (thinkingNow && !thinkingNow.sealed) ? thinkingNow.text() : "" }
+    : { partial: "", thinking: "" };
   box.innerHTML = "";
   if (box === messages) {
     streaming = null;
@@ -4972,7 +5047,7 @@ function render(text, box = messages, vals = null, stamps = null, live = null) {
     // do this) - won't parse. Show it as-is rather than leaving the window
     // blank, same as an "Error: " line used to be shown.
     if (text.trim()) line("error", text, box);
-    renderLive(live, box);
+    renderLive(live, box, carried, null);
     if (box === messages) renderPending();
     box.scrollTop = stick ? box.scrollHeight : prevScrollTop;
     if (box === messages) updateEmptyChat();
@@ -5110,7 +5185,18 @@ function render(text, box = messages, vals = null, stamps = null, live = null) {
   // The response still being written, which by definition is not in the
   // history yet - below everything the history had, and above the pending
   // messages, which is where it is happening.
-  renderLive(live, box);
+  //
+  // "By definition" is the thing that has to be checked rather than assumed,
+  // which is what the last argument is for: the record deliberately overlaps
+  // the history rather than leaving a gap before it (server.py's on_timing),
+  // so the response it is holding may be one the transcript above has just
+  // caught up with. The last assistant turn is what to compare against - it is
+  // where a finished response lands whichever way the turn then went.
+  let said = null;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i] && turns[i].role === "assistant") { said = turns[i]; break; }
+  }
+  renderLive(live, box, carried, said);
 
   // The history text just rebuilt from doesn't know about these yet (a sent
   // one hasn't necessarily reached it, an unsent one never will until it's
@@ -6922,6 +7008,10 @@ events.onmessage = (e) => {
     else if (ev.type === "approval") showApproval(ev.chat, ev.text);
     return;
   }
+  // Past the filter, so whatever this event draws belongs to the chat on
+  // screen - which is what render() needs to know before it carries a
+  // half-written reply across a redraw. See liveChat.
+  liveChat = ev.chat || currentChat;
   if (ev.type === "approval") {
     showApproval(ev.chat, ev.text);
   } else if (ev.type === "user") {
