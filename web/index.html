@@ -9622,9 +9622,7 @@ document.getElementById("set-save").addEventListener("click", async () => {
   // Same reason as the sliders above, and one more of its own: the listener is
   // running right now off the settings it last saw, so a word or a timing
   // changed here has to reach it without waiting for a reload.
-  F.wake_endpoint_ms.value = known.wake_endpoint_ms;
-  F.wake_submit_ms.value = known.wake_submit_ms;
-  F.wake_session_ms.value = known.wake_session_ms;
+  F.wake_silence_ms.value = known.wake_silence_ms;
   F.wake_threshold.value = known.wake_threshold;
   drawWakeModels(known.wake_model || "");
   wakeSettings(known);
