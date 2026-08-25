@@ -4831,9 +4831,16 @@ function renderLive(live, box = messages, carried = null, said = null) {
   // what this whole path exists to stop.
   const written = squash((said && said.content) || "") + squash((said && said.raw_call) || "");
   const thought = squash((said && said.reasoning_content) || "");
+  // The WHOLE of it, not a substring of it. "The history has caught up" means
+  // the turn up there is this same response, which is an equality - and a
+  // containment test would have quietly meant something else: the first few
+  // characters of a new reply are very often a substring of the last one
+  // ("Let", "I'll"), and taking that as caught-up would leave a reply
+  // undrawn - the exact failure this whole path exists to prevent, reached by
+  // being too clever about avoiding the other one.
   const drawn = (text, into) => {
     const want = squash(text);
-    return want && !into.includes(want);
+    return want && want !== into;
   };
   const since = (at) => (typeof at === "number" && typeof live.now === "number"
                          ? Math.max(0, (live.now - at) * 1000) : 0);
