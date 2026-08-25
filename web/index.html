@@ -9727,7 +9727,9 @@ document.getElementById("set-save").addEventListener("click", async () => {
     // typed rather than being defaulted back to what was saved.
     speak_summary_prompt: F.speak_summary_prompt.value.trim(),
     // Empty is the real answer "don't listen", not a box nobody filled in.
+    wake_provider: F.wake_provider.value,
     wake_model: F.wake_model.value,
+    wake_words: readList(listBoxes.wake_words),
     wake_threshold: Number(F.wake_threshold.value),
     wake_auto: F.wake_auto.checked,
     wake_captions: F.wake_captions.checked,
