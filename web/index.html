@@ -8294,7 +8294,7 @@ fetch("/settings").then((r) => r.json()).then((s) => {
   // with no click behind it only once somebody has already allowed one on this
   // origin. When it refuses, it does so quietly - the ear button is still there
   // - because an error line about a microphone nobody asked for is not news.
-  if (wakeCfg.wake_auto && wakeCfg.wake_model) wakeStart(true);
+  if (wakeCfg.wake_auto && wakeConfigured()) wakeStart(true);
 }).catch(() => { /* the settings will come with the overlay instead */ });
 
 // ---- voice: the reply read back ---------------------------------------------
