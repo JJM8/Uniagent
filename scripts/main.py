@@ -2854,7 +2854,7 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
         # provider stops on its own once it has decided to call a tool.
         if chunk:
             if reclassified:
-                on_reclassify()
+                on_reclassify(chunk)
             elif on_text:
                 on_text(chunk)
             else:
