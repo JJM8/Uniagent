@@ -7982,14 +7982,38 @@ function wakeCapture(samples, ms, loud) {
 // there and left alone when it is not: a half-matched phrase is a sentence with
 // its first word eaten, which is worse than a sentence with one word too many.
 function withoutPhrase(text) {
-  const phrase = wakeLabelOf(wakeCfg.wake_model || "");
-  if (!phrase) return text;
+  const phrases = wakeCfg.wake_provider === "stt"
+    ? (wakeCfg.wake_words || [])
+    : [wakeLabelOf(wakeCfg.wake_model || "")];
   const gap = "[\\s,.:;!?-]*";
-  const words = phrase.split(/\s+/)
-    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const stripped = text.replace(
-    new RegExp("^" + gap + words.join(gap) + gap, "i"), "").trim();
-  return stripped || text;
+  for (const phrase of phrases) {
+    if (!phrase) continue;
+    const words = phrase.trim().split(/\s+/)
+      .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    const stripped = text.replace(
+      new RegExp("^" + gap + words.join(gap) + gap, "i"), "").trim();
+    if (stripped !== text.trim()) return stripped || text;
+  }
+  return text;
+}
+
+// The phrase (or, in "stt" mode, list of phrases) the ear button is listening
+// for, as one string for its title - "hey computer" for oww, "computer" or
+// "computer" or "jarvis" for stt with more than one word typed in.
+function wakeLabel() {
+  if (wakeCfg.wake_provider === "stt") {
+    return (wakeCfg.wake_words || []).map((w) => w.toLowerCase()).join('" or "');
+  }
+  return wakeLabelOf(wakeCfg.wake_model || "");
+}
+
+// Whether the ear button has anything to listen for at all, under whichever
+// engine is chosen - the "no model means no feature" check, generalized past
+// wake_model to also cover "stt" naming no words.
+function wakeConfigured() {
+  return wakeCfg.wake_provider === "stt"
+    ? !!(wakeCfg.wake_words && wakeCfg.wake_words.length)
+    : !!wakeCfg.wake_model;
 }
 
 // A model file name as the phrase it listens for: "hey_computer_v0.1.onnx" ->
