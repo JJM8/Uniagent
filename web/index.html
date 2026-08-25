@@ -5422,7 +5422,7 @@ async function answerApproval(chatStem, yes) {
   // /approve would land in the right place; now the chat is named in the
   // request, so approving a background chat's question leaves this window
   // exactly where it is.
-  const q = "?chat=" + encodeURIComponent(chatStem);
+  const q = "?chat=" + encodeURIComponent(chatStem) + CLIENT_PARAM;
   clearApproval();
   const r = await (await fetch("/input" + q, { method: "POST", body: "/approve " + (yes ? "y" : "n") })).json();
   line("system", "system: " + r.text);
