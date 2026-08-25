@@ -61,14 +61,14 @@ TEMPERATURE_KEYS = ("temperature", "speak_summary_temperature")
 # stop pitch-correcting and start dropping the sound altogether.
 SPEAK_SPEED_RANGE = (0.5, 3)
 
-# The three wake-word timings, in milliseconds, and the bounds they have to sit
+# The wake-word silence timing, in milliseconds, and the bounds it has to sit
 # inside. The bounds are deliberately wide: what counts as "long enough a pause
 # to mean I have finished" is a fact about a person, not about software, and
 # the whole point of the setting is that it is theirs to find. The floor is
 # there because a pause shorter than a fifth of a second is not a pause, and
-# the ceiling because ten minutes is longer than any of these can usefully be.
+# the ceiling because ten minutes is longer than this can usefully be.
 WAKE_MS_RANGE = (200, 600000)
-WAKE_MS_KEYS = ("wake_endpoint_ms", "wake_submit_ms", "wake_session_ms")
+WAKE_MS_KEYS = ("wake_silence_ms",)
 
 # How sure the wake model has to be before it counts as a wake. The ends are
 # the model's own output range; neither is a useful setting, but refusing them
