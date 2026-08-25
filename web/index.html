@@ -7611,7 +7611,7 @@ const WAKE_POLL_MS = 1000;
 // all. Re-read from the reply when the tab is saved, so a model or a timing
 // changed there is live in every open window without a reload.
 let wakeCfg = { wake_model: "", wake_threshold: 0.5, wake_auto: false,
-                wake_silence_ms: 1200 };
+                wake_captions: false, wake_silence_ms: 1200 };
 
 let wakeOn = false;      // the microphone is open and the phrase is being listened for
 let wakeCtx = null;      // the AudioContext behind it
