@@ -7716,15 +7716,12 @@ function resampleTo16k(samples, rate) {
 // on: before a wake it goes to the model and nowhere else, after one it is
 // collected into a sentence for the transcriber.
 function wakeFrame(samples, rate) {
-  // Not while hold-to-talk is recording, or one sentence would be recorded
+  // Not while hold-to-talk is recording, or the same words would be recorded
   // twice and sent twice. The speaker is NOT a reason to stop listening: the
   // mic is opened with echo cancellation, so the agent's own reply is already
   // removed from this stream and cannot wake the agent up - and dropping the
   // frames while it talks would throw away the user's own words too.
   if (holding) {
-    vadSpeaking = false;
-    vadFrames = [];
-    vadRing = [];
     scanOut = [];
     scanRing = [];
     return;
@@ -7732,24 +7729,14 @@ function wakeFrame(samples, rate) {
 
   if (rate !== 16000) { samples = resampleTo16k(samples, rate); rate = 16000; }
 
-  // A reply being read out is the conversation still happening, so the session
-  // clock is held open through it - otherwise a long answer would time out the
-  // session while you were being told the thing you asked for. The frames are
-  // still processed below, so your own words are heard while the agent talks.
-  if (wakeLive && (speaking || speakBusy)) wakeTouch();
-
   const ms = (samples.length / rate) * 1000;
   let sum = 0;
   for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
   const rms = Math.sqrt(sum / samples.length);
-
-  // The floor follows the room while nothing is being said and is frozen the
-  // moment something is - a floor that kept moving through a long sentence
-  // would slowly learn that speech is silence and cut the sentence off.
-  if (!vadSpeaking) vadFloor = vadFloor * 0.95 + rms * 0.05;
+  if (!wakeLive) vadFloor = vadFloor * 0.95 + rms * 0.05;
   const loud = rms > Math.max(vadFloor * 3, 0.008);
 
-  if (wakeLive) wakeSentenceFrame(samples, rate, loud, ms);
+  if (wakeLive) wakeCapture(samples, ms, loud);
   else wakeScanFrame(samples, rate, loud, ms);
 }
 
