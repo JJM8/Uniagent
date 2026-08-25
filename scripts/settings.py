@@ -526,6 +526,8 @@ def _valid(key, value):
         # Same bool exclusion as the thresholds above, for the same reason.
         return (isinstance(value, int) and not isinstance(value, bool)
                 and REPEATS_RANGE[0] <= value <= REPEATS_RANGE[1])
+    if key == "wake_provider":
+        return value in ("oww", "stt")
     if key == "wake_threshold":
         # Same int-or-float, never-a-bool rule as the temperatures below: 1
         # arrives as an int and 0.5 as a float.
