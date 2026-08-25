@@ -7147,7 +7147,7 @@ async function submitChatText(text, when = "") {
   // into existence, so this window commits to an id here - before the request
   // goes out, so the turn's own broadcasts are recognised as ours when they
   // start coming back. See requireChat().
-  const q = "?chat=" + encodeURIComponent(requireChat())
+  const q = "?chat=" + encodeURIComponent(requireChat()) + CLIENT_PARAM
           + (when ? "&when=" + encodeURIComponent(when) : "");
   const reply = await (await fetch("/input" + q, { method: "POST", body: text })).json();
   if (reply.type === "system") {
