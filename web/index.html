@@ -7597,8 +7597,7 @@ const WAKE_MAX_CLIP_MS = 30000;    // a clip that never ends is a stuck door
 // all. Re-read from the reply when the tab is saved, so a model or a timing
 // changed there is live in every open window without a reload.
 let wakeCfg = { wake_model: "", wake_threshold: 0.5, wake_auto: false,
-                wake_interrupt: true, wake_endpoint_ms: 900,
-                wake_submit_ms: 1400, wake_session_ms: 45000 };
+                wake_silence_ms: 1200 };
 
 let wakeOn = false;      // the microphone is open and the phrase is being listened for
 let wakeCtx = null;      // the AudioContext behind it
