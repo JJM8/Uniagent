@@ -5279,13 +5279,39 @@ const statusText = document.getElementById("status-text");
 // changing your mind costs nothing and leaves no empty chat behind.
 let currentChat = null;
 
+// This tab's own id - invented once, kept in localStorage, and sent along
+// with every request about a chat. Not a login: several tabs on the same
+// login get different ids. Its only job is telling the server which open
+// window most recently spoke to a given chat, so a reply is read out loud
+// there and not on every other window/device also sitting on that chat -
+// see main.py's Agent.last_prompt_client and server.py's _speak_offer.
+// Blank rather than thrown when storage is unavailable (private browsing):
+// the server treats a blank client the same as one never sent, which just
+// falls back to the old behaviour of every open window playing the reply.
+function getClientId() {
+  try {
+    let id = localStorage.getItem("uniagent_client_id");
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem("uniagent_client_id", id);
+    }
+    return id;
+  } catch (e) {
+    return "";
+  }
+}
+const CLIENT_ID = getClientId();
+const CLIENT_PARAM = "&client=" + encodeURIComponent(CLIENT_ID);
+
 // ?chat=<id> for a request about this window's chat. Deliberately still sent,
 // blank, when there is no chat yet: that tells the server "I have no chat"
 // as distinct from not mentioning one at all, which means the terminal's chat
 // and is where a voice clip with no browser behind it goes. See server.py's
-// _chat_of.
+// _chat_of. Carries this tab's client id too - harmless on the GETs that
+// reuse this helper (the server only reads it on POST /input), and one
+// helper is simpler than remembering which call sites need it.
 function chatQuery(sep) {
-  return sep + "chat=" + encodeURIComponent(currentChat || "");
+  return sep + "chat=" + encodeURIComponent(currentChat || "") + CLIENT_PARAM;
 }
 
 // This window's chat id, minting one first if it hasn't got one.
