@@ -4762,13 +4762,6 @@ function thinkingLine(box = messages, already = 0) {
       if (inner) body.scrollTop = body.scrollHeight;
       if (at) box.scrollTop = box.scrollHeight;
     },
-    // What has been shown so far. Used only by the "reclassify" handler,
-    // which turns this block INTO the reply instead of appending to it - see
-    // that handler for why the text is read back out here instead of coming
-    // in on the broadcast.
-    text() {
-      return body.textContent;
-    },
     seal() {
       if (this.sealed) return;
       this.sealed = true;
@@ -6945,19 +6938,19 @@ events.onmessage = (e) => {
   } else if (ev.type === "reclassify") {
     // A model that never sent a content chunk at all - what has been showing
     // as thinking IS the whole reply (see main._stream's on_reclassify and
-    // provider.py's _read_openai tail). No text on this broadcast: it is
-    // already sitting in thinkingNow's body, put there by "thinking" events
-    // exactly like any other block, so it is read back out and the block is
-    // replaced with a normal reply bubble holding the same words - not
-    // sealed and left standing, which would show them twice.
+    // provider.py's _read_openai tail). The block is dropped rather than
+    // sealed - sealing it would leave it standing, showing the same words
+    // twice - and a normal reply bubble opens in its place. The text rides
+    // on the broadcast itself rather than being read back out of the block:
+    // a page that missed a "thinking" fragment (a drop mid-turn) still gets
+    // the whole reply this way.
     tokenArrived();
     if (thinkingNow) {
-      const text = thinkingNow.text().replace(/^:\s*/, "");  // the "name:" left by the prompt
       thinkingNow.wrap.remove();
       thinkingNow = null;
-      streaming = line("agent", text);
-      startElapsed(streaming.parentElement);
     }
+    streaming = line("agent", ev.text.replace(/^:\s*/, ""));  // the "name:" left by the prompt
+    startElapsed(streaming.parentElement);
   } else if (ev.type === "timing") {
     // The response is complete and these are its measured numbers - sent
     // before the tool call or the answer it turned out to be, so the bubble
