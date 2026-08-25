@@ -7585,8 +7585,11 @@ const WAKE_HANG_MS = 1500;
 // of it is dropped. Being two seconds behind is worse than missing two seconds.
 const WAKE_BACKLOG_MS = 2000;
 
-const WAKE_MIN_VOICED_MS = 200;    // shorter than this is a cough, not a sentence
 const WAKE_MAX_CLIP_MS = 30000;    // a clip that never ends is a stuck door
+// How often the whole clip so far goes back to be re-transcribed, once a
+// session is open. A third of it would notice a finished thought sooner and
+// cost three times the transcription; a third as often would feel laggy.
+const WAKE_POLL_MS = 1000;
 
 // The voice tab's answers. Fetched once on load rather than waiting for
 // somebody to open the settings overlay - most windows never do, and a window
