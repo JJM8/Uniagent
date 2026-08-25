@@ -366,12 +366,21 @@ nothing else.""",
     # is the only way to pick this that isn't guesswork.
     "wake_threshold": 0.5,
     "wake_auto": False,
-    # How long a pause after the last word means you're done talking. The whole
-    # clip since the wake word is re-transcribed every second or so while you
-    # talk (see wakeStart/wakePoll in web/index.html), so there's nothing else
-    # to tune here - this one number is both "did the sentence end" and "is the
-    # message finished", because a page that re-reads the whole clip each time
-    # never needed the two questions to be different.
+    # Whether the whole clip captured so far is re-transcribed roughly once a
+    # second while you talk, so a caption can be shown live above the message
+    # box (see wakePollLoop/wakePoll in web/index.html). Off by default - it's
+    # a nicety, not a requirement: the pause that ends a session is judged
+    # locally, by loudness, with no transcription involved (see wakeArmSilence
+    # there), and the one transcription that actually matters is the single
+    # pass wakeFinish runs once you've gone quiet. Polling every second bills a
+    # lot more than that one pass would: each poll re-sends everything said so
+    # far, not just what's new, so talking for ten seconds bills roughly what
+    # fifty-five seconds of audio would.
+    "wake_captions": False,
+    # How long a pause after the last word means you're done talking, judged by
+    # loudness alone - no transcription runs to answer this, live captions or
+    # not. Too short and it sends mid-thought; too long and it sits there after
+    # you've already finished.
     "wake_silence_ms": 1200,
     # Who reads the finished reply back out loud, and on which model - the same
     # kind of pair as the two above, asked of the endpoint that runs the other
