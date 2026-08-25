@@ -5216,7 +5216,7 @@ async function pressContinue() {
   // Held on to across the await: a redraw or a poll can move `continuable` on
   // while the request is in flight, and this is the line that was pressed.
   const row = continuable;
-  const q = "?chat=" + encodeURIComponent(requireChat());
+  const q = "?chat=" + encodeURIComponent(requireChat()) + CLIENT_PARAM;
   const reply = await (await fetch("/input" + q,
                                    { method: "POST", body: "/continue" })).json();
   if (reply.type === "started") {
