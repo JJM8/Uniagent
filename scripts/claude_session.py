@@ -884,9 +884,33 @@ def run_turn(turns, sync, text, chat_id, provider_name, model, system,
     finally:
         session.finish()
 
+    answer = ""
     if stopped:
         pending = (pending + "\n" + main.STOPPED).strip()
         turns.append(flush_into({"role": "assistant"}))
     elif pending.strip() or thought:
-        turns.append(flush_into({"role": "assistant"}))
+        final = flush_into({"role": "assistant"})
+        turns.append(final)
+        answer = final["content"]
     sync()
+    # The turn's ANSWER, announced the way run()'s own loop announces one (its
+    # `if call is None` branch: append, sync, then on_message). Everything
+    # above fires on_message(..., "call") for the prose written on the way to
+    # a tool call, but nothing was firing "answer" - and "final", the voice
+    # tab's default mode, speaks ONLY that kind. So a chat on this provider
+    # went silent while every other provider read its replies out, which is
+    # the whole of why claude-subscription appeared not to do TTS at all.
+    #
+    # Here rather than on the "end" event because this is where the words are
+    # finished: Claude Code streams a whole turn - prose, a call, more prose -
+    # down one connection, so prose arriving is never proof the turn is over.
+    # Only the loop having exited and the last message being sealed says the
+    # last thing written was the reply rather than more commentary on the way
+    # to another call. Reading it any earlier would speak a sentence that the
+    # model was about to continue.
+    #
+    # A stopped turn says nothing, for the same reason run() doesn't announce
+    # one: that message is the STOPPED marker, and nobody wants "[stopped by
+    # the user]" read aloud as the reply they just cancelled.
+    if on_message and answer.strip():
+        on_message(answer.strip(), "answer")
