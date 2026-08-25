@@ -6891,6 +6891,18 @@ events.onmessage = (e) => {
     markContextDirty();
     return;
   }
+  // Speech reaches every chat this device is responsible for, not just the
+  // one on screen - hearing a reply doesn't require looking at it the way
+  // everything else below does. Handled up here, ahead of the by-chat filter.
+  if (ev.type === "speak" || ev.type === "speaknote") {
+    handleSpeak(ev);
+    return;
+  }
+  // A turn being stopped silences its speech wherever that's playing, even
+  // in a chat that isn't the one on screen - same reasoning as speech above.
+  // What else "stopped" means to THIS window (sealing the bubble, clearing
+  // the bar) is still its own business and stays behind the filter below.
+  if (ev.type === "stopped" && ev.chat) stopSpeaking(ev.chat);
   // Events belong to a chat. Another chat's events stay out of this window -
   // except system lines (a background chat asking for approval must be seen),
   // which come labelled with where they're from.
