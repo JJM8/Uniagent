@@ -4451,30 +4451,42 @@ class Handler(BaseHTTPRequestHandler):
 
     def _post_wake(self):
         """A chunk of what the room sounds like, on its way past the wake
-        model: raw signed 16-bit mono at 16kHz as the whole body, the browser
-        session it belongs to in ?session=.
+        listener: raw signed 16-bit mono at 16kHz as the whole body, the
+        browser session it belongs to in ?session=.
 
         This is the one route in the whole app that gets audio nobody chose to
         send. That is the point of it, and it is why the audio stops here: it
-        is fed to a model that answers one question about it - was that the
-        phrase - and is then dropped. Nothing is written down, nothing is
-        transcribed, and nothing leaves the machine. Only the answer goes back,
-        and only a "yes" makes the page start recording anything.
+        goes to whichever listener wake_provider names and is then dropped.
+        Only the answer goes back, and only a "yes" makes the page start
+        recording anything.
+
+        Two listeners live behind this one route, picked by settings'
+        wake_provider: "oww" (the default) is wake_word.py, a small model
+        trained on one phrase that never sees a transcript at all; "stt" is
+        wake_stt.py, which reuses the SAME transcriber POST /voice calls,
+        asked about short rolling clips instead of one finished one. Which
+        engine is in play is invisible to the browser - both take the same
+        chunks and answer the same {"wake", "score"} shape - so nothing above
+        this route needs to know or care.
 
         ?stop=1 with no body is the page saying it has stopped listening, so
-        the model behind that session can be let go.
+        whatever the listener was holding for that session can be let go.
 
-        WakeError is 503 rather than 500: what is missing is a package or a
-        model file on this machine, the message says which, and the page shows
-        it as-is under the ear button."""
+        WakeError is 503 rather than 500: what is missing is a package, a
+        model file, or a transcriber not yet chosen, the message says which,
+        and the page shows it as-is under the ear button."""
         q = parse_qs(urlparse(self.path).query)
         session = (q.get("session", [""])[0] or "")[:64]
         if not session:
             self._send("no session", code=400)
             return
 
+        chosen = settings.load()
+        stt = (chosen.get("wake_provider") or "oww") == "stt"
+        engine = wake_stt if stt else wake_word
+
         if q.get("stop", [""])[0]:
-            wake_word.forget(session)
+            engine.forget(session)
             self._send(json.dumps({"wake": False}), "application/json")
             return
 
@@ -4484,20 +4496,29 @@ class Handler(BaseHTTPRequestHandler):
             return
         pcm = self.rfile.read(length)
 
-        chosen = settings.load()
-        name = chosen.get("wake_model") or ""
-        if not name:
-            self._send("no wake model chosen - pick one on the settings page's "
-                       "voice tab", code=503)
-            return
+        if stt:
+            words = chosen.get("wake_words") or []
+            if not words:
+                self._send("no wake words chosen - add one on the settings "
+                           "page's voice tab", code=503)
+                return
+            listen = lambda: wake_stt.listen(session, pcm, words)
+        else:
+            name = chosen.get("wake_model") or ""
+            if not name:
+                self._send("no wake model chosen - pick one on the settings "
+                           "page's voice tab", code=503)
+                return
+            listen = lambda: wake_word.listen(
+                session, pcm, name, float(chosen.get("wake_threshold", 0.5)))
+
         try:
-            answer = wake_word.listen(session, pcm, name,
-                                      float(chosen.get("wake_threshold", 0.5)))
-        except wake_word.WakeError as e:
+            answer = listen()
+        except (wake_word.WakeError, wake_stt.WakeError) as e:
             self._send(str(e), code=503)
             return
         except Exception as e:
-            self._send("the wake model failed - " + type(e).__name__ + ": "
+            self._send("the wake listener failed - " + type(e).__name__ + ": "
                        + str(e)[:200], code=503)
             return
         self._send(json.dumps(answer), "application/json")
