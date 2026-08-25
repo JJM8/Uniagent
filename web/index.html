@@ -9776,20 +9776,47 @@ document.getElementById("set-save").addEventListener("click", async () => {
   loadModelQuick();
 });
 
-// The numbers under the sliders, and everything below the model is hidden while
-// no model is chosen - there is nothing to tune about a microphone that is not
-// listening.
+// The numbers under the sliders, and everything below is hidden while nothing
+// is chosen to listen for - there is nothing to tune about a microphone that
+// is not listening.
 function drawWakeFields() {
   const secs = (ms) => (Number(ms) / 1000).toFixed(Number(ms) < 10000 ? 1 : 0) + "s";
   document.getElementById("s-wake-silence-ms-value").textContent = secs(F.wake_silence_ms.value);
   document.getElementById("s-wake-threshold-value").textContent =
     Number(F.wake_threshold.value).toFixed(2);
-  document.getElementById("s-wake-more").hidden = !F.wake_model.value;
+  const configured = F.wake_provider.value === "stt"
+    ? readList(listBoxes.wake_words).length > 0
+    : !!F.wake_model.value;
+  document.getElementById("s-wake-more").hidden = !configured;
 }
 
 for (const el of [F.wake_silence_ms, F.wake_threshold, F.wake_model]) {
   el.addEventListener("input", drawWakeFields);
 }
+// Typing a word in or deleting one changes whether anything is configured,
+// same as picking a model does above - "input" bubbles up from whichever row
+// is being edited, so one listener on the box covers every row it ever holds.
+listBoxes.wake_words.addEventListener("input", drawWakeFields);
+
+// Which fields make sense swaps with the engine: openWakeWord has a model
+// file and a score to tune a threshold against; "stt" has a list of words and
+// no confidence number a transcript can honestly give, so there's nothing
+// under it to show a threshold for.
+function drawWakeProvider() {
+  const stt = F.wake_provider.value === "stt";
+  document.getElementById("s-wake-model-field").hidden = stt;
+  document.getElementById("s-wake-words-field").hidden = !stt;
+  document.getElementById("s-wake-threshold-field").hidden = stt;
+  document.getElementById("s-wake-provider-hint").textContent = stt
+    ? "Reuses whichever transcriber is chosen above, in short repeated "
+    + "passes, instead of loading a separate wake model - a good trade only "
+    + "when that transcriber is already local and free: a paid or remote one "
+    + "gets asked several times a minute just from the room being occupied."
+    : "A small model trained on one phrase, running on this machine's CPU. "
+    + "Nothing is transcribed until it fires.";
+  drawWakeFields();
+}
+F.wake_provider.addEventListener("change", drawWakeProvider);
 
 // The dropdown is whatever is actually in models/wake/. A wake word here is a
 // file, not a word somebody typed, so there is nothing to offer that is not on
