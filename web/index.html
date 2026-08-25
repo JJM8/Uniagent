@@ -8451,14 +8451,24 @@ function speakSkip(direction) {
   launchReader();
 }
 
-// Arrow keys anywhere else on the page would just move a text cursor, so
-// this only fires when focus isn't sitting in one - typing and moving a
-// cursor in the message box (or anywhere else) is completely untouched.
+// Arrow keys inside a field with something in it would just move a text
+// cursor, so this steps aside there - moving a cursor while composing a
+// message (or editing anything else) is completely untouched. Checked by
+// content, not merely by focus: the message box carries `autofocus` and
+// nothing ever blurs it after sending, so treating "focused" alone as
+// "typing" would leave this unreachable for the whole life of the page
+// unless you deliberately clicked somewhere else first. An empty field has
+// no cursor position worth preserving, so an empty message box - the
+// ordinary state between sending one message and typing the next - lets
+// the arrows straight through to the speaker.
 document.addEventListener("keydown", (e) => {
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const el = e.target;
-  const typing = el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+  const typing = el && (
+    (el.tagName === "INPUT" || el.tagName === "TEXTAREA") ? el.value.length > 0
+    : !!el.isContentEditable
+  );
   if (typing) return;
   e.preventDefault();
   speakSkip(e.key === "ArrowRight" ? 1 : -1);
