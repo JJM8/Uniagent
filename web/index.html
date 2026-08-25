@@ -7818,7 +7818,9 @@ async function wakeScan(frames) {
 }
 
 // The model said yes. From here until the silence at the end, everything said
-// is captured whole and re-transcribed as it grows - see wakeCapture.
+// is captured whole - see wakeCapture - and, only when wake_captions is on,
+// re-transcribed as it grows so a caption can follow along. The silence that
+// ends the session is judged separately, by loudness, and never waits on this.
 function wakeWoke() {
   wakeLive = true;
   wakeClipFrames = [];
@@ -7831,7 +7833,7 @@ function wakeWoke() {
   scanRing = [];
   drawHeard();
   wakeArmSilence();
-  wakePollLoop();
+  if (wakeCfg.wake_captions) wakePollLoop();
 }
 
 // After a wake. No cutting into sentences and nothing to decide frame by frame
