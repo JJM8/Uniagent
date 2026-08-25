@@ -1095,7 +1095,8 @@ def _run_turn(text, kind="user", target=None):
                       # at the end of the turn - so a long turn talks its way
                       # through the work instead of going quiet for a minute
                       # and then saying everything at once.
-                      on_message=lambda said, kind: _speak_message(route, said, kind, batch),
+                      on_message=lambda said, kind: _speak_message(
+                          route, said, kind, batch, client=c.last_prompt_client),
                       # Anything typed at this chat while this very turn was
                       # running, asked for between passes and folded in as a
                       # user turn there (see _injects above and main.run's
