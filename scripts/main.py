@@ -570,6 +570,12 @@ class Agent:
         # under a chat that was filed here months ago, and a copy of them in
         # every chat folder would be a hundred stale copies to fix.
         self.workspace = cfg.get("workspace")
+        # The browser tab that sent the most recent prompt into this chat - an
+        # id it mints itself and holds in localStorage, not a user identity.
+        # Read out again when a reply is ready to be spoken, so the audio plays
+        # on the device that's actually being looked at instead of every open
+        # window on the chat - see server.py's _speak_offer.
+        self.last_prompt_client = cfg.get("last_prompt_client")
 
     def _settings_path(self):
         return self.path.parent / SETTINGS_FILE
