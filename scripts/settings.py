@@ -360,6 +360,23 @@ nothing else.""",
     # hears nothing it does not report. See scripts/wake_word.py, and
     # docs/wake-word.md for where the models come from.
     "wake_model": "",
+    # Which of two engines listens: "oww" is the wake model above, "stt" is
+    # scripts/wake_stt.py - transcribing short rolling clips with whichever
+    # provider voice_provider already names and matching wake_words against
+    # the text, instead of loading a separate model. The cost/privacy problem
+    # the comment above describes doesn't apply when that provider is already
+    # a local one running on this machine for ordinary voice input: nothing
+    # extra is billed and nothing leaves the machine either way, and "stt"
+    # then buys a phrase you can type instead of one of openWakeWord's few
+    # dozen pre-trained ones, and one fewer model resident in memory than
+    # running both would cost. It stays a poor fit for a paid or remote
+    # voice_provider, where the original problem is exactly as real as ever.
+    "wake_provider": "oww",
+    # The phrases "stt" listens for, matched as substrings of what it
+    # transcribes. Unused, like wake_threshold below, when wake_provider is
+    # "oww". Empty means nothing to listen for, same meaning as an empty
+    # wake_model: the microphone stays shut.
+    "wake_words": [],
     # How sure it has to be, 0 to 1. Higher misses you more often; lower wakes
     # up at the television. 0.5 is openWakeWord's own suggestion and a sensible
     # place to start - the voice tab shows the live score while you talk, which
