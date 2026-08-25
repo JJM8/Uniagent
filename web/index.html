@@ -9861,7 +9861,7 @@ async function pickModel(provider, model) {
     // requireChat, like a message and a pin: choosing a model for a chat you
     // haven't started yet is setting it up, and it needs a real id to be
     // written against.
-    const res = await fetch("/input?chat=" + encodeURIComponent(requireChat()),
+    const res = await fetch("/input?chat=" + encodeURIComponent(requireChat()) + CLIENT_PARAM,
         { method: "POST", body: "/model " + provider + " " + model });
     // A dead server or a 500 used to land in no branch at all: the label kept
     // the model it had optimistically painted, so a switch that never happened
