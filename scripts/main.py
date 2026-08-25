@@ -3529,7 +3529,8 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
          temperature=None, on_tool_call=None, on_tool_result=None, on_safety=None,
          safety=None, safety_prompt=None, inject=None, safety_threshold=None,
          safety_extra=None, on_begin=None, on_message=None,
-         on_reasoning=None, on_timing=None, on_request=None, on_thought=None):
+         on_reasoning=None, on_timing=None, on_request=None, on_thought=None,
+         on_reclassify=None):
     """One turn of agent `c` through run(), mirrored to its file as it goes.
     Serialised against other turns of the same agent by its turn slot; turns of
     OTHER agents run in parallel. on_text/approve pass through to run(), so a
