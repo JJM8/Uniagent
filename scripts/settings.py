@@ -366,36 +366,13 @@ nothing else.""",
     # is the only way to pick this that isn't guesswork.
     "wake_threshold": 0.5,
     "wake_auto": False,
-    # How long a pause ENDS A SENTENCE. What the room says is cut into clips on
-    # silence, and this is how much silence closes one. Too low and "turn on
-    # the... kitchen light" arrives as two clips; too high and every sentence
-    # sits this long before anything can start transcribing it.
-    "wake_endpoint_ms": 900,
-    # How long a pause ENDS THE MESSAGE - the wait between the last clip coming
-    # back as words and those words being sent. This is the dial to turn up if
-    # it keeps going before you have finished a thought, and turning it up is
-    # cheaper than it sounds: the clips already spoken are transcribed DURING
-    # this wait, so what it costs is the silence itself and not a second of
-    # transcription on top.
-    "wake_submit_ms": 1400,
-    # How long the session stays open after a message has gone - the window in
-    # which you can carry on talking, or answer a question, without saying the
-    # wake word again. When it runs out the page goes back to waiting for the
-    # word, and the microphone stays open either way.
-    "wake_session_ms": 45000,
-    # Whether talking again while a turn is running interrupts it.
-    #
-    # On, it does: the turn is stopped, and everything said is re-sent as one
-    # message with the late words marked as a continuation, so a sentence you
-    # finished slowly is answered as the sentence it actually was rather than
-    # as two half-questions. What that costs is the tokens the abandoned turn
-    # had already produced, and it is refused outright once that turn has
-    # called a tool - work that has already touched the machine is not thrown
-    # away to save a re-read (see main.voice_rewind).
-    #
-    # Off, the late words wait and are folded into the running turn at its next
-    # tool result, exactly as a message typed with enter is.
-    "wake_interrupt": True,
+    # How long a pause after the last word means you're done talking. The whole
+    # clip since the wake word is re-transcribed every second or so while you
+    # talk (see wakeStart/wakePoll in web/index.html), so there's nothing else
+    # to tune here - this one number is both "did the sentence end" and "is the
+    # message finished", because a page that re-reads the whole clip each time
+    # never needed the two questions to be different.
+    "wake_silence_ms": 1200,
     # Who reads the finished reply back out loud, and on which model - the same
     # kind of pair as the two above, asked of the endpoint that runs the other
     # way. Naming a provider IS the on switch: "" means the page stays silent,
