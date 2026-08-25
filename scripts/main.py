@@ -3249,7 +3249,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         try:
             response = _stream(messages, provider_name, model, temperature, on_text, should_stop,
                                usage, native_call, reasoning, phases, on_request,
-                               on_thought)
+                               on_thought, on_reclassify)
         except BaseException as e:
             # Written down before it unwinds. A request that died part-way -
             # the provider 500'd, the key is spent, the turn was stopped - had
