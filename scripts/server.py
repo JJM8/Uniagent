@@ -734,8 +734,11 @@ def _speak_offer(route, texts, summarise=False, batch=None, client=None):
     # opened, and a window that has been sitting on a chat since this morning
     # has never asked. Sent per offer, so changing the slider and saving is in
     # force for the very next thing the agent says.
-    _broadcast({"type": "speak", "chat": route, "ids": ids,
-                "speed": chosen.get("speak_speed", 1)})
+    ev = {"type": "speak", "chat": route, "ids": ids,
+          "speed": chosen.get("speak_speed", 1)}
+    if client:
+        ev["client"] = client
+    _broadcast(ev)
 
 
 def _moan_once(batch):
