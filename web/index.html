@@ -9590,10 +9590,7 @@ document.getElementById("set-save").addEventListener("click", async () => {
     wake_model: F.wake_model.value,
     wake_threshold: Number(F.wake_threshold.value),
     wake_auto: F.wake_auto.checked,
-    wake_interrupt: F.wake_interrupt.checked,
-    wake_endpoint_ms: Number(F.wake_endpoint_ms.value),
-    wake_submit_ms: Number(F.wake_submit_ms.value),
-    wake_session_ms: Number(F.wake_session_ms.value),
+    wake_silence_ms: Number(F.wake_silence_ms.value),
   };
   const r = await fetch("/settings", { method: "POST", body: JSON.stringify(body) });
   if (!r.ok) { flash("could not save"); return; }
