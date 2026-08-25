@@ -8104,24 +8104,12 @@ async function wakeStart(quiet) {
     return;
   }
 
-  let ctx;
-  try {
-    // 16k is what the wake model and every speech model want, and asking for it
-    // here saves resampling by hand. A browser that refuses gives its own rate.
-    ctx = new AudioContext({ sampleRate: 16000 });
-  } catch (e) {
-    ctx = new AudioContext();
-  }
-  if (ctx.sampleRate !== 16000) {
-    // The wake model is fixed at 16kHz and has no opinion it can be talked out
-    // of, so this is a refusal rather than a warning - the alternative is a
-    // model quietly scoring nonsense forever.
-    stream.getTracks().forEach((t) => t.stop());
-    try { ctx.close(); } catch (e) { /* nothing to close */ }
-    say("this browser records at " + ctx.sampleRate + "Hz and the wake model "
-        + "needs 16000Hz. Hold-to-talk still works.");
-    return;
-  }
+  // Not forced to 16k: a MediaStreamAudioSourceNode has to match the
+  // AudioContext's own rate exactly in every browser that matters (Firefox
+  // throws outright on a mismatch instead of resampling, unlike Chrome), and
+  // the microphone rarely captures at 16k regardless of what's asked for.
+  // Native rate here, brought down to 16k once in wakeFrame, works everywhere.
+  const ctx = new AudioContext();
   const rate = ctx.sampleRate;
 
   let node;
