@@ -8433,15 +8433,24 @@ function speakSkip(direction) {
     jumpTo = speakPos + 1;   // something already decided further ahead - go there
   } else if (!speakBusy) {
     return;   // already idle at the live edge - nothing playing to skip
+  } else {
+    // The LAST clip is the one live right now and nothing is queued behind
+    // it - jumpTo is left unset on purpose. Cancelling below stops it, and
+    // with nothing pending, launchReader's planNext finds nothing to
+    // replace it with and goes idle - which is exactly "skip the last one
+    // and go quiet" rather than looping back to it or refusing to do
+    // anything. Pressing right again from there is the !speakBusy branch
+    // above: nothing is playing any more, so there is nothing left to skip.
+    // A new clip arriving after that plays on its own, the same as always.
+    //
+    // speakPos moves one PAST the clip just silenced - a position with
+    // nothing in it yet - rather than staying put on it. Every other skip
+    // always lands one step from where it started; leaving speakPos on the
+    // clip that was just stopped would break that, since a left arrow right
+    // afterward would then step past it to the one before instead of
+    // replaying the one this arrow just cut off.
+    speakPos = speakHistory.length;
   }
-  // Else: the LAST clip is the one live right now and nothing is queued
-  // behind it - jumpTo is left unset on purpose. Cancelling below stops it,
-  // and with nothing pending, launchReader's planNext finds nothing to
-  // replace it with and goes idle - which is exactly "skip the last one and
-  // go quiet" rather than looping back to it or refusing to do anything.
-  // Pressing right again from there is the !speakBusy branch above: nothing
-  // is playing any more, so there is nothing left to skip. A new clip
-  // arriving after that plays on its own, the same as it always would.
   speakRun++;
   if (speaking) {
     speaking.pause();
