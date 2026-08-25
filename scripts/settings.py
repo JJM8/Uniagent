@@ -114,7 +114,7 @@ SPEAK_MODES = ("off", "final", "all", "summary", "summary_each", "summary_final"
 # because the generic
 # `isinstance(value, type(DEFAULTS[key]))` match would take a list of anything
 # at all, dicts and nulls included, and hand it to code that expects text.
-LIST_KEYS = ("safety_whitelist", "safety_blacklist", "market_repos")
+LIST_KEYS = ("safety_whitelist", "safety_blacklist", "market_repos", "wake_words")
 
 # How careful a chat is, as one number: the highest 0-10 danger rating the
 # checking model can give a tool call and still have it run unattended.
