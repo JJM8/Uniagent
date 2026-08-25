@@ -8167,22 +8167,34 @@ fetch("/settings").then((r) => r.json()).then((s) => {
 // Fetched rather than handed straight to <audio src>: a failure comes back as
 // a 502 with a sentence explaining itself, and an audio element would swallow
 // that and fire a bare "error" with nothing readable in it.
-// A turn arrives as a QUEUE, not one clip: the voice tab can be set to read
-// every message the agent writes, and each of those is broadcast the moment it
-// exists - mid-turn, while the tool it asked for is still running - so they
-// land here one at a time and pile up behind whatever is talking. The next
-// clip is fetched while the current one plays, so the join between two
-// messages isn't a pause while the speech model works.
 //
-// And the pile-up is never worked through in full: when the speaker comes
-// free it takes the NEWEST thing waiting and throws the rest away. An agent
-// that writes faster than it can be read to you - which is most of them, and
-// all of them at 2x - would otherwise put the speaker further and further
-// behind the screen, until it is narrating a tool call you watched finish two
-// minutes ago. Skipped ids are never fetched, so a message nobody hears costs
-// no synthesis either (see readQueue).
+// One speaker, however many chats this device is reading for - a reply from
+// a chat sitting in the background plays here too (see handleSpeak), not just
+// the one on screen. Two pieces of state carry that:
+//
+// speakPending: chat route -> the newest still-waiting id for that chat. A
+// second message for a chat already in here REPLACES its value without
+// moving its place in line - a Map keeps the order keys were first set in,
+// and re-setting an existing one doesn't disturb that - which is the whole
+// point: a burst of messages in one chat can't cut in front of another
+// chat's still-unread last message, and within one chat only the newest of
+// a burst is ever kept (a message nobody hears costs no synthesis - see
+// takeFront). "Your old chat's last message plays first" is exactly this:
+// whichever chat had something to say FIRST sits at the front of the Map.
+//
+// speakHistory: every clip actually committed to the player, in play order -
+// append-only, and what the left/right arrow keys step through (see
+// speakSkip). A message speakPending drops never lands here. Committed a
+// little ahead of when it's actually heard (see launchReader's `ahead`),
+// which is what keeps the join between two clips from being a pause while
+// the speech model works - so on rare occasions (another message for the
+// same chat landing in that narrow window) the "keep only the newest"
+// promise above can be a beat late rather than instant.
+let speakPending = new Map();   // route -> id
+let speakHistory = [];          // [{chat, id}]
+let speakPos = -1;              // index into speakHistory: playing / just finished
+let jumpTo = null;              // an index the arrow keys asked to jump to instead
 let speaking = null;    // the Audio playing right now, if any
-let speakQueue = [];    // ids waiting their turn to be read
 let speakRun = 0;       // bumped whenever something takes the speaker over
 let speakBusy = false;  // whether a reader is working through the queue
 let speakBlocked = false;   // the browser refused to play without a click first
@@ -8201,25 +8213,29 @@ for (const ev of ["pointerdown", "keydown"]) {
   document.addEventListener(ev, () => { speakBlocked = false; }, { capture: true, passive: true });
 }
 
-// Shut the speaker up and throw away everything waiting to be read. Stop is
-// the only thing that does this - the stop button and /stop, both of which
-// reach here through the server's "stopped" event. Nothing else interrupts a
-// reading: a clip that finishes hands over to the next one in the queue, and
-// sending another message while the agent is talking leaves it talking.
-function stopSpeaking() {
-  // Bumped even with nothing playing: a reading whose next clip is still being
-  // fetched has no Audio yet, and this is what tells it not to start.
+// Shut ONE chat's speech up - the stop button and /stop, both of which reach
+// here through the server's "stopped" event, now for any chat (not only the
+// one on screen; see handleSpeak). Only cuts the speaker off if THIS chat is
+// what's actually playing - stopping chat A must not silence chat B just
+// because both happened to have something queued. Its still-pending message,
+// if it has one waiting, is dropped outright either way.
+function stopSpeaking(chat) {
+  speakPending.delete(chat);
+  const current = speakHistory[speakPos];
+  if (!current || current.chat !== chat) return;
   speakRun++;
-  speakQueue = [];
+  jumpTo = null;
   if (speaking) {
     speaking.pause();
     speaking = null;
   }
   // Pausing an <audio> fires no "ended", so the reader waiting on this clip
   // would wait on it forever - and, still counting itself busy, would never
-  // start again for the next thing the agent said. Ending it here is what lets
-  // stop be something you can come back from.
+  // start again for the next thing waiting (another chat's, or this one's
+  // next). Ending it here is what lets stop be something you can come back
+  // from - launchReader below is what actually does.
   if (speakEnd) speakEnd(false);
+  launchReader();
 }
 
 // One clip, as {url} or {error}. Fetched rather than handed straight to
@@ -8280,84 +8296,142 @@ function playClip(url) {
   });
 }
 
-// Add to what is being read, and start reading if nothing is. NOT a restart:
-// a clip that is playing is never cut off, here or anywhere but stopSpeaking -
-// arriving mid-sentence and chopping the sentence in half is the one thing
-// that makes speech unlistenable. The skipping happens at the join instead,
-// where the sentence is over anyway - readQueue takes the newest thing waiting
-// and drops the middle. The same goes across turns.
-function playSpoken(ids) {
+// The chat that's been waiting longest for the speaker, with its newest
+// message - what speakPending is asked for every time a slot opens up. Never
+// fetched otherwise: asking the server for a clip is what makes it exist, so
+// the messages a later one for the same chat replaced here are the ones
+// never synthesised, summarised or paid for.
+function takeFront() {
+  const it = speakPending.keys().next();
+  if (it.done) return null;
+  const chat = it.value;
+  const id = speakPending.get(chat);
+  speakPending.delete(chat);
+  return { chat, id };
+}
+
+// Add to what's waiting, per chat, and start the speaker if it's idle. NOT a
+// restart: a clip that is playing is never cut off, here or anywhere but
+// stopSpeaking - arriving mid-sentence and chopping the sentence in half is
+// the one thing that makes speech unlistenable. The collapsing happens at
+// takeFront instead, where the sentence is over anyway.
+function queueSpoken(chat, ids) {
   // Nothing can be played until the page has been touched, and asking the
   // server for the audio is what makes it - so a blocked tab doesn't even
   // fetch. It has already been told to click once; see playClip.
   if (speakBlocked) return;
-  speakQueue.push(...ids);
-  if (!speakBusy) readQueue();
+  for (const id of ids) speakPending.set(chat, id);
+  if (!speakBusy) launchReader();
 }
 
-// The newest id waiting, with everything behind it dropped - what the queue is
-// asked for every time the speaker comes free. Never fetched, those: asking the
-// server for a clip is what makes it exist, so the messages skipped here are
-// the ones that are never synthesised, summarised or paid for.
-function takeLatest() {
-  const id = speakQueue.pop();    // undefined when there is nothing waiting
-  speakQueue.length = 0;
-  return id;
-}
-
-async function readQueue() {
-  speakBusy = true;
+// The single reader, working across every chat's queue at once - there is
+// only one speaker. `run` is this call's own epoch: bumped by whatever takes
+// the speaker over (stopSpeaking, speakSkip), which is how a stale call left
+// running mid-await knows to let go rather than talk over whatever replaced
+// it. Only the call that still owns the CURRENT epoch is allowed to clear
+// speakBusy when it finishes - see the finally below - which is what makes
+// launching a fresh reader immediately after cancelling one safe regardless
+// of which of the two microtask queues gets there first.
+async function launchReader() {
   const run = speakRun;
-  // The clip after the one playing, fetched early - that fetch is what makes
-  // the server synthesise it (and, in the summary modes, write the summary
-  // first), so starting it now is what keeps the gap between two messages down
-  // to nothing. Held as a promise; a blob URL the browser is keeping for us
-  // has to be revoked even if we end up not playing it.
+  speakBusy = true;
+  // The clip after speakPos, fetched early so there's no gap while the next
+  // one is synthesised - the join between two messages would otherwise be a
+  // pause while the speech model works. Held as {idx, promise}; a blob URL
+  // fetched but never played still has to be revoked.
   let ahead = null;
   const dropAhead = () => {
-    if (ahead) ahead.then((g) => { if (g.url) URL.revokeObjectURL(g.url); });
+    if (ahead) ahead.promise.then((g) => { if (g.url) URL.revokeObjectURL(g.url); });
     ahead = null;
   };
+  // What plays after speakPos: a jump the arrows asked for, something
+  // already decided (history walked back into and now catching back up), or
+  // the front of what's pending - the one case that commits a NEW entry to
+  // speakHistory, and so the one point past which a chat's message can no
+  // longer be collapsed into a later, newer one for the same chat.
+  const planNext = () => {
+    if (jumpTo !== null) { const idx = jumpTo; jumpTo = null; return idx; }
+    if (speakPos + 1 < speakHistory.length) return speakPos + 1;
+    const front = takeFront();
+    if (!front) return null;
+    speakHistory.push(front);
+    return speakHistory.length - 1;
+  };
+  const startAhead = () => {
+    const idx = planNext();
+    if (idx !== null) ahead = { idx, promise: fetchSpoken(speakHistory[idx].id) };
+  };
   try {
+    startAhead();
     while (run === speakRun) {
-      // Anything that arrived while the last clip played is newer than what
-      // was fetched ahead of it, which makes that one a middle message now.
-      // Drop it - already paid for, but playing it would be playing the
-      // backlog - and go for the newest instead.
-      if (speakQueue.length) {
-        dropAhead();
-        ahead = fetchSpoken(takeLatest());
-      }
-      const next = ahead;
+      const cur = ahead;
       ahead = null;
-      if (!next) return;              // nothing left to read
-      const got = await next;
-      // Taken over while that was in flight - by the next turn, or by /stop.
-      // Throw away what was fetched rather than talking over whatever is now
-      // playing.
+      if (!cur) return;               // nothing left - go idle
+      const got = await cur.promise;
+      // Taken over while that fetch was in flight - by a jump, a stop, or
+      // another chat's stop that happened not to touch what was playing.
+      // Throw away what was fetched rather than talking over whatever the
+      // new epoch is doing instead.
       if (run !== speakRun) {
         if (got.url) URL.revokeObjectURL(got.url);
         return;
       }
-      // Something already waiting gets its head start now, so the join is
-      // silent rather than a pause while the speech model works. If more lands
-      // during the clip below, the top of the loop throws this away for
-      // whatever is newest by then.
-      if (speakQueue.length) ahead = fetchSpoken(takeLatest());
+      speakPos = cur.idx;
+      startAhead();   // line up the one after this while the clip below plays
+      const entry = speakHistory[cur.idx];
       if (got.error) {
-        // One message failing doesn't cancel the rest - the others are already
-        // made, and stopping here would lose the end of the reply over a
-        // hiccup in the middle of it.
-        line("error", "speech: " + got.error);
+        // One message failing doesn't cancel the rest - the others are
+        // already made, and stopping here would lose the end of a reply (or
+        // another chat's turn entirely) over a hiccup in the middle of it.
+        line("error", "speech" + (entry.chat !== currentChat ? " (" + entry.chat + ")" : "")
+                     + ": " + got.error);
         continue;
       }
-      if (!await playClip(got.url)) { speakQueue = []; return; }
+      if (!(await playClip(got.url))) return;
     }
   } finally {
     dropAhead();
-    speakBusy = false;
+    if (run === speakRun) speakBusy = false;
   }
 }
+
+// Left/right arrow keys, over the same cross-chat timeline stopSpeaking and
+// launchReader work in: right skips whatever's playing now (the manual
+// version of the ordinary auto-advance), left goes back and replays the
+// clip before it. Both just set where the reader should go next and force a
+// restart - launchReader's own planNext is what actually reads jumpTo.
+function speakSkip(direction) {
+  if (direction < 0) {
+    if (speakPos <= 0) return;   // nothing before the first clip
+    jumpTo = speakPos - 1;
+  } else {
+    // Forward into history already decided (stepped back into, now catching
+    // back up) plays that; otherwise there has to be something pending to
+    // skip to, or there is nothing to do at all.
+    if (speakPos + 1 < speakHistory.length) jumpTo = speakPos + 1;
+    else if (speakPending.size === 0) return;
+  }
+  speakRun++;
+  if (speaking) {
+    speaking.pause();
+    speaking = null;
+  }
+  if (speakEnd) speakEnd(false);
+  launchReader();
+}
+
+// Arrow keys anywhere else on the page would just move a text cursor, so
+// this only fires when focus isn't sitting in one - typing and moving a
+// cursor in the message box (or anywhere else) is completely untouched.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const el = e.target;
+  const typing = el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+  if (typing) return;
+  e.preventDefault();
+  speakSkip(e.key === "ArrowRight" ? 1 : -1);
+});
 
 // Click the key button in settings, then press a key: the next keydown becomes
 // hold-to-talk. Capture phase, so it takes the press ahead of the listener
