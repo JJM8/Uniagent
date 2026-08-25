@@ -517,7 +517,7 @@ class Agent:
                      "safety_prompt", "input_tokens",
                      "output_tokens", "tokens_model", "tokens_at",
                      "context_input", "context_max", "context_model",
-                     "context_exact", "pinned", "workspace")
+                     "context_exact", "pinned", "workspace", "last_prompt_client")
 
     def __init__(self, path, provider=None, model=None, temperature=None):
         self.path = Path(path)  # history.json; settings.json sits beside it
