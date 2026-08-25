@@ -2694,15 +2694,16 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
     UI counting from before it would report a wait a tenth of a second longer
     than the one this function measures.
 
-    `on_reclassify`, if given, is called with no arguments in place of
-    on_text, once, when provider.py's _read_openai tail decides a model that
-    never sent a content chunk answered entirely on the reasoning channel.
-    The whole of that answer has already been shown live as thinking, one
-    on_reasoning fragment at a time - handing it to on_text here would stream
-    the same words a second time as a brand new reply. A caller wanting to
-    show this turn a UI is expected to already be holding what on_reasoning
-    gave it and turn THAT into the reply, rather than being given the text
-    again.
+    `on_reclassify`, if given, is called once with the full reply text in
+    place of on_text, when provider.py's _read_openai tail decides a model
+    that never sent a content chunk answered entirely on the reasoning
+    channel. That text has already been shown live as thinking, one
+    on_reasoning fragment at a time; on_text is skipped for it so a caller
+    that only wired on_text is not shown it a second time as a brand new
+    reply. The text still rides along on_reclassify itself (rather than
+    leaving the caller to have kept it from on_reasoning) so a caller that
+    missed a fragment - a page reconnecting mid-turn - still has the whole
+    thing.
     """
     response = ""
     in_call = False  # has the call started being written yet?
