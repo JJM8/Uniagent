@@ -7084,35 +7084,11 @@ events.onmessage = (e) => {
     endResponse(null);
     streaming = null;
     pendingSafety = [];
-    // And shut up: the agent now speaks as it works, so a stopped turn that
-    // kept talking its way through everything it had already said would be the
-    // most conspicuous thing on the page about a button meant to stop it.
-    stopSpeaking();
-  } else if (ev.type === "speak") {
-    // Something the agent said is ready to be read out - usually one message,
-    // arriving mid-turn the moment the model finished writing it, and queued
-    // behind whatever is still being spoken. The fetch inside is what makes
-    // the audio (and, in the summary modes, the summary) at all, so ids nobody
-    // asks for cost nothing.
-    // What the voice tab's speed slider is saved as, as of this message. Set
-    // before playing, so the first clip of a turn is already at the right pace.
-    if (ev.speed) setSpeakSpeed(ev.speed);
-    // `client` names the tab that last prompted this chat (see chatQuery's
-    // CLIENT_PARAM and main.py's last_prompt_client) - the only one that
-    // should read this reply out loud. Every open window on the chat still
-    // gets this event (that's how the chat-filter above works at all), so
-    // the ones that aren't it just stay quiet here instead of racing to
-    // speak over each other. No `client` at all - a cron chat, or one no
-    // browser has ever posted to - keeps the old behaviour of every window
-    // playing it.
-    if (ev.client && ev.client !== CLIENT_ID) return;
-    if (ev.ids && ev.ids.length) playSpoken(ev.ids);
-  } else if (ev.type === "speaknote") {
-    // Reading it out went wrong in a way that isn't silence - the summarising
-    // model couldn't be reached, so what you are hearing is the reply itself.
-    // Said out loud here because the alternative is a setting that looks on
-    // and hasn't been for a week.
-    line("error", "speech: " + ev.text);
+    // Shutting this chat's speech up (the agent now speaks as it works, so a
+    // stopped turn that kept talking through everything it had already said
+    // would be the most conspicuous thing on the page about a button meant to
+    // stop it) already happened above, ahead of the by-chat filter - it has
+    // to reach a background chat's audio too, not just this window's own.
   } else if (ev.type === "done") {
     endResponse(null);
     streaming = null;
