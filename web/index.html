@@ -8112,20 +8112,38 @@ async function wakeStart(quiet) {
     node.port.onmessage = (e) => wakeFrame(e.data, rate);
   } catch (e) {
     // No worklet available. The deprecated node does the same job on the main
-    // thread, and every browser still has it.
-    node = ctx.createScriptProcessor(4096, 1, 1);
-    node.onaudioprocess = (ev) =>
-      wakeFrame(new Float32Array(ev.inputBuffer.getChannelData(0)), rate);
+    // thread, and every browser still has it - except the ones that have
+    // started removing it, which is why this itself can throw.
+    try {
+      node = ctx.createScriptProcessor(4096, 1, 1);
+      node.onaudioprocess = (ev) =>
+        wakeFrame(new Float32Array(ev.inputBuffer.getChannelData(0)), rate);
+    } catch (e2) {
+      stream.getTracks().forEach((t) => t.stop());
+      try { ctx.close(); } catch (e3) { /* already closed */ }
+      say("this browser has neither AudioWorklet nor the older node it "
+          + "replaced, so it can't listen for a wake word. Hold-to-talk still works.");
+      return;
+    }
   }
 
   // Through a silent gain into the speakers. Nothing is heard - the gain is
   // zero - but a node that reaches the destination is a node the browser
   // actually runs, and one that does not is quietly never asked for a frame.
-  const sink = ctx.createGain();
-  sink.gain.value = 0;
-  ctx.createMediaStreamSource(stream).connect(node);
-  node.connect(sink);
-  sink.connect(ctx.destination);
+  // Wrapped like everything else above: a browser that refuses any of this
+  // wiring should say so, not vanish into a rejected promise nobody sees.
+  try {
+    const sink = ctx.createGain();
+    sink.gain.value = 0;
+    ctx.createMediaStreamSource(stream).connect(node);
+    node.connect(sink);
+    sink.connect(ctx.destination);
+  } catch (e) {
+    stream.getTracks().forEach((t) => t.stop());
+    try { ctx.close(); } catch (e2) { /* already closed */ }
+    say("couldn't wire up the microphone for wake-word listening - " + e.message);
+    return;
+  }
 
   wakeStream = stream;
   wakeCtx = ctx;
