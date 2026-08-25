@@ -1,0 +1,12 @@
+PCB Layer Explanation - Based on JLCPCB Email Query
+
+1. Solder Paste Layer (typically shown in green):
+   - Defines where solder paste should be applied
+   - Slightly larger than the actual pad to ensure good solder coverage
+
+2. Solder Mask Layer (typically shown in orange/red):
+   - Protective coating over most of the PCB
+   - Openings expose only the pads where components will be soldered
+   - Usually slightly larger than the copper pad to ensure complete coverage
+
+JLCPCB is asking which dimension to follow for your stencil - the paste layer opening or the solder mask opening, as they differ in size.
