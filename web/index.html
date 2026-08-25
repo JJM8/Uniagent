@@ -7884,14 +7884,14 @@ function wakeArmSilence() {
   wakeSilenceTimer = setTimeout(wakeFinish, wakeCfg.wake_silence_ms);
 }
 
-// Roughly once a second while a session is open, the whole clip captured so
-// far goes back to the transcriber and whatever it says REPLACES what's shown
-// - not appended to it, replaced, because a re-transcription of more audio is
-// a better answer than the last one was, not an addition to it. Skipped
-// whenever nothing has been said since the last poll, and never overlapped
-// with itself: a slow reply is worth waiting for rather than piling requests
-// up behind it. `final` is wakeFinish asking for one last, authoritative pass
-// over everything captured, once nothing further is coming.
+// One pass of the whole clip captured so far, through the transcriber -
+// whatever it says REPLACES what's shown, not appended to it, because a
+// re-transcription of more audio is a better answer than the last one was,
+// not an addition to it. Called two ways: repeatedly, roughly once a second,
+// by wakePollLoop below while wake_captions is on and a session is open - and
+// exactly once, always, by wakeFinish asking for one last, authoritative pass
+// over everything captured, once nothing further is coming. That second call
+// is the only one that has to happen; the first is a paid nicety.
 async function wakePoll(final) {
   const frames = wakeClipFrames.slice();
   if (!frames.length) return "";
