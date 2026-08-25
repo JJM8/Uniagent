@@ -9635,16 +9635,13 @@ document.getElementById("set-save").addEventListener("click", async () => {
 // listening.
 function drawWakeFields() {
   const secs = (ms) => (Number(ms) / 1000).toFixed(Number(ms) < 10000 ? 1 : 0) + "s";
-  document.getElementById("s-wake-endpoint-ms-value").textContent = secs(F.wake_endpoint_ms.value);
-  document.getElementById("s-wake-submit-ms-value").textContent = secs(F.wake_submit_ms.value);
-  document.getElementById("s-wake-session-ms-value").textContent = secs(F.wake_session_ms.value);
+  document.getElementById("s-wake-silence-ms-value").textContent = secs(F.wake_silence_ms.value);
   document.getElementById("s-wake-threshold-value").textContent =
     Number(F.wake_threshold.value).toFixed(2);
   document.getElementById("s-wake-more").hidden = !F.wake_model.value;
 }
 
-for (const el of [F.wake_endpoint_ms, F.wake_submit_ms, F.wake_session_ms,
-                  F.wake_threshold, F.wake_model]) {
+for (const el of [F.wake_silence_ms, F.wake_threshold, F.wake_model]) {
   el.addEventListener("input", drawWakeFields);
 }
 
