@@ -635,6 +635,21 @@ class Agent:
         self.model = None
         self._write_settings()
 
+    def set_last_prompt_client(self, client_id):
+        """Record which browser tab's prompt this chat is now answering, so
+        the reply is spoken only there - see the last_prompt_client docstring
+        in __init__. Called on every POST /input that names a client, even a
+        command, so a device that's merely /model-ing a chat still becomes
+        the one it's speaking to. A blank/missing id (no localStorage yet,
+        e.g. an old tab open from before this existed, or the terminal's own
+        input) leaves the chat's last known client alone rather than clearing
+        it - the alternative would silence every window the moment one without
+        an id spoke."""
+        if not client_id:
+            return
+        self.last_prompt_client = client_id
+        self._write_settings()
+
     def set_temperature(self, temperature):
         """Fix this agent's temperature and write it into its settings .json -
         the /temperature equivalent of pin()."""
