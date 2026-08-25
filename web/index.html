@@ -9564,6 +9564,7 @@ document.getElementById("set-save").addEventListener("click", async () => {
     wake_model: F.wake_model.value,
     wake_threshold: Number(F.wake_threshold.value),
     wake_auto: F.wake_auto.checked,
+    wake_captions: F.wake_captions.checked,
     wake_silence_ms: Number(F.wake_silence_ms.value),
   };
   const r = await fetch("/settings", { method: "POST", body: JSON.stringify(body) });
