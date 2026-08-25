@@ -4691,18 +4691,41 @@ class Handler(BaseHTTPRequestHandler):
     def _stream(self):
         """Server-sent events. Holds this connection open and forwards every
         broadcast; a silent stretch gets a keepalive comment, which doubles as
-        the way we notice the page has gone."""
+        the way we notice the page has gone.
+
+        Replays whatever's in _backlog after the browser's own Last-Event-ID
+        before joining the live feed - the id EventSource remembers reading
+        and resends by itself on a reconnect it decided to make, not
+        something the page has to ask for. A first connection, or one back
+        after longer than the backlog holds, sends none and just starts
+        live, exactly as this always has."""
+        last_id = self.headers.get("Last-Event-ID")
+        if last_id is not None:
+            try:
+                last_id = int(last_id)
+            except ValueError:
+                last_id = None
         q = queue.Queue()
         with _streams_lock:
+            # Snapshotting the backlog and joining _streams under the same
+            # lock _broadcast holds is what closes the gap: anything sent
+            # while this runs either lands in the snapshot or gets put on q,
+            # never neither.
+            backlog = [item for item in _backlog if item[0] > last_id] if last_id is not None else []
             _streams.append(q)
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
+            for seq, data in backlog:
+                self.wfile.write(("id: %d\ndata: %s\n\n" % (seq, data)).encode())
+            if backlog:
+                self.wfile.flush()
             while True:
                 try:
-                    self.wfile.write(("data: " + q.get(timeout=15) + "\n\n").encode())
+                    seq, data = q.get(timeout=15)
+                    self.wfile.write(("id: %d\ndata: %s\n\n" % (seq, data)).encode())
                 except queue.Empty:
                     self.wfile.write(b": keepalive\n\n")
                 self.wfile.flush()
