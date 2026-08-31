@@ -5,3 +5,10 @@
 // they stay in step via git pull/push, not via Syncthing.
 // Syncing .git while two machines run git on it corrupts the repo.
 .git
+
+// Per-machine Python virtualenvs. .venv-stt is the speech-to-text one: over
+// 2GB of CUDA/cuDNN libraries built for the machine they sit on, so there is
+// nothing to gain from copying them to the other one - and they were the bulk
+// of what this folder had to keep in step. Each machine builds its own.
+.venv-stt
+.venv
