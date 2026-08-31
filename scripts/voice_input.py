@@ -238,9 +238,11 @@ def transcribe_audio(clip, filename):
     """The spoken text in `clip`, or raise VoiceError saying why not.
 
     Any format the model takes (wav, webm, ogg, mp4, mp3...) - it goes by the
-    extension of `filename`, so that has to match the bytes. A browser records
-    in whatever its own MediaRecorder produces, which is why this doesn't
-    assume WAV the way the key-held path below does.
+    extension of `filename`, so that has to match the bytes. The browser sends
+    WAV today (it cuts clips out of a continuous stream and writes the header
+    itself - see wakeWav in web/index.html), but this stays format-agnostic
+    rather than assuming that: the extension is already the contract, and the
+    key-held path below is the only caller that can promise WAV.
 
     Goes to whichever provider the voice tab names, and only falls back to
     Whisper on the OPENAI_API_KEY in .env when it names nobody.

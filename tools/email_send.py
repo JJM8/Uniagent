@@ -1,9 +1,11 @@
 """Sending half of the email capability. Separate from reading on purpose.
 
 Sending is the one genuinely irreversible thing in this whole capability, so it
-is its own tool: the safety gate in main.py can then recognise it by name
-alone, rather than having to look inside the arguments of a general-purpose
-email tool to work out whether this particular call is about to mail a stranger.
+is its own tool rather than another action on `email`. The safety check's
+whitelist matches on TOOL NAME (tool_validation.check), so keeping the name
+apart is what lets the whole read-and-tidy tool be waved through while every
+send is still rated - a merged tool would make that one choice for both, and
+the only safe answer would be to prompt on reading the inbox too.
 """
 
 import mimetypes

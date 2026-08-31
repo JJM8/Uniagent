@@ -49,11 +49,11 @@ INSTRUCTIONS = """HOW TO CALL: use the tool-call syntax already given to you, wi
 
 Arguments (all optional - see below for when to use which):
 - command:    the shell command(s) to run. Several commands can go in one
-              string, e.g. "free -h && ps aux --sort=-%mem | head". Omit it
-              entirely (no other argument either) to just read whatever new
-              output has appeared since your last call.
-- timeout:    seconds to wait for the command before reporting it as STILL
-              RUNNING instead of giving up on it. Defaults to 60.
+              string, e.g. "free -h && ps aux --sort=-%mem | head". Leave it
+              out, or send it empty (""), to WAIT ON and read whatever is
+              already running - see below.
+- timeout:    seconds to wait before reporting the command as STILL RUNNING
+              instead of giving up on it. Defaults to 60, maximum 600.
 - input:      text to send to a command that is sitting there waiting for an
               answer - a password, a y/N, a line for a REPL. Send the single
               Ctrl-C control character if something is stuck.
@@ -69,9 +69,11 @@ So if the user asks you to DO something on their machine, you almost certainly C
 
 IT IS ONE TERMINAL AND IT STAYS OPEN: This is not a fresh shell each time - it is the SAME terminal for this whole conversation, so state carries over exactly like a real one: `cd` once and every command after it runs from there; `export`, `source venv/bin/activate` and shell variables all stick too. You are ALREADY in that directory. Re-running `cd` to a place you have already been is pure waste - it burns tokens and changes nothing - so NEVER do it, and never wrap every command in "cd x && ..." out of habit. If you have lost track of where you are, run `pwd` once and move on.
 
-WHEN A COMMAND IS STILL RUNNING: Slow things (builds, apt, downloads, big copies) are NOT killed at the timeout. You get what has been printed so far, plus "STILL RUNNING". The command is fine and is carrying on. To see more, call again with `command` left out entirely - that reads whatever new output has appeared since. Keep doing that until you see it finish. Or wait longer up front with a bigger `timeout`.
+WHEN A COMMAND IS STILL RUNNING: Slow things (builds, apt, downloads, big copies) are NOT killed at the timeout. You get what has been printed so far, plus "STILL RUNNING". The command is fine and is carrying on. To see more, call again with no `command` (left out, or "") and a `timeout` - that is a real WAIT: it sits there for the whole timeout and comes back the moment the command finishes, or the moment it stops at a question. A long quiet patch is NOT a reason for it to return early, so one "timeout": 300 wait is the right way to see out a slow scan - not five short ones in a row. Or wait longer up front with a bigger `timeout` on the command itself.
 
-ANSWERING PROMPTS - sudo passwords, y/N, REPLs: Because the terminal stays open, a command that stops to ask a question is still sitting there waiting for the answer. Send it with `input` - e.g. run "sudo apt update", see "[sudo] password for the user:" and STILL RUNNING, then call again with `input` set to the password the user gave you.
+A command that stops to ASK you something comes back marked "WAITING FOR INPUT" instead, straight away rather than at the timeout. That one is not working away in the background - it is parked on the question shown on the last line and will sit there forever until you answer it, so do NOT keep reading it and do NOT run the command again. Answer it, as below.
+
+ANSWERING PROMPTS - sudo passwords, y/N, REPLs: Because the terminal stays open, a command that stops to ask a question is still sitting there waiting for the answer. Send it with `input` - e.g. run "sudo apt update", see "[sudo] password for the user:" and WAITING FOR INPUT, then call again with `input` set to the password the user gave you.
 NEVER guess, invent or brute-force a password. If something asks for one and the user has not given it to you, say so and ask them - do not try candidates. `input` answers anything, not just passwords: "y" for a confirmation, a line of Python for a REPL you started, "q" to get out of a pager.
 
 LAUNCHING APPS AND WINDOWS - put "&" on the end of `command`, e.g. "gnome-terminal &". This is real bash, so "&" backgrounds it and hands the terminal straight back. Use it for anything with a window - browsers, editors, games - so it does not sit there holding the terminal. The app IS open: do not run it a second time and do not go hunting for proof it worked.
@@ -90,16 +92,25 @@ If the user refuses you get back a string starting with "DENIED" and nothing was
 # or Anthropic's input_schema. chat_id is deliberately absent: it's injected
 # by tool_processor.process(), never supplied by the model - see the module
 # docstring above.
+# Runs on its own, never alongside another tool call in the same batch.
+# There is one shell per chat and it is a real terminal, not a queue.
+# Two commands running in it at once would write into each other's
+# output and neither would be read back correctly - and `cd`, `export`
+# and a half-finished prompt all mean the ORDER commands ran in.
+# See tool_processor.parallel_safe().
+PARALLEL = False
+
 SCHEMA = {
     "type": "object",
     "properties": {
         "command": {"type": "string", "description":
-            "The shell command(s) to run. Omit entirely (no other argument "
-            "either) to just read whatever new output has appeared since "
-            "the last call."},
+            "The shell command(s) to run. Leave out, or send empty (\"\"), to "
+            "wait on and read whatever is already running - that call blocks "
+            "for the whole timeout and returns as soon as the command "
+            "finishes or stops at a question. To save tokens and the users time, attempt to run multiple commands in one string, e.g. \"free -h && ps aux --sort=-%mem | head\"."},
         "timeout": {"type": "number", "description":
             "Seconds to wait before reporting STILL RUNNING instead of "
-            "giving up. Defaults to 60."},
+            "giving up. Defaults to 60, capped at 600."},
         "input": {"type": "string", "description":
             "Text to send to a command sitting there waiting for an answer "
             "- a password, a y/N, a line for a REPL. Send the single Ctrl-C "
@@ -128,6 +139,34 @@ _SESSIONS = globals().get("_SESSIONS", {})
 IDLE_LIMIT = 30 * 60
 
 DEFAULT_TIMEOUT = 60
+# A wait really does block the whole turn now (see PROMPT_ONLY), so an absurd
+# timeout would wedge the conversation rather than merely being ignored.
+MAX_TIMEOUT = 600
+
+# watch_prompts, third setting. False is a setup read that must swallow its
+# marker; True is a command being run, where a mid-line silence is worth
+# reporting; PROMPT_ONLY is an explicit WAIT - the model asked for the whole
+# timeout, so silence means nothing and only a real event ends it early.
+PROMPT_ONLY = "prompt-only"
+# How often a PROMPT_ONLY wait looks up from select() to check the terminal is
+# still there. Only reason it isn't one long sleep: a reset (or a shell that
+# died) has to end the wait, and closing a fd underneath a blocked select does
+# not reliably wake it.
+WAIT_TICK = 1.0
+
+# Set in every shell this tool opens, and re-asserted after the user's own
+# startup files have had their say (see _source_user_env). LESS is there for
+# the times something asks for less BY NAME rather than through $PAGER: -F
+# quits straight away if the text fits one screen, and -X stops it wiping that
+# screen on the way out, so the output stays in the transcript.
+_NO_PAGER = {
+    "PAGER": "cat",
+    "GIT_PAGER": "cat",
+    "SYSTEMD_PAGER": "cat",
+    "MANPAGER": "cat",
+    "GH_PAGER": "cat",
+    "LESS": "-FRX",
+}
 MAX_OUTPUT = 8000  # characters handed back; the middle of a flood is dropped
 
 # Where a background job's output goes. It gets a file of its own rather than
@@ -167,10 +206,10 @@ if WINDOWS:
          'first: "Get-ChildItem <BGDIR> | Sort-Object LastWriteTime -Descending".'),
         ('grep, pkill, diff and test all return 1 to mean "nothing matched"',
          'Select-String and findstr return 1 to mean "nothing matched"'),
-        ('run "sudo apt update", see "[sudo] password for the user:" and STILL '
-         'RUNNING, then call again with `input` set to the password the user gave you.',
-         'run something that stops to ask a question, see STILL RUNNING, then call '
-         'again with `input` set to the answer.'),
+        ('run "sudo apt update", see "[sudo] password for the user:" and WAITING '
+         'FOR INPUT, then call again with `input` set to the password the user gave you.',
+         'run something that stops to ask a question, see WAITING FOR INPUT, then '
+         'call again with `input` set to the answer.'),
     ]:
         INSTRUCTIONS = INSTRUCTIONS.replace(_bash, _ps)
 
@@ -182,6 +221,96 @@ INSTRUCTIONS = INSTRUCTIONS.replace("<BGDIR>", str(BG_DIR))
 # with TERM=dumb some programs emit them, and they are noise in a transcript
 # the model has to read.
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\r(?!\n)")
+
+# Questions that stop a command dead until somebody types an answer.
+#
+# Why this table exists: bash only prints the marker when a command FINISHES,
+# so a command sitting at a password prompt looks exactly like a slow one - and
+# we used to sit there for the whole timeout before handing back a prompt that
+# had been on screen since the first 50ms. A minute of nothing, every single
+# sudo. Matching the prompt itself is what turns that minute into a moment.
+#
+# Matched against the LAST line only and anchored to the end of it (see
+# _quiet_gap), so a line that merely mentions a password somewhere in the
+# middle is not a prompt. Case-insensitive, so [Y/n] and [y/N] both come from
+# the one pattern. Keep them ending where the real prompt ends - no "$", the
+# anchor is added once around the whole list.
+PROMPT_PATTERNS = [
+    r"\[sudo\] password for [^:\n]*:",              # sudo, the one that hurts
+    r"password[^:\n]*:",                            # ssh, su, mysql, gpg, most others
+    r"(passphrase|pass phrase)[^:\n]*:",             # ssh keys
+    r"(username|user name|login|account)[^:\n]*:",   # logins
+    r"enter [^:\n]*:",                               # "Enter something:", installers
+    r"\[y/n[^\]]*\]|\(y/n\)|\[yes/no\]|\(yes/no\)",  # apt, dpkg, rm -i, ssh's yes/no
+    r"\?",                                          # any question: rm -i, "Are you sure?"
+    r"press (\[?enter\]?|return|any key)[^\n]*",     # pagers, installers
+    r"^:|\(END\)",                                   # less/more sitting on a page
+    r">>>|In \[\d+\]:|\(gdb\)|\(pdb\)",            # python, ipython, debuggers
+    r"(mysql|sqlite|ftp|sftp|redis[^>\n]*)>",        # database and transfer REPLs
+    r"irb\([^)]*\)[^>\n]*>",                        # ruby
+]
+
+# One regex from the table: any pattern, at the very end of the line, with
+# trailing spaces allowed because nearly every prompt has one after the colon.
+_PROMPT_RE = re.compile("(?:" + "|".join(PROMPT_PATTERNS) + r")[ \t]*$", re.I)
+
+# How long the output has to have STOPPED before silence means "waiting for an
+# answer" rather than "still working". Two speeds, because the two signals are
+# not equally trustworthy: a matched prompt is near enough proof and only needs
+# long enough to be sure no more output is on its way, while an unfinished line
+# on its own is a guess and is given time to turn out to be a slow program
+# mid-sentence.
+PROMPT_QUIET = 0.3
+IDLE_QUIET = 3.0
+# The third and weakest reading: it printed something, ended the line tidily,
+# matched nothing in the table, and then said nothing whatsoever. Usually that
+# is a slow step doing its work - which is why this wait is five times the
+# others - but it is also every stuck thing the table has never heard of: a
+# pager showing a full screen, a REPL that opened with a banner, an installer
+# asking in words nobody predicted. Before this there was no reading at all
+# for that shape, so the answer was the entire timeout and then a guess.
+SILENT_QUIET = 15.0
+
+
+def _quiet_gap(text):
+    """(how long a silence must last for `text` to mean "waiting", what kind of
+    guess that is) - or (None, None) if this output cannot mean it however long
+    it goes quiet.
+
+    Nothing printed yet is None: a command that has said nothing is just slow
+    (`sleep 30` prints nothing either), and there is no prompt to answer.
+    Otherwise it comes down to the last line - a known prompt ("prompt", near
+    enough certain), or at least an unfinished one ("idle", a guess: a program
+    stopped mid-line with the cursor after it is USUALLY waiting on somebody,
+    but it might equally be "Building... " with five seconds of work to go).
+    The two are kept apart all the way to the wording the model is given, so a
+    guess is never handed over as a certainty."""
+    if not text:
+        return None, None
+    clean = _ANSI.sub("", text.replace("\r\n", "\n"))
+    lines = [ln for ln in clean.split("\n") if ln.strip()]
+    tail = lines[-1].rstrip() if lines else ""
+    # Both signals matter, and they multiply. A real prompt leaves the cursor
+    # sitting on the line it asked on - that is what a prompt IS - so a pattern
+    # that matches a line the program has already finished and moved on from is
+    # much weaker evidence than the same pattern with the cursor still on it.
+    # Requiring both for "prompt" is what lets the table above be as broad as a
+    # bare "?" without a passing "Did you mean x?" in a build log being
+    # answered as though it were a question.
+    unfinished = not clean.endswith("\n")
+    matched = bool(tail and _PROMPT_RE.search(tail))
+    if matched and unfinished:
+        return PROMPT_QUIET, "prompt"
+    if matched or unfinished:
+        # One signal, not both: it might be waiting, it might be working. Worth
+        # coming back for, not worth claiming anything about. This is also what
+        # catches the prompt written the other way round - `echo "Continue?
+        # [y/n]"; read a` - where the question ends in a newline and only the
+        # pattern is left to go on.
+        return IDLE_QUIET, "idle"
+    # Nothing to go on but the silence itself, so it is given the longest wait
+    # and handed over with the same careful wording as any other guess.
+    return SILENT_QUIET, "idle"
 
 
 class _PosixTerminal:
@@ -234,6 +363,18 @@ class _PosixTerminal:
 
         env = dict(os.environ)
         env["TERM"] = "dumb"  # ask politely for no colour codes
+        # No pagers. `git log`, `systemctl status`, `man`, `gh` and friends
+        # pipe THEMSELVES into `less` the moment they see a terminal - and
+        # ours always is one, which is the entire point of the pty. A person
+        # in a gnome-terminal sees the pager and presses q; from here it is a
+        # command that prints nothing, never finishes and never prints the
+        # marker, so the whole timeout goes by on a `git log` that would have
+        # taken 30ms. This was the bug: not the finish detection, which works,
+        # but a shell that had been taken over by less and was never going to
+        # reach its next prompt at all. `cat` is what these same programs use
+        # when they are piped into something, which is what we are really
+        # doing with their output.
+        env.update(_NO_PAGER)
         # Blanking PS1 here, every prompt, rather than only at startup: a venv
         # or conda sets it whenever it is activated, and that prefix would then
         # be printed after our marker and read as the head of the NEXT
@@ -266,7 +407,9 @@ class _PosixTerminal:
             # the entire reason this class uses a pty in the first place.
             remote = ("PROMPT_COMMAND=" + shlex.quote(prompt_cmd)
                       + " PS1= PS2= TERM=dumb "
-                      "bash --norc --noprofile --noediting -i")
+                      + " ".join(k + "=" + shlex.quote(v)
+                                 for k, v in _NO_PAGER.items())
+                      + " bash --norc --noprofile --noediting -i")
             argv = list(workspace.ssh_argv("-tt", command=remote))
         else:
             argv = ["bash", "--norc", "--noprofile", "--noediting", "-i"]
@@ -280,6 +423,7 @@ class _PosixTerminal:
         os.close(slave)  # bash holds its own copy; ours would hold back EOF
         self.master = master
         self.busy = False  # is a command still running in here?
+        self.closed = False  # set by close(), so a wait in flight can stop
         self.jobs = 0      # background jobs started here, for naming their logs
         self.used = time.monotonic()
 
@@ -316,6 +460,7 @@ class _PosixTerminal:
         return self.proc.poll() is None
 
     def close(self):
+        self.closed = True
         # Kill the whole SESSION, not just bash's process group. With job
         # control on, every background job gets a process group of its own, so
         # killpg would take out bash and leave `npm run dev` running forever -
@@ -338,30 +483,74 @@ class _PosixTerminal:
     def write(self, text):
         os.write(self.master, text.encode())
 
-    def read_until(self, marker, deadline):
+    def read_until(self, marker, deadline, watch_prompts=False):
         """Everything printed up to `marker`, or up to the deadline. Returns
-        (text, done); done False means the command is still going and this is
-        only what it has printed so far."""
+        (text, done, waiting): done False means the command is still going and
+        this is only what it has printed so far; waiting means it has stopped
+        at a question and there is no point waiting any longer.
+
+        watch_prompts is off by default so the reads that set this terminal up
+        keep the old behaviour exactly - they MUST swallow their marker, and a
+        read that gives up early would leave it to be read as the head of the
+        first real command's output. PROMPT_ONLY is the explicit wait: see the
+        note where the gap is thrown away below."""
         out = ""
         while True:
             left = deadline - time.monotonic()
             if left <= 0:
-                return out, False
+                return out, False, None
+            # How long a silence would mean this has stopped to ask something.
+            # None when the output so far cannot mean that, in which case there
+            # is nothing to wake up early for.
+            gap, kind = _quiet_gap(out) if watch_prompts else (None, None)
+            if watch_prompts == PROMPT_ONLY and kind != "prompt":
+                # An explicit wait, and this is only the guess that silence
+                # MIGHT mean a question. Coming back on it is what made a
+                # "timeout": 300 return in fifteen seconds while a disk scan
+                # was quietly working - so silence ends nothing here. A matched
+                # prompt still does: that one is parked forever and waiting out
+                # the rest of the timeout would buy nothing.
+                gap, kind = None, None
             # select waits for the terminal to have something to say, with a
             # deadline - which is what lets us give up on WAITING without
-            # giving up on the command. It carries on running either way.
-            ready, _, _ = select.select([self.master], [], [], left)
+            # giving up on the command. It carries on running either way. The
+            # wait is cut to `gap` so silence is noticed when it happens rather
+            # than slept through: one long select would not come back until the
+            # timeout, which is the whole bug.
+            wait = left if gap is None else min(left, gap)
+            if watch_prompts == PROMPT_ONLY:
+                # Not impatience - see WAIT_TICK. The loop below tells the tick
+                # apart from the deadline and carries on.
+                wait = min(wait, WAIT_TICK)
+            ready, _, _ = select.select([self.master], [], [], wait)
             if not ready:
-                return out, False
+                # A select that timed out IS the silence: it can only return
+                # this way after `wait` seconds with nothing said, and any
+                # output at all would have come back ready and reset the clock
+                # on the next time round. So the silence counts only if we
+                # waited the whole `gap` for it - with a `timeout` shorter than
+                # that, what just arrived was the deadline, and calling that a
+                # prompt would be inventing quiet we never actually watched.
+                if gap is not None and wait >= gap:
+                    return out, False, kind
+                if watch_prompts == PROMPT_ONLY and left > wait:
+                    # A tick, not the deadline. The only things that end a wait
+                    # early are the terminal going away under it - a "reset"
+                    # from elsewhere closes it, a killed shell stops being
+                    # alive - and either way there is nothing more coming.
+                    if self.closed or not self.alive():
+                        return out, True, "gone"
+                    continue
+                return out, False, None
             try:
                 chunk = os.read(self.master, 65536)
             except OSError:
-                return out, True  # terminal went away, nothing more is coming
+                return out, True, None  # terminal went away, nothing more is coming
             if not chunk:
-                return out, True
+                return out, True, None
             out += chunk.decode("utf-8", "replace")
             if marker and marker in out:
-                return out, True
+                return out, True, None
 
     def drain(self):
         """Whatever has piled up since we last looked, without waiting.
@@ -396,7 +585,12 @@ class _PosixTerminal:
         bootstrap = (
             "[ -f ~/.profile ] && source ~/.profile </dev/null 2>/dev/null; "
             "[ -f ~/.bashrc ] && source ~/.bashrc </dev/null 2>/dev/null; "
-            "PROMPT_COMMAND=" + shlex.quote(prompt_cmd) + "; PS1=''; PS2=''; true"
+            "PROMPT_COMMAND=" + shlex.quote(prompt_cmd) + "; PS1=''; PS2=''; "
+            # Same reason PROMPT_COMMAND is set again here: a .bashrc that
+            # sets PAGER=less, or an alias for git that adds one back, would
+            # otherwise undo the whole point of _NO_PAGER above.
+            + "export " + " ".join(k + "=" + shlex.quote(v)
+                                   for k, v in _NO_PAGER.items()) + "; true"
         )
         self.write(bootstrap + "\n")
         self.read_until(self.mark, time.monotonic() + 5)
@@ -456,6 +650,7 @@ class _WindowsTerminal:
 
         env = dict(os.environ)
         env["TERM"] = "dumb"
+        env.update(_NO_PAGER)   # see _NO_PAGER: git pages on Windows as well
 
         # -NoLogo: no banner to swallow. -NoProfile for the same reason bash
         # gets --norc/--noprofile: the user's profile is sourced deliberately
@@ -471,6 +666,7 @@ class _WindowsTerminal:
         self._lock = threading.Lock()
         self._echo = ""
         self.busy = False
+        self.closed = False  # set by close(), so a wait in flight can stop
         self.jobs = 0
         self.used = time.monotonic()
 
@@ -576,19 +772,36 @@ class _WindowsTerminal:
             out, self._buf = self._buf, ""
         return out
 
-    def read_until(self, marker, deadline):
+    def read_until(self, marker, deadline, watch_prompts=False):
         """Everything printed up to `marker`, or up to the deadline. Same
-        contract as _PosixTerminal.read_until, including the (text, done) pair
-        where done False means it is still running."""
+        contract as _PosixTerminal.read_until, including the
+        (text, done, waiting) triple where done False means it is still running
+        and waiting means it has stopped at a question.
+
+        There is no select() here to give a deadline to - this end is a
+        background thread filling a buffer - so the silence is timed directly
+        instead, from the last moment anything arrived."""
         out = ""
+        quiet_since = time.monotonic()
         while True:
-            out += self._take()
+            got = self._take()
+            if got:
+                out += got
+                quiet_since = time.monotonic()
             if marker and marker in out:
-                return self._unecho(out), True
-            if not self.alive():
-                return self._unecho(out), True
-            if time.monotonic() >= deadline:
-                return self._unecho(out), False
+                return self._unecho(out), True, None
+            if self.closed or not self.alive():
+                return (self._unecho(out), True,
+                        "gone" if watch_prompts == PROMPT_ONLY else None)
+            now = time.monotonic()
+            if now >= deadline:
+                return self._unecho(out), False, None
+            if watch_prompts:
+                gap, kind = _quiet_gap(self._unecho(out))
+                if watch_prompts == PROMPT_ONLY and kind != "prompt":
+                    gap = None      # same reason as the POSIX read: see there
+                if gap is not None and now - quiet_since >= gap:
+                    return self._unecho(out), False, kind
             time.sleep(0.02)
 
     def drain(self):
@@ -609,6 +822,7 @@ class _WindowsTerminal:
         return text
 
     def close(self):
+        self.closed = True
         # taskkill /T is the tree kill: PowerShell's own children go with it,
         # which is what pkill -s does for the session on POSIX. Without /T a
         # background job outlives the shell that started it.
@@ -714,9 +928,52 @@ def _report(code, output):
             "- grep, pkill and diff all return 1 when nothing matched.)")
 
 
-def _finish(term, raw, done):
+def _finish(term, raw, done, waiting=None):
     """Turn one read into what the model gets told."""
     output = _cap(_clean(raw, term.mark))
+
+    setattr(term, "parked", waiting == "prompt")
+
+    if waiting == "prompt":
+        # Said differently from STILL RUNNING on purpose. The two look the same
+        # from here - neither has finished - but they need opposite next moves:
+        # this one wants an answer typed into it, and telling the model to
+        # "read more" would have it sit and watch a prompt that will never
+        # change on its own.
+        term.busy = True
+        return (output + "\n\n(WAITING FOR INPUT - it has stopped and is sitting "
+                "at the question on the last line above. This is NOT an error, it "
+                "has NOT finished and it was NOT killed. Answer it by calling "
+                "terminal again with just an \"input\" argument. If it wants a "
+                "password you have not been given, stop and ask the user for it - "
+                "never guess one.)").strip()
+
+    if waiting == "idle":
+        # All we actually know is that it stopped mid-line and went quiet, which
+        # is a question about as often as it is a slow step. Handing that over
+        # as "WAITING FOR INPUT" would be a guess dressed as a fact, and the
+        # model would answer a build that never asked anything. So it gets both
+        # readings and the move for each.
+        term.busy = True
+        return (output + "\n\n(STOPPED PRINTING and gone quiet - NOT finished, "
+                "NOT an error, NOT killed. Either it is waiting for an answer to "
+                "the last line above, or it is just slow and has more to print. "
+                "If it reads as a question, answer it by calling terminal again "
+                "with just an \"input\" argument; if it reads as work in progress, "
+                "call terminal again with no arguments at all to keep "
+                "reading.)").strip()
+
+    if waiting == "gone":
+        # The wait ended because the terminal did: a "reset" from elsewhere, or
+        # the shell died under it. Not a timeout and not a finished command -
+        # reporting exit code 0 for a command nobody ever heard the end of
+        # would be an invented success.
+        term.busy = False
+        return ((output + "\n\n" if output else "")
+                + "(the terminal was closed while waiting - either it was reset "
+                "or the shell went away. Whatever was running is gone and "
+                "nothing more is coming from it. The next command opens a fresh "
+                "shell.)").strip()
 
     if not done:
         # NOT killed - it is still going. Say so plainly, because the obvious
@@ -798,6 +1055,14 @@ def _oneshot(command, timeout, workspace=None):
             # from a program that prints in another one would raise instead of
             # handing back the output it managed.
             text=True, encoding="utf-8", errors="replace",
+            # No stdin. capture_output only redirects the OUTPUT, so without
+            # this the command inherits the server's own stdin - and anything
+            # that asks a question there (sudo when it can find a terminal, a
+            # stray `read`) hangs for the whole timeout with nobody able to
+            # answer it. Handed /dev/null it fails immediately and says why,
+            # which is the useful answer. There is no chat behind this call, so
+            # unlike the terminal above there is nobody to answer a prompt.
+            stdin=subprocess.DEVNULL,
             timeout=timeout or DEFAULT_TIMEOUT,
             # A local workspace still decides where a one-shot command runs.
             cwd=(workspace.root if workspace is not None else None),
@@ -850,10 +1115,23 @@ def run(command=None, chat_id=None, timeout=None, input=None, reset=False,
                 "Linux or macOS - this one is on Windows. Files still work over "
                 "ssh; it is only the terminal that cannot open a remote shell "
                 "from here.")
+    # "" is what the model actually sends when it means "no command" - it has
+    # a command field in front of it and fills it in. Left as an empty string
+    # it is not None, so it went down the RUN path and was refused instantly
+    # with "nothing was run" instead of waiting: three turns of a real chat
+    # burned that way, and a working disk scan abandoned as stuck.
+    if command is not None and not command.strip():
+        command = None
+
     if chat_id is None:
         return _oneshot(command, timeout, workspace)
 
     if reset:
+        # "reset" IS a real command (it clears the screen), so a model asking
+        # for a fresh shell the obvious way - both the flag and the word - used
+        # to reset the terminal and then run reset in the new one.
+        if command is not None and command.strip() == "reset":
+            command = None
         term = _SESSIONS.pop(_key(chat_id, workspace), None)
         if term is not None:
             term.close()
@@ -862,7 +1140,9 @@ def run(command=None, chat_id=None, timeout=None, input=None, reset=False,
             return "(terminal closed and reopened - fresh shell, fresh directory)"
 
     term = _session(chat_id, workspace)
-    deadline = time.monotonic() + (timeout or DEFAULT_TIMEOUT)
+    # Clamped, not just defaulted: a wait now really holds the turn open for
+    # as long as it says.
+    deadline = time.monotonic() + min(timeout or DEFAULT_TIMEOUT, MAX_TIMEOUT)
 
     # Answering something that is waiting - a password, a y/N, a line for a REPL.
     if input is not None:
@@ -874,20 +1154,66 @@ def run(command=None, chat_id=None, timeout=None, input=None, reset=False,
             # Nothing was waiting on it. Don't sit here until the timeout for a
             # prompt that isn't coming - say what came back and leave it.
             return _cap(_clean(term.drain(), term.mark)) or "(sent - nothing came back)"
-        return _finish(term, *term.read_until(term.mark, deadline))
+        return _finish(term, *term.read_until(term.mark, deadline, watch_prompts=True))
 
-    # No command and no input: catching up on something slow.
+    # No command and no input: catching up on something slow. This is also the
+    # only call that WAITS - it sits here until the command finishes, stops at
+    # a question, or the timeout runs out. Anything else and a model asking for
+    # 300 seconds got fifteen.
     if command is None:
         if not term.busy:
+            # Nothing is running, so nothing can arrive however long we sit
+            # here. Say so at once rather than serving a timeout of guaranteed
+            # silence - to actually pass time, run `sleep N` as a command.
             return (_cap(_clean(term.drain(), term.mark))
                     or "(nothing new - nothing is running in this terminal)")
-        return _finish(term, *term.read_until(term.mark, deadline))
+        # Anything that arrived since the last call, before deciding anything:
+        # it may have finished, and its marker would then be sitting in the
+        # buffer with nobody to read it.
+        fresh = term.drain()
+        if term.mark in fresh:
+            return _finish(term, fresh, True, None)
+        if getattr(term, "parked", False) and not _clean(fresh, term.mark):
+            # It stopped at a question last time and has not said a word since,
+            # so it is still on that question and will be in five minutes too.
+            # Waiting out the timeout would only make the model wait to be told
+            # what it was told before.
+            return ("(WAITING FOR INPUT - nothing has changed and nothing will: "
+                    "it is still sitting at the question it asked in the output "
+                    "above, and it does not time out. Answer it by calling "
+                    "terminal again with just an \"input\" argument, or clear it "
+                    "out with \"reset\": true.)")
+        print("\n[terminal] waiting up to "
+              + str(int(min(timeout or DEFAULT_TIMEOUT, MAX_TIMEOUT)))
+              + "s for what is running")
+        raw, done, waiting = term.read_until(term.mark, deadline,
+                                             watch_prompts=PROMPT_ONLY)
+        return _finish(term, fresh + raw, done, waiting)
+
+    if term.busy:
+        # It has very likely finished since. "busy" is set by every early
+        # return - the timeout, a prompt, a quiet patch - and none of those
+        # kill the command: it carries on, prints its marker, and that marker
+        # sits in the buffer with nobody reading it. So look, without waiting,
+        # before refusing anything: the terminal is only really busy if the
+        # marker still has not turned up. Without this a single slow command
+        # left the shell wedged for the rest of the conversation, and every
+        # command after it came back "nothing was run" no matter how long the
+        # model waited.
+        leftover = term.drain()
+        if term.mark in leftover:
+            term.busy = False
 
     if term.busy:
         # Typing a command at a terminal that is mid-prompt doesn't run it - it
         # gets eaten as that command's input. Better to say so than to silently
-        # feed `rm -rf` to a y/N prompt.
-        return ('ERROR: nothing was run. A command is STILL RUNNING in this '
+        # feed `rm -rf` to a y/N prompt. What the drain above took comes back
+        # here rather than being thrown away - it is the newest thing the
+        # running command has said, and it is exactly what the model needs to
+        # tell a question it has to answer from work it has to wait out.
+        since = _cap(_clean(leftover, term.mark))
+        return ((since + "\n\n" if since else "")
+                + 'ERROR: nothing was run. A command is STILL RUNNING in this '
                 'terminal and would have swallowed this as its input. Read it by '
                 'calling terminal again with no arguments to see what it wants, '
                 'answer it with "input", or clear it out with "reset": true.')
@@ -919,7 +1245,7 @@ def run(command=None, chat_id=None, timeout=None, input=None, reset=False,
                        + " -WorkingDirectory $PWD.Path -NoNewWindow -PassThru).Id\n")
         else:
             term.write(command.rstrip("\n") + " > '" + str(log) + "' 2>&1 &\n")
-        raw, done = term.read_until(term.mark, deadline)
+        raw, done, _ = term.read_until(term.mark, deadline)
         term.busy = not done
         # bash announces a background job as "[1] 12345", PowerShell prints the
         # bare id - either way the pid is the last thing on the line, and it is
@@ -935,4 +1261,4 @@ def run(command=None, chat_id=None, timeout=None, input=None, reset=False,
                 "and nothing of it will appear here. Stop it with " + stop_cmd + ".")
 
     term.write(command.rstrip("\n") + "\n")
-    return _finish(term, *term.read_until(term.mark, deadline))
+    return _finish(term, *term.read_until(term.mark, deadline, watch_prompts=True))

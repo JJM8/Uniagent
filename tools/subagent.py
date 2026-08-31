@@ -91,8 +91,11 @@ than the report gives.""".replace("<<PROVIDERS>>", provider_module.options_text(
 SUBAGENTS = Path(__file__).resolve().parent.parent / "chats" / "subagents"
 
 # For native provider tool-calling. AVAILABLE_PROVIDERS mirrors add_cron.py's
-# approach - recomputed on every reload since tools/ modules reload every turn.
-AVAILABLE_PROVIDERS = provider_module.available()
+# approach - recomputed on every reload since tools/ modules reload every turn,
+# and chat_providers() rather than available() for the same reason: a subagent
+# RUNS on this provider, so a card that cannot answer a prompt (piper) must not
+# be offered as one of the choices.
+AVAILABLE_PROVIDERS = provider_module.chat_providers()
 
 SCHEMA = {
     "type": "object",
@@ -381,10 +384,12 @@ def run(name=None, prompt=None, provider=None, model=None, temperature=None,
     if not (prompt or "").strip():
         return "ERROR: 'prompt' is empty - say what the subagent should do."
 
-    if provider and provider.strip().lower() not in provider_module.available():
-        return ("ERROR: '" + provider + "' is not available - it needs an API key/"
-                "credentials this machine doesn't have. Retry with one of these:\n"
-                + provider_module.options_text())
+    # available() would have let a text-to-speech provider through here even
+    # though the schema's enum never offered one - the check and the enum have
+    # to agree, and unusable_reason knows which of the two refusals applies.
+    reason = provider_module.unusable_reason(provider)
+    if reason:
+        return "ERROR: " + reason + "\n" + provider_module.options_text()
 
     if temperature is not None:
         try:

@@ -65,7 +65,7 @@ DIR = Path(__file__).parent.parent / "usage"
 # the field exists at all: a safety check fires on EVERY tool call, so knowing
 # what share of the bill is the safety model rather than the chat is the single
 # most useful thing this ledger can say.
-KINDS = ("turn", "safety", "compact", "speak")
+KINDS = ("turn", "safety", "compact", "speak", "infini")
 
 # What the ranges in summary() mean, in days back from today. "all" is
 # everything on disk.

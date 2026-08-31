@@ -46,23 +46,28 @@ NAME = "workspace"
 # IS - has to be here, in the few hundred characters it is actually given. The
 # system prompt carries the other half: which workspaces exist right now, with
 # their devices and paths (see workspace.describe).
+#
+# It is long for a description and it earns that, because this is the one tool
+# whose effect lands on every OTHER tool. What was trimmed out of it was only
+# what it said twice: the file tools were named one by one where "the file
+# tools" does the same job, and the "they act THERE, so use this whenever the
+# user means another machine" rule was here AND on `id` below.
 DESCRIPTION = (
     "CHANGES WHICH DEVICE AND DIRECTORY THIS CHAT WORKS ON. A workspace is one saved "
-    "place to work - a computer, and a root directory on it. Whichever workspace this "
-    "chat is in decides, for every tool call you make, which machine read_file/"
-    "write_file/edit_file/ask_file read and write on, which machine the terminal's "
-    "commands actually run on, and what a relative path means. A workspace on another "
-    "device is reached over ssh and is real: there, `ls` lists THAT device's files and "
-    "a file you write lands on THAT device's disk, not on the machine running Uniagent "
-    "- and Uniagent's own folder (memories/, context/, skills/) is not reachable from "
-    "there. So whenever the user means another of their devices - \"what's on my "
-    "phone\", \"check the logs on the Pi\", \"is it still running on the server\" - "
-    "move this chat there first and then do the work, instead of answering from the "
-    "machine you happen to be on. They need not say the word \"workspace\". Call it "
-    "with no argument to list every workspace and see which one this chat is in; the "
-    "system prompt lists them too. It can only move between the workspaces that "
-    "already exist - it cannot create one. Moving affects this chat only, applies from "
-    "your next tool call, and lasts until changed.")
+    "place to work - a computer, and a root directory on it. The one this chat is in "
+    "decides, for EVERY tool call you make, which machine the file tools read and "
+    "write on, which machine the terminal's commands actually run on, and what a "
+    "relative path means. Another device is reached over ssh and is real: there, `ls` "
+    "lists THAT device's files and a file you write lands on THAT device's disk, not "
+    "on the machine running Uniagent - and Uniagent's own folder (memories/, context/, "
+    "skills/) is not reachable from there. So whenever the user means another of their "
+    "devices - \"what's on my phone\", \"check the logs on the Pi\", \"is it still "
+    "running on the server\" - move this chat there FIRST and then do the work, rather "
+    "than answering from the machine you happen to be on. They need not say the word "
+    "\"workspace\". Call it with no argument to list them and see where this chat is. "
+    "It only moves between workspaces that already exist - it cannot create one - and "
+    "a move affects this chat only, applies from your next tool call, and lasts until "
+    "changed.")
 
 INSTRUCTIONS = """HOW TO CALL: use the tool-call syntax already given to you, with tool name "workspace". Do not explain what you are doing first.
 
@@ -122,14 +127,20 @@ page - it needs a path and, for another device, ssh access already set up.
 # - tool_processor.process() fills in an argument BY THAT NAME on any tool whose
 # run() declares it, handing over the chat's Workspace object, which would
 # silently overwrite whatever the model asked for here.
+# Runs on its own, never alongside another tool call in the same batch.
+# This one moves the ground every other tool stands on: it changes
+# which machine and which root the chat's tools work in. Nothing else
+# may be in flight while that happens.
+# See tool_processor.parallel_safe().
+PARALLEL = False
+
 SCHEMA = {
     "type": "object",
     "properties": {
         "id": {"type": "string", "description":
-            "The workspace to move this chat to - its id or its name. Every file "
-            "tool and the terminal then act THERE, so use it whenever the user "
-            "means another of their machines. \"default\" moves back to the "
-            "default workspace. Omit it to list the workspaces instead."},
+            "The workspace to move this chat to - its id or its name. "
+            "\"default\" moves back to the default workspace. Omit it to list "
+            "the workspaces instead."},
     },
     "required": [],
 }

@@ -179,6 +179,17 @@ The ear turns **green** — it is listening for your word.
 **Now say your wake word.** The ear turns **red** and a line appears above the
 message box showing what it heard. Keep talking. When you stop, it sends.
 
+### Talking to it while it is already working
+
+You don't have to wait for it to finish. Speaking to a busy agent does exactly
+what typing into the box and pressing enter does: what you said joins the job
+already running, at its next step, instead of queuing up as a separate job
+behind the whole of it. So "no, the front room" reaches it while there is still
+something to change.
+
+Your words go on screen the moment they are sent, greyed out and marked *sends
+at the next tool call*, and turn solid when the agent actually takes them.
+
 ---
 
 ## Step 4 — get it right for your room
@@ -272,6 +283,19 @@ The wake word and the transcriber are two different settings. The wake word
 found you; now something has to turn your words into text. Pick a provider and
 a speech model at the top of Settings → voice. Point it at a local speech
 server and nothing you say ever leaves the machine.
+
+**"another tab of this browser is already listening".**
+Only one window listens at a time, on purpose: a sentence spoken near two of
+them would be heard twice and sent twice. Close or stop the other tab and this
+one takes over — it does so on its own the moment the listening tab closes. A
+tab that was killed rather than closed holds the lease for about nine seconds
+before it goes stale and anybody else can claim it.
+
+**It still arrived twice, from two devices.**
+A phone and a desktop are two browsers and cannot share the lease above, so the
+server catches this instead: the same spoken message arriving twice within five
+seconds is taken once. If they were more than five seconds apart, turn one of
+the two listeners off.
 
 ---
 

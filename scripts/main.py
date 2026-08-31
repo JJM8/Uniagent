@@ -24,6 +24,7 @@ import tool_validation
 import turnctx
 import usage as usage_log  # `usage` is a local in run()'s loop - see there
 import workspace
+import cache_ledger
 import voice_input
 
 name = "Uniagent"
@@ -271,13 +272,21 @@ def stamp_history(cid, history):
         pass  # losing a stamp must never cost a turn, same as _log_validation
 
 
-MAX_TOOL_CALLS = 1000  # cap it so it can't call tools forever
+# How many times round the tool loop a single turn may go - the runaway guard.
+# One pass is one response from the model, which may itself ask for several
+# tools at once, so this bounds requests rather than individual calls.
+MAX_TOOL_CALLS = 1000
 
 # Closes out a turn that /stop cut short. A constant because it's also matched
 # on: a stopped subagent still reports what it managed to write, and finding
 # that means stepping back past this line.
 STOPPED = "[stopped by the user]"
 MAX_BAD_JSON = 5       # how many times to ask the model to fix a broken tool call
+# How many times to ask the model to carry on after the wire cut its reply
+# off mid-sentence. Low on purpose: one or two drops is a flaky connection
+# worth riding out, and a provider dropping every single response is a
+# broken provider, which the user needs told rather than retried at.
+MAX_CUT_OFF = 2
 
 # What a failed turn is filed under (see append_error). A constant for the same
 # reason STOPPED is: final_answer() has to recognise one of these so a turn that
@@ -315,27 +324,21 @@ CONTINUE_NUDGE = "Carry on from where you left off."
 MID_TURN = "The user sent this while you were working, mid-task: "
 
 # ---- what a spoken message looks like in a transcript ------------------------
-# A message dictated to the wake-word listener arrives as one or more of these
-# lines. They are markers in the same sense STOPPED and MID_TURN are - part of
-# the record rather than anything the user typed - and they exist because
-# speech has a problem writing does not: a person pauses in the middle of a
-# sentence, and software has no way to tell that pause from the end of one.
+# A message that was SPOKEN rather than typed, however it was spoken - the mic
+# button held down, or the wake word. A marker in the same sense STOPPED and
+# MID_TURN are: part of the record rather than anything the user wrote.
 #
-# So the listener guesses, sends, and corrects itself when it turns out to have
-# guessed early. The first thing said is voice_input, and anything that turns
-# out to belong to the same thought is voice_continued underneath it - the
-# whole message re-sent, not a second request. Without the marking, "turn the
-# heating on" followed by "in the front room only" reads as somebody who
-# changed their mind, which is exactly the wrong thing for the model to think.
+# Put on by whichever front-end did the listening, not here. That is what lets
+# the two ways of speaking share one send path (POST /input, exactly as typing
+# does) and still be marked - see sayFinish in web/index.html, which builds
+# this same string. It is mirrored rather than sent because the page needs to
+# build it anyway: the grey bubble a spoken message leaves while it waits for
+# a running turn has to match the text the server broadcasts back, or the two
+# sit on screen at once.
+#
+# It is also what POST /input's duplicate guard keys off - only a spoken
+# message can arrive twice from two devices that heard the same sentence.
 VOICE_INPUT = "voice_input: "
-VOICE_CONTINUED = "voice_continued: "
-
-# Said once at the bottom of any message that has a continuation in it. The
-# markers are close to self-explanatory, but "close to" is not a standard worth
-# holding a model to, and this costs a line.
-VOICE_NOTE = ("(voice: the user was still talking. These lines are one thing "
-              "said with pauses in it, not separate requests - read them as a "
-              "single message.)")
 
 # What labels a note about something that HAPPENED to the conversation rather
 # than something anybody said in it - today, the chat being moved to another
@@ -508,6 +511,11 @@ class Agent:
     # safety_extra - so opening the job's chat shows what it actually runs under
     # and a question typed into it is judged the way the run was. cron.json
     # stays the source of truth for those.
+    # infinite is the per-chat infinite-chat toggle: True means "after every
+    # turn, ask the judge whether the subject has changed, and fork if it has"
+    # (see infini.py). None/absent means off, which is what every chat and cron
+    # job written before this existed says, so nothing on disk starts forking
+    # itself because the feature was added.
     # started is when a cron RUN began, written once by cron.new_run(). Only a
     # cron run's chat has one - it is what the chats panel labels the job's
     # older runs by, under its "history" toggle, since a run folder is numbered
@@ -517,7 +525,8 @@ class Agent:
                      "safety_prompt", "input_tokens",
                      "output_tokens", "tokens_model", "tokens_at",
                      "context_input", "context_max", "context_model",
-                     "context_exact", "pinned", "workspace", "last_prompt_client")
+                     "context_exact", "pinned", "workspace", "last_prompt_client",
+                     "infinite")
 
     def __init__(self, path, provider=None, model=None, temperature=None):
         self.path = Path(path)  # history.json; settings.json sits beside it
@@ -576,6 +585,10 @@ class Agent:
         # on the device that's actually being looked at instead of every open
         # window on the chat - see server.py's _speak_offer.
         self.last_prompt_client = cfg.get("last_prompt_client")
+        # Not "or" - False is a real value ("this chat was deliberately taken
+        # off infinite mode") and must read the same as None here, but writing
+        # it back is how the .json says the user chose rather than defaulted.
+        self.infinite = cfg.get("infinite")
 
     def _settings_path(self):
         return self.path.parent / SETTINGS_FILE
@@ -613,6 +626,10 @@ class Agent:
         # writes the chat's .json, and the very next turn has to run in the
         # new place without the server being restarted.
         self.workspace = cfg.get("workspace")
+        # And the same again for infinite mode: the toggle in the corner of the
+        # chat window writes the .json, and the turn it is flipped during is the
+        # turn whose end should (or should not) be judged.
+        self.infinite = cfg.get("infinite")
 
     def models(self):
         """The (provider, model, temperature) this turn actually runs on: the
@@ -721,6 +738,22 @@ class Agent:
         Those are config that can change under a chat filed here months ago (see
         the SETTINGS_KEYS note on `workspace`)."""
         self.workspace = wsid or None
+        self._write_settings()
+
+    def set_infinite(self, on):
+        """Turn infinite chat on or off for THIS chat alone - the toggle in the
+        corner of the chat window, beside the safety slider.
+
+        Per-chat and nothing else: there is deliberately no global on/off. The
+        mode rewrites a conversation's shape by forking it, and that is a thing
+        to opt one chat into and watch, not something to switch on across every
+        chat and cron job at once. A forked chat inherits it (see infini.fork's
+        CARRY), so the mode continues into the child without being turned on
+        again.
+
+        True/False rather than True/None so a chat that has been turned OFF
+        says so in its .json, and reads the same as one that was never on."""
+        self.infinite = bool(on)
         self._write_settings()
 
     def set_started(self, when):
@@ -898,6 +931,12 @@ def attachments_dir(agent):
     it when a file actually arrives, so a chat nobody attached anything to
     never grows an empty folder."""
     return agent.path.parent / ATTACHMENTS_DIR
+
+
+def chat_dir(cid):
+    """The folder a chat's files live in - its transcript, its settings, its
+    cache ledger. The route's own folder, so a cron run's nesting is kept."""
+    return CHATS.joinpath(*cid.split("/"))
 
 
 def chat_md(cid):
@@ -1737,79 +1776,6 @@ def _is_marker(turn):
     return text.strip() == STOPPED or text.startswith(TURN_ERROR)
 
 
-def voice_message(parts, first=True):
-    """`parts` - the pieces of one spoken message, in the order they were said
-    - as the single message that goes into the history.
-
-    `first` is whether the opening piece is in `parts`. It is not when a
-    continuation could not be merged (see voice_rewind): the earlier words are
-    already in the transcript above, so what goes now is the late half alone,
-    and every line of it is a continuation of something already said."""
-    lines = [(VOICE_INPUT if (first and i == 0) else VOICE_CONTINUED) + p
-             for i, p in enumerate(parts)]
-    if len(lines) > 1 or not first:
-        lines += ["", VOICE_NOTE]
-    return "\n".join(lines)
-
-
-def voice_rewind(c):
-    """Take a stopped voice turn off `c`'s history, so the words that
-    interrupted it replace the message rather than following it. True when the
-    turn came off cleanly and the whole spoken message should be sent again,
-    False when it did not and only the new words should go.
-
-    Called after request_stop has already ended the turn, and only then: this
-    edits the file, and a running turn holds the history in memory and would
-    write over anything done here a moment later - the same reason
-    continue_from refuses a busy chat.
-
-    What can come off is narrow on purpose:
-
-      the stop's own marker         always, it is bookkeeping (see _is_marker)
-      whatever the model had said   prose it never finished, and which the
-                                    re-sent message is about to make wrong
-      the voice_input message       the thing being replaced
-
-    and it stops dead at the first tool call. A turn that ran something changed
-    the machine outside this conversation, and a history rewound past that
-    would have the model do it a second time - which is a far worse outcome
-    than a transcript in which the user visibly interrupted themselves. So a
-    turn that got as far as calling anything keeps everything it did, the stop
-    marker included, and the caller sends the late words as their own message
-    on top of it."""
-    if c.slot.held():
-        return False
-    try:
-        turns = json.loads(c.history) if c.history else []
-    except json.JSONDecodeError:
-        # A pre-JSON flat-text chat, same as continue_from: there is no
-        # structure to wind back and guessing at one mangles transcripts.
-        return False
-    if not isinstance(turns, list) or not turns:
-        return False
-
-    # Built up on a copy and only written if every step of it works out - a
-    # half-rewound history is worse than one that was left alone.
-    cut = list(turns)
-    while cut and _is_marker(cut[-1]):
-        cut.pop()
-    while (cut and cut[-1].get("role") == "assistant"
-            and not cut[-1].get("tool_calls")):
-        cut.pop()
-    if not cut or cut[-1].get("role") != "user":
-        return False
-    said = cut[-1].get("content")
-    if not isinstance(said, str) or not said.startswith(VOICE_INPUT):
-        # Not a spoken message under there - a subagent's report, a note, or a
-        # turn this listener did not start. Leave it exactly where it is.
-        return False
-    cut.pop()
-
-    c.history = json.dumps(cut, indent=2)
-    c.save()
-    return True
-
-
 def request_stop(key):
     """Stop whatever is running under `key`, NOW - a chat's stem, or a
     subagent's thread tag.
@@ -1917,6 +1883,14 @@ def _set_usage(stem, usage, model_key=None):
     a = _open.get(stem)
     if a is not None:
         a.record_usage(usage, model_key)
+    # What the provider says it actually served from its cache, filed against
+    # the request that was predicted about. This is the half that keeps the
+    # prediction honest - a "should hit" that comes back at zero is a silent
+    # invalidator, and there is no way to see one without both numbers.
+    try:
+        cache_ledger.record_reported(stem, chat_dir(stem), usage)
+    except Exception:
+        pass
 
 
 def context_segments(agent, provider_name, model, breakdown=None):
@@ -2026,13 +2000,50 @@ def context_usage(agent, provider_name, model, breakdown=None, record=True):
         agent.record_context(key, m["tokens"], window, m["exact"])
 
     output = last_usage(stem).get("output_tokens")
+    shape = {"output": output, "max": window, "at": agent.tokens_at,
+             "cache": cache_outlook(agent, provider_name, model, breakdown)}
     if reported is not None and reported >= m["tokens"]:
-        return {"input": reported, "output": output, "max": window,
-                "source": "reported", "exact": True, "settled": True,
-                "at": agent.tokens_at}
-    return {"input": m["tokens"], "output": output, "max": window,
-            "source": "projected", "exact": m["exact"], "settled": m["settled"],
-            "at": agent.tokens_at}
+        return dict(shape, input=reported, source="reported",
+                    exact=True, settled=True)
+    return dict(shape, input=m["tokens"], source="projected",
+                exact=m["exact"], settled=m["settled"])
+
+
+def cache_outlook(agent, provider_name, model, breakdown=None):
+    """Whether this chat's NEXT request will hit the provider's prompt cache,
+    and what it costs if it won't - cache_ledger.predict()'s answer, or None
+    when there is nothing worth saying.
+
+    The prompt is rendered here the same way the request itself renders it
+    (provider.wire_segments), against the history as it stands right now. That
+    is the whole point: a pin added a moment ago, a context file just edited,
+    a memory just written - each of those moves the answer NOW, before the
+    tokens are spent, rather than being explained afterwards by a bill.
+
+    None for a provider that has no cache to hit, so nothing is said about
+    endpoints where nothing can be said. A wrong reassurance is worse than
+    silence here: the number would be one somebody plans around."""
+    try:
+        spec = provider.cache_spec(provider_name, model)
+        if spec.get("mode") == "none":
+            return None
+        turns = json.loads(agent.history) if agent.history else []
+        if not isinstance(turns, list):
+            turns = []
+        here = live_workspace(agent.id, agent.workspace)
+        system = system_text(provider_name, model, agent.pinned, here)
+        messages = [{"role": "system", "content": system}] + turns
+        tools = tool_processor.tools_schema(
+            tool_processor.shape_for(provider_name))
+        segments = provider.wire_segments(provider_name, model, messages, tools)
+        counted = tokens.measure(provider_name, model, segments)
+        return cache_ledger.predict(agent.id, chat_dir(agent.id),
+                                    model_key(provider_name, model),
+                                    segments, counted["each"], spec)
+    except Exception:
+        # Same standing as the record side: this is an estimate about money,
+        # not part of running a turn, and it never gets to break a panel.
+        return None
 
 
 def stored_usage(agent, provider_name, model):
@@ -2640,9 +2651,62 @@ def _split_output(provider_name, model, thought, reply, usage, counted=None):
     return (think_est or None), (write_est or None)
 
 
+# --- The model talking itself in a circle ----------------------------------
+#
+# run()'s loop-breaker below catches a model that makes the same reply over and
+# over, pass after pass. It cannot catch the other shape of the same failure,
+# which is the one that actually bites: a model that gets stuck WITHIN a single
+# response and writes the same paragraph twenty times without ever finishing
+# the turn. Nothing had ever ended that. It ran until the model's own context
+# ran out - minutes of generation, paid for by the token, ending in a reply
+# that is one sentence repeated to the horizon.
+#
+# It is not rare and it is not exotic: it is what a reasoning model does at
+# temperature 0 when it reaches a step it cannot take (in the case this was
+# written for, "look at this image" with no way to look at an image). The model
+# is not going to break out on its own, so the stream is cut here instead.
+#
+# The numbers are deliberately conservative - three consecutive repeats of a
+# block of at least this many characters. Genuine repetition that long and that
+# exact does not happen in prose; it happens in tables and in code, which is why
+# the block has to repeat with no gap at all, three times over, before this
+# calls it.
+_LOOP_BLOCK = 80      # shortest run worth calling a repeat
+_LOOP_TIMES = 3       # how many of them, back to back
+_LOOP_WINDOW = 6000   # how far back to look
+_LOOP_EVERY = 200     # how much new text between checks
+
+
+def _looping(text):
+    """The block `text` has just repeated itself with, or None.
+
+    Cheap enough to run inside a streaming loop: one rfind over a bounded
+    window to find where the last stretch of the reply appeared before, which
+    gives the candidate period, and one comparison to confirm the whole tail is
+    that period repeated. No scan over every possible block length."""
+    tail = text[-_LOOP_WINDOW:]
+    probe = tail[-_LOOP_BLOCK:]
+    if len(probe) < _LOOP_BLOCK:
+        return None
+    before = tail.rfind(probe, 0, len(tail) - _LOOP_BLOCK)
+    if before < 0:
+        return None
+    block = tail[-(len(tail) - _LOOP_BLOCK - before):]
+    # rfind can only report a gap of at least _LOOP_BLOCK, so what it found may
+    # be several turns of a much shorter cycle rather than the cycle itself -
+    # seven rows of a table read as one 84-character "block". Reduced to the
+    # real repeating unit here, which is what the length test below has to be
+    # applied to: forty identical table rows are a table, and calling them a
+    # loop would cut off a perfectly good answer.
+    unit = block[:(block + block).find(block, 1)] or block
+    if len(unit) < _LOOP_BLOCK:
+        return None
+    return unit if tail.endswith(unit * _LOOP_TIMES) else None
+
+
 def _stream(messages, provider_name, model, temperature, on_text, should_stop=None, usage=None,
-            native_call=None, reasoning=None, phases=None, on_request=None,
-            on_thought=None, on_reclassify=None):
+            chat_id=None, native_call=None, reasoning=None, phases=None, on_request=None,
+            on_thought=None, on_reclassify=None, on_call_delta=None):
     """One model response, read as it's written. Returns everything received.
 
     Shows each piece the moment it arrives - printed here, or handed to on_text
@@ -2670,16 +2734,21 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
     than waiting out the tail just to complete a token count.
 
     `native_call`, if given, is a dict provider.stream_response() fills in
-    with a real structured tool call ({"id","name","arguments"}) - which is
-    how EVERY tool call arrives now: the schemas go over as the provider's own
-    `tools` array (tool_processor.tools_schema()) and the call comes back on
-    its own structured channel. Passing None is what a request with no tools
-    at all looks like (a safety check, compaction), not a second call syntax.
-    There is no text-embedded call to scan for: the provider itself stops
-    generating once it decides to call a tool, so the loop below just streams
-    whatever preamble text arrives and lets the generator run to its own
-    natural end. See run()'s _parse_call() for how the filled-in dict becomes
-    a {"tool","args"} call afterward.
+    with the response's real structured tool calls - which is how EVERY tool
+    call arrives now: the schemas go over as the provider's own `tools` array
+    (tool_processor.tools_schema()) and the calls come back on their own
+    structured channel. Passing None is what a request with no tools at all
+    looks like (a safety check, compaction), not a second call syntax.
+
+    There may be SEVERAL of them: a model can ask for three files in one
+    response, and every wire underneath can carry that. The dict is the
+    collector for all of them and provider.calls_in() reads them back out -
+    see provider.py. There is no text-embedded call to scan for either way:
+    the provider itself stops generating once it has decided what to call, so
+    the loop below just streams whatever preamble text arrives and lets the
+    generator run to its own natural end. See run()'s _parse_calls() for how
+    the filled-in collector becomes a list of {"tool","args"} calls
+    afterward.
 
     `reasoning`, if given, is a dict provider.stream_response() fills in with
     a thinking model's own reasoning_content, under "content". Never part of
@@ -2728,6 +2797,8 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
     """
     response = ""
     in_call = False  # has the call started being written yet?
+    looped = False   # the stream was cut because the model was repeating itself
+    checked = [0]    # how much of `response` the loop check has already seen
 
     # This response's text as it grows, readable by whoever stops the turn.
     # Reset here rather than at the end of the pass: from the moment a new
@@ -2751,6 +2822,26 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
     tools = None
     if native_call is not None:
         tools = tool_processor.tools_schema(tool_processor.shape_for(provider_name))
+
+    # What this exact request looks like on the wire, written down so the NEXT
+    # one can be told how much of itself the provider will have to read fresh
+    # (see cache_ledger, and context_usage's "cache"). Rendered through
+    # provider.wire_segments rather than digested off `messages` here, because
+    # the dialect rewrites turns on the way out and those rewrites are real
+    # changes to the cached prefix.
+    #
+    # Wrapped, and wrapped broadly: this is an accounting nicety sitting
+    # directly in front of the request, and there is no failure in it worth
+    # costing somebody a turn.
+    if chat_id:
+        try:
+            segments = provider.wire_segments(provider_name, model, messages, tools)
+            counted = tokens.measure(provider_name, model, segments)
+            cache_ledger.record(chat_id, chat_dir(chat_id),
+                                model_key(provider_name, model),
+                                segments, counted["each"])
+        except Exception:
+            pass
 
     # The clock rides in on the reasoning channel rather than as another
     # argument to provider.stream_response, because that channel already
@@ -2814,7 +2905,7 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
         nowhere.
 
         The pieces spell out the same text the turn is stored and redrawn
-        with (_parse_call's shown_call), so what was watched appearing is what
+        with (_parse_calls' shown text), so what was watched appearing is what
         stays on screen afterwards - no rewrite when the bubble is sealed. It
         is deliberately NOT added to `response`: that is the model's prose,
         and the call belongs in tool_calls, not in the turn's content."""
@@ -2826,7 +2917,15 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
             in_call = True
             if response and not response.endswith("\n"):
                 piece = "\n\n" + piece  # same gap the redraw puts there
-        if on_text:
+        # A front-end that draws the call its own way (server.py: the compact
+        # tool row, built from on_tool_call + on_tool_result) takes the call
+        # deltas HERE and does not want them streamed as reply text as well -
+        # that is the doubled call the user used to see appear and then vanish.
+        # on_call_delta is that separate channel; without one given, the old
+        # behaviour stands (streamed as reply text, or printed on the terminal).
+        if on_call_delta is not None:
+            on_call_delta(piece)
+        elif on_text:
             on_text(piece)
         else:
             print(GREEN + piece + RESET, end="", flush=True)
@@ -2869,6 +2968,17 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
         response += chunk
         if ctx is not None:
             ctx.partial = response
+        # Stuck in a circle - see _looping. Checked here rather than after the
+        # response, because after the response is minutes too late and the
+        # whole point is not to generate (or pay for) the rest of it. The text
+        # already written is kept: it is what the model said, and the first
+        # copy of the repeated block is often the only part of the turn that
+        # was any use.
+        if len(response) - checked[0] >= _LOOP_EVERY:
+            checked[0] = len(response)
+            if _looping(response):
+                looped = True
+                break
         # Reply text only. The call itself never comes through here - it
         # arrives on the structured channel and is shown by show_call above -
         # so there is nothing to scan, trim or break out of mid-stream: the
@@ -2884,6 +2994,13 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
     if not on_text:
         print(RESET if in_call else "")
 
+    # Written onto the usage dict rather than returned, because every caller
+    # already has that dict and none of them wants a second return value. It
+    # rides alongside provider.py's own "truncated" note and is read in the
+    # same place - see run().
+    if looped and usage is not None:
+        usage["looped"] = True
+
     if phases is not None:
         # A provider that streamed its whole answer on the reasoning channel
         # has said so by now; what was timed as thinking was the reply being
@@ -2894,35 +3011,149 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
     return response
 
 
-def _parse_call(response, native_call):
-    """(call, before, shown_call, retry_msg) for this pass's reply - the one
-    place run() figures out whether a tool call is in there.
+def _batches(calls):
+    """`calls` split into the groups that may run at the same time, in order.
 
-    There is no text to scan. The call already arrived as `native_call`
-    ({"id","name","arguments"}), filled in by provider.py straight from the
-    provider's own structured response - see _stream()'s docstring.
-    `shown_call` is a synthesized "name(args)" text used only for display (the
-    UI's on_tool_call, the safety log) and as this turn's raw_call for history
-    replay; there is no syntax the model "wrote" to preserve verbatim, because
-    a native call never had a text form at all.
+    A run of calls whose tools are all parallel-safe becomes one group and
+    goes off together; a tool that is not gets a group to itself, so it runs
+    alone, in its own place in the sequence, with nothing else in flight
+    around it. tool_processor.parallel_safe() is what answers that per tool -
+    see it for what a tool has to say to opt out.
+
+    Order is never rearranged. A model that reads a file and then edits it in
+    the same batch gets those two in that order, because the edit is not
+    parallel-safe and therefore ends the group the read is in."""
+    groups, group = [], []
+    for one in calls:
+        if tool_processor.parallel_safe(one["tool"]):
+            group.append(one)
+            continue
+        if group:
+            groups.append(group)
+            group = []
+        groups.append([one])
+    if group:
+        groups.append(group)
+    return groups
+
+
+def _run_calls(calls, chat_id, here, ctx):
+    """Run every call in `calls`, writing each one's output onto it as
+    "result" and how long it took as "took".
+
+    Group by group (see _batches), and inside a group all at once. This is
+    where a batch actually pays off in wall-clock time as well as round trips:
+    three files read at the same time cost one read, and a web fetch no longer
+    holds up the search running beside it.
+
+    Results are written onto the call dicts rather than returned, so the
+    caller can write the transcript in the order the MODEL asked for things
+    instead of the order they finished in.
+
+    `ctx` is the turn's context, bound onto every worker thread before it does
+    anything. Cancellation is per-thread (turnctx.current), so without this a
+    /stop would be invisible inside a tool running in a worker: the checks in
+    tool_processor._run would find no turn on their thread, the tool would run
+    to completion, and its result would come back to a turn that had already
+    been abandoned.
+
+    Nothing here catches ordinary failures, because there are none to catch:
+    tool_processor._run already turns any exception a tool raises into an
+    "ERROR running ..." string, which is a result like any other and reads as
+    one to the model. Stopped is the exception it deliberately lets through,
+    and it is re-raised on this thread once the group is in - after the join,
+    so a stop cannot leave a worker still writing into a call dict that the
+    transcript is being built from."""
+    for group in _batches(calls):
+        if len(group) == 1:
+            one = group[0]
+            ran = timing.now()
+            one["result"] = tool_processor.process(one, chat_id, workspace_id=here)
+            one["took"] = {"ms": timing.ms(ran)}
+            continue
+
+        stopped = []
+
+        def work(one=None):
+            turnctx.bind(ctx)
+            ran = timing.now()
+            try:
+                one["result"] = tool_processor.process(one, chat_id, workspace_id=here)
+            except turnctx.Stopped as e:
+                stopped.append(e)
+                one["result"] = STOPPED
+            finally:
+                one["took"] = {"ms": timing.ms(ran)}
+
+        threads = [threading.Thread(target=work, kwargs={"one": one},
+                                    name="tool-" + one["tool"], daemon=True)
+                   for one in group]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if stopped:
+            raise stopped[0]
+
+
+def _parse_calls(response, native_call):
+    """(calls, before, shown, retry_msg) for this pass's reply - the one place
+    run() figures out what the model asked to be run.
+
+    There is no text to scan. The calls already arrived in `native_call`,
+    provider.py's collector, filled in straight from the provider's own
+    structured response - see _stream()'s docstring and provider.calls_in().
+
+    `calls` is a list, because one response can ask for several tools at once
+    and every wire underneath can carry that. It is empty when the model
+    answered instead of calling anything. Each entry is
+    {"tool", "args", "shown"}:
+
+      tool   the tool's name
+      args   its arguments, parsed
+      shown  a synthesized "name(args)" text used only for display (the UI's
+             on_tool_call, the safety log) and as part of this turn's raw_call
+             for history replay. There is no syntax the model "wrote" to keep
+             verbatim, because a native call never had a text form at all.
+
+    `shown` (the third return value) is every call's own `shown` joined by
+    newlines - the turn's raw_call, which is what a provider without native
+    tool roles replays as text (provider._compat).
 
     retry_msg is None when nothing needs resending; otherwise it's the
     "Tool result: ..." text to send back and try again - arguments that
     arrived as something other than valid JSON, or a reply that WROTE a call
-    out as prose instead of making one."""
-    if native_call.get("name"):
-        try:
-            args = json.loads(native_call.get("arguments") or "{}")
-        except json.JSONDecodeError:
-            return None, response, "", ("Tool result: that tool call's arguments were "
-                                         "not valid JSON, so nothing ran. Try the call again.")
-        call = {"tool": native_call["name"], "args": args}
-        # Built from the arguments string exactly as it streamed, not from
-        # json.dumps(args) - re-dumping reformats the whitespace, so the
-        # sealed text would differ from the text _stream's show_call just
-        # showed being written, and the bubble would visibly rewrite itself.
-        shown_call = call["tool"] + "(" + (native_call.get("arguments") or "{}") + ")"
-        return call, response, shown_call, None
+    out as prose instead of making one.
+
+    ONE bad call spoils the pass, deliberately: the calls in a response are
+    the model's plan for this step, and running half of it while asking for
+    the other half back leaves the model reading results for work it can no
+    longer see the shape of. Asking for the whole thing again is both simpler
+    to reason about and cheap - nothing has run yet at this point."""
+    found = provider.calls_in(native_call)
+    if found:
+        calls = []
+        for one in found:
+            try:
+                args = json.loads(one.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                return [], response, "", (
+                    "Tool result: that tool call's arguments were not valid "
+                    "JSON, so nothing ran. Try the call again.")
+            # Built from the arguments string exactly as it streamed, not from
+            # json.dumps(args) - re-dumping reformats the whitespace, so the
+            # sealed text would differ from the text _stream's show_call just
+            # showed being written, and the bubble would visibly rewrite itself.
+            calls.append({"tool": one["name"], "args": args,
+                          "shown": one["name"] + "("
+                                   + (one.get("arguments") or "{}") + ")"})
+        # The calls came through, but the markup they were written in can still
+        # leak into the prose beside them (same wire bug as below). Only
+        # stripped when what is left would be nothing but wreckage anyway, so a
+        # reply that genuinely quotes a tag keeps it.
+        if provider.looks_like_stray_markup(response):
+            response = ""
+        return calls, response, "\n".join(c["shown"] for c in calls), None
 
     # No structured call - but the reply may still have TRIED to call
     # something by typing it out, which a model does often enough to be worth
@@ -2931,12 +3162,28 @@ def _parse_call(response, native_call):
     # source quoted back or a pinned skill's content (see Agent.add_pinned)
     # doesn't trip it - that was never an attempt, so there is nothing to ask
     # the model to fix.
+    # A call the WIRE mangled, rather than one the model got wrong. Measured on
+    # OpenRouter's DeepSeek-v4 builds, which parse the model's own DSML markup
+    # into a structured call and every so often eat the opening, keep the
+    # closing, and emit no call - see provider.looks_like_stray_markup. What
+    # arrives is a reply made entirely of tag wreckage and no call at all.
+    #
+    # Left alone (which is what happened before this) that wreckage was shown to
+    # the user AS the answer, the turn ended, and the tool the model meant to
+    # run never ran. There is not enough left to rebuild the call from, so the
+    # remains are dropped and the model is asked for it again - the same
+    # bounded retry a call with bad JSON gets.
+    if provider.looks_like_stray_markup(response):
+        return [], "", "", ("Tool result: your tool call did not come through - "
+                            "the provider mangled it on the way here, and nothing "
+                            "ran. Make exactly the same call again.")
+
     if tool_processor.looks_like_call(response):
-        return None, response, "", ("Tool result: that looked like a tool call written out as "
-                                    "text, so nothing ran. Your tools are attached to this "
-                                    "request as real schemas - call one for real instead of "
-                                    "writing the call in your reply.")
-    return None, response, "", None
+        return [], response, "", ("Tool result: that looked like a tool call written out as "
+                                  "text, so nothing ran. Your tools are attached to this "
+                                  "request as real schemas - call one for real instead of "
+                                  "writing the call in your reply.")
+    return [], response, "", None
 
 
 def _say(text):
@@ -3052,7 +3299,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         safety=None, safety_prompt=None, inject=None, workspace_id=None,
         safety_threshold=None, safety_extra=None, on_message=None,
         on_reasoning=None, on_timing=None, on_request=None, on_thought=None,
-        on_reclassify=None):
+        on_reclassify=None, on_call_delta=None):
     """Run one turn over `history` and return the updated history: reply to text,
     and work through any tool calls it makes.
 
@@ -3088,10 +3335,18 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
     a call is parsed, its result comes back, and the safety verdict is known - so
     a UI can draw the tool's own block (the call, safety row and result dropdown)
     as it happens, instead of waiting out the whole turn for a redraw.
-    on_tool_result(result, name=None, timing=None): `name` is which call this
-    answered, and `timing` is how long that call took to run ({"ms": n}). Both
-    are optional and both default to None, so a caller written before they
-    existed - and there are several - still works untouched.
+    on_tool_call(shown, name=None, id=None) and
+    on_tool_result(result, name=None, timing=None, id=None): `name` is which
+    tool the call is (or which one the result answered), `timing` is how long
+    that call took to run ({"ms": n}), and `id` is the tool_call_id tying the
+    two together. All optional and all defaulting to None, so a caller written
+    before they existed - and there are several - still works untouched.
+
+    The pairing matters to a UI that draws the call BEFORE its result, which
+    is the point of on_tool_call firing where it does: the row goes up the
+    moment the model commits to the call, and `id` is what says which row the
+    result that arrives some seconds later belongs in. Without it a provider
+    that makes several calls at once (Claude does) leaves the page guessing.
 
     `on_message`, if given, is handed each finished assistant message the
     moment this function knows what it was - on_message(text, kind), where kind
@@ -3167,6 +3422,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
     if text is not None:
         turns.append({"role": "user", "content": text})
     bad_json = 0  # consecutive "meant to be a tool call but wouldn't parse" tries
+    cut_off = 0   # consecutive replies the wire cut off part-way through
     last_response = None  # the previous pass's raw reply, to catch a stuck loop
     repeats = 0   # how many passes in a row that reply has now been made
     # How many of those in a row are allowed before the turn is halted - see
@@ -3273,8 +3529,8 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         started = time.time()
         try:
             response = _stream(messages, provider_name, model, temperature, on_text, should_stop,
-                               usage, native_call, reasoning, phases, on_request,
-                               on_thought, on_reclassify)
+                               usage, chat_id, native_call, reasoning, phases, on_request,
+                               on_thought, on_reclassify, on_call_delta)
         except BaseException as e:
             # Written down before it unwinds. A request that died part-way -
             # the provider 500'd, the key is spent, the turn was stopped - had
@@ -3317,7 +3573,8 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         # why that is so often the case on a turn that calls a tool.
         usage_log.record("turn", provider_name, model, chat=chat_id, usage=usage,
                          prompt_text=usage_log.text_of(messages),
-                         reply_text=response + (native_call.get("arguments") or ""),
+                         reply_text=response + "".join(
+                             c.get("arguments") or "" for c in provider.calls_in(native_call)),
                          ms=(time.time() - started) * 1000)
         if chat_id:
             _set_usage(chat_id, usage, model_key(provider_name, model))
@@ -3357,6 +3614,12 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
             the thinking existing only for as long as the window stayed open.
             """
             turn = {"role": "assistant", "content": content}
+            if usage.get("truncated"):
+                # Filtered out before the history goes back to a model
+                # (provider._NATIVE_KEYS), same as `timing` - this is for the
+                # page, which draws a cut-off reply differently to a finished
+                # one instead of leaving the two indistinguishable.
+                turn["truncated"] = True
             if spent:
                 turn["timing"] = spent
             if reasoning.get("content"):
@@ -3374,7 +3637,59 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
                 sync()
             continue
 
-        call, before, shown_call, retry_msg = _parse_call(response, native_call)
+        calls, before, shown_call, retry_msg = _parse_calls(response, native_call)
+
+        # The stream was cut because the model was writing the same paragraph
+        # over and over (main._looping). That is the same failure the pass-level
+        # loop-breaker below exists for, caught one level down, so it ends the
+        # turn the same way: keep what was said, say plainly why it stopped, and
+        # stop. Continuing would only hand the model back its own loop.
+        if usage.get("looped"):
+            turns.append(spoke(response))
+            turns.append({"role": "user", "content":
+                          "Tool result: STOPPED - the reply was repeating the same "
+                          "text over and over, so it was cut off and the turn is "
+                          "being halted. Whatever step you were on cannot be done "
+                          "the way you were trying to do it: say so and stop, or "
+                          "try a genuinely different approach."})
+            sync()
+            break
+
+        # The reply was cut off part-way - the connection dropped mid-stream, or
+        # the endpoint stopped it at a token limit (provider._sse, and
+        # _read_openai's tail). The text that DID arrive is real and is kept,
+        # but it is half a sentence, and before this the turn simply carried on
+        # as though the model had finished speaking - which is the end of
+        # messages going missing with nothing anywhere saying so.
+        #
+        # A cut-off turn that still produced a tool call is left alone: the call
+        # came through whole on its own channel, so the only casualty is some
+        # commentary. It is a cut-off ANSWER that gets picked back up, bounded
+        # so a wire that drops every single time ends the turn rather than
+        # retrying for ever.
+        if usage.get("truncated") and not calls and not retry_msg:
+            if cut_off < MAX_CUT_OFF:
+                cut_off += 1
+                turns.append(spoke(response))
+                turns.append({"role": "user", "content":
+                              "Tool result: your last reply was cut off part-way "
+                              "through - the connection to the model dropped before "
+                              "it finished. Carry straight on from where it stopped. "
+                              "Do not start again and do not repeat what you already "
+                              "said."})
+                sync()
+                continue
+            # Out of retries. Keep the partial answer and say so, rather than
+            # handing over half a sentence as though it were the whole reply.
+            turns.append(spoke(response))
+            turns.append({"role": "assistant", "content":
+                          "[the reply above was cut off - the connection to the "
+                          "model kept dropping mid-answer. Ask again, or try a "
+                          "different provider or model.]"})
+            sync()
+            break
+        if not usage.get("truncated"):
+            cut_off = 0
 
         # Loop-breaker: a stuck model emits the exact same reply pass after pass
         # - same reasoning, same tool call, same result feeding the same reply -
@@ -3386,6 +3701,8 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         # never embeds in `response` itself (see _stream()'s docstring), so
         # comparing bare `response` would call two DIFFERENT native calls with
         # the same (often empty) preamble "identical" and stop the turn short.
+        # shown_call is EVERY call this pass made, joined - so a pass is a
+        # repeat of the one before it only when the whole batch is the same.
         compare_key = response + shown_call
         repeats = repeats + 1 if compare_key == last_response else 1
         last_response = compare_key
@@ -3407,7 +3724,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
             sync()
             break
 
-        if call is None:
+        if not calls:
             # Nothing parsed. It's already been shown as it arrived; the only
             # question is what it was. If it clearly MEANT to be a tool call -
             # retry_msg says how - don't silently swallow it as the answer:
@@ -3449,64 +3766,127 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         # models 400 on a replayed turn that made a call without it. Only
         # written when there IS some, so nothing changes for the models that
         # don't think aloud (see provider.py's _REASONING_KEY).
-        call_id = "call_" + uuid.uuid4().hex[:8]
+        # Every call this response made, stored as ONE assistant turn in
+        # DeepSeek/OpenAI's own shape: the prose as the assistant's plain
+        # content, the calls as tool_calls entries with generated ids, so each
+        # result below can be tied back to the call it answers by its id (same
+        # as a real "tool" role message would be). A model that asked for three
+        # tools gets three entries here and three "tool" turns after it, which
+        # is exactly the shape the wire specifies - and the reason the whole
+        # batch costs one round trip instead of three.
+        #
+        # raw_call is the exact text the model actually wrote for the calls -
+        # DSML tags, plain JSON, whatever its own syntax was that turn. Kept
+        # verbatim so provider.py's _compat() can replay THIS instead of
+        # reconstructing a synthetic "name(json_args)" text: a model reading
+        # back a fake reconstruction of its own history can't tell "this
+        # worked" from "this didn't", because both collapse to the exact same
+        # shape - which is what was quietly teaching deepseek to keep
+        # repeating its own past mistakes instead of the syntax it actually
+        # used when it got it right. With several calls it is every call's
+        # text, one per line, since that is what the model wrote.
+        #
+        # reasoning_content is stored alongside it when the model produced any
+        # - a thinking model's own working, which is never shown and never
+        # part of the reply. It is kept for one reason: DeepSeek's thinking
+        # models 400 on a replayed turn that made a call without it. Only
+        # written when there IS some, so nothing changes for the models that
+        # don't think aloud (see provider.py's _REASONING_KEY).
+        for one in calls:
+            one["id"] = "call_" + uuid.uuid4().hex[:8]
         made_call = {
             "role": "assistant",
             "content": before,
             "tool_calls": [{
-                "id": call_id,
+                "id": one["id"],
                 "type": "function",
-                "function": {"name": call["tool"], "arguments": json.dumps(call.get("args", {}))},
-            }],
+                "function": {"name": one["tool"],
+                             "arguments": json.dumps(one.get("args", {}))},
+            } for one in calls],
             "raw_call": shown_call,
         }
+        # Each call's own text, kept beside the joined one because the two
+        # answer different questions. raw_call is the whole response as the
+        # model wrote it, which is what a provider with no native tool role
+        # replays (provider._compat) and what the page compares against to
+        # know the history has caught up. raw_calls is one entry per call, in
+        # the same order as tool_calls, which is what a tool ROW needs: a row
+        # showing the joined text shows its neighbour's call as well as its
+        # own, and the safety log - one line per call, keyed on that call's
+        # text - can no longer find the row its verdict belongs to.
+        #
+        # Only when there is more than one, so a single-call turn is stored
+        # exactly as it always was and every transcript already on disk stays
+        # correct without a migration. The page falls back to raw_call.
+        if len(calls) > 1:
+            made_call["raw_calls"] = [one["shown"] for one in calls]
         if reasoning.get("content"):
             made_call["reasoning_content"] = reasoning["content"]
         if spent:
             made_call["timing"] = spent
         turns.append(made_call)
         sync()
-        # The exact call text (prose + the JSON, tail trimmed) so a UI can seal
-        # the bubble it streamed and open the tool's result block straight away.
-        if on_tool_call:
-            on_tool_call(before + shown_call)
-        # What the model SAID on its way to that call, if anything - the running
-        # commentary, without the call itself, which is not something anyone
-        # wants read to them. Fired here, before the tool runs, so a UI reading
-        # it out gets the whole length of the tool call to do it in.
+        # The calls themselves, exactly as history stores them in raw_call - JUST
+        # the calls, not the prose before them. The prose is the reply bubble's,
+        # streamed already; a call is a tool row's, shown as its name + argument
+        # with the whole thing in the drawer. Keeping the two apart here is what
+        # makes the live view and the reloaded view draw a call identically, and
+        # the id is what tells the page which row the result that arrives some
+        # seconds later belongs in - which is the whole reason it exists.
+        for one in calls:
+            if on_tool_call:
+                on_tool_call(one["shown"], one["tool"], one["id"])
+        # What the model SAID on its way to those calls, if anything - the running
+        # commentary, without the calls themselves, which is not something anyone
+        # wants read to them. Fired here, before any tool runs, so a UI reading
+        # it out gets the whole length of the batch to do it in.
         if on_message and before.strip():
             on_message(before.strip(), "call")
 
-        # Safety gate. The turn's SAFETY NUMBER decides how the call is
-        # treated: 10 runs it unvetted, 0 puts it to the human without asking a
-        # model at all, and anything between sends it to the checking model for
-        # a 0-10 rating and compares that against the number.
-        # tool_validation.check() does all of that and answers with one of
-        # three words; the three branches here are that answer.
+        # Safety gate, one call at a time and in the order the model wrote
+        # them. Sequential on purpose even though the calls themselves may not
+        # be: `approve` can be a human being looked at a question, and two of
+        # those racing each other is not a thing to do to somebody.
+        #
+        # The turn's SAFETY NUMBER decides how a call is treated: 10 runs it
+        # unvetted, 0 puts it to the human without asking a model at all, and
+        # anything between sends it to the checking model for a 0-10 rating and
+        # compares that against the number. tool_validation.check() does all of
+        # that and answers with one of three words; the three branches here are
+        # that answer.
         #
         # A denial tells the model to STOP AND WAIT, not to find another way.
+        # It denies THAT call: the others in the batch were judged on their own
+        # and are not retrospectively guilty, and each still gets a result of
+        # its own either way, because an assistant turn holding a tool_call
+        # that nothing answers is a request the strict providers reject
+        # outright (see _no_result_yet).
         #
         # `safety_threshold` and `safety` come from the chat (or a cron job's line
         # in cron.json); both None means nobody said, so the settings page
         # decides. See tool_validation.threshold_for for the full order.
         threshold = tool_validation.threshold_for(safety_threshold, safety, chosen)
-        outcome, reason = tool_validation.check(
-            call, threshold, prompt=safety_prompt, extra=safety_extra)
+        to_run = []
+        for one in calls:
+            outcome, reason = tool_validation.check(
+                one, threshold, prompt=safety_prompt, extra=safety_extra)
 
-        if outcome == tool_validation.SKIP:
-            # Nothing was checked, so say so rather than saying nothing: a tool
-            # result with no safety row used to be indistinguishable from one
-            # whose row simply failed to load, and in a cron job's chat - where
-            # the setting comes from cron.json and can differ per job - "was
-            # this checked?" is exactly the question you open the chat to
-            # answer. It also keeps the log one line per call, which is what
-            # the page pairs rows to results by.
-            skipped = _log_validation(shown_call, True, None, checked=False)
-            if on_safety:
-                on_safety(True, skipped, checked=False)
-        else:
+            if outcome == tool_validation.SKIP:
+                # Nothing was checked, so say so rather than saying nothing: a tool
+                # result with no safety row used to be indistinguishable from one
+                # whose row simply failed to load, and in a cron job's chat - where
+                # the setting comes from cron.json and can differ per job - "was
+                # this checked?" is exactly the question you open the chat to
+                # answer. It also keeps the log one line per call, which is what
+                # the page pairs rows to results by.
+                skipped = _log_validation(one["shown"], True, None, checked=False)
+                if on_safety:
+                    on_safety(True, skipped, checked=False)
+                to_run.append(one)
+                continue
+
             safe = outcome == tool_validation.RUN
-            _log_validation(shown_call, safe, reason)
+            _log_validation(one["shown"], safe, reason)
             if on_safety:
                 on_safety(safe, reason)
             # rstrip because a reason is a sentence from the checking model as
@@ -3514,38 +3894,47 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
             # that reads as a stutter in front of " - run it anyway?".
             if not safe and not approve("[safety] " + reason.rstrip(" .")
                                         + " - run it anyway?"):
-                turns.append({"role": "tool", "tool_call_id": call_id, "content":
-                              "DENIED - the user did not approve this call. Stop "
-                              "working on this task: reply with a brief "
-                              "acknowledgement of the denial, then wait for the "
-                              "user's next instruction. Do not retry the call, "
-                              "work around it another way, or carry on with the "
-                              "task unasked."})
-                sync()
-                if on_tool_result:
-                    on_tool_result("DENIED - you did not approve this call.",
-                                   call["tool"])
+                one["result"] = ("DENIED - the user did not approve this call. Stop "
+                                 "working on this task: reply with a brief "
+                                 "acknowledgement of the denial, then wait for the "
+                                 "user's next instruction. Do not retry the call, "
+                                 "work around it another way, or carry on with the "
+                                 "task unasked.")
+                one["shown_result"] = "DENIED - you did not approve this call."
                 continue
+            to_run.append(one)
 
-        # chat_id goes with the call so a tool that keeps something per
+        # chat_id goes with each call so a tool that keeps something per
         # conversation - the terminal's open shell - knows whose it is. It
         # comes from the caller, never from the model's own args. The
         # workspace rides along the same way and for the same reason: which
         # machine and which root a file tool works in is the chat's business,
         # not something the model gets to put in its arguments.
-        ran = timing.now()
-        result = tool_processor.process(
-            call, chat_id, workspace_id=live_workspace(chat_id, workspace_id))
-        # How long the tool itself took, which is a different question from how
-        # long the model took and often the more interesting one: a turn that
-        # felt slow is as likely to have been a 40-second web fetch as a slow
-        # model, and until now nothing on the screen could tell you which.
-        took = {"ms": timing.ms(ran)}
-        turns.append({"role": "tool", "tool_call_id": call_id,
-                      "content": result, "timing": took})
-        sync()
-        if on_tool_result:
-            on_tool_result(result, call["tool"], took)
+        _run_calls(to_run, chat_id, live_workspace(chat_id, workspace_id),
+                   turnctx.current())
+
+        # One "tool" turn per call, in the order the model asked for them -
+        # never the order they happened to finish in. A batch that ran
+        # concurrently comes back scrambled, and a transcript that reordered
+        # itself run by run would be unreadable and would replay differently
+        # every time. Results are already on the calls by now, so this is just
+        # writing them down.
+        for one in calls:
+            took = one.get("took")
+            result = one.get("result", "")
+            entry = {"role": "tool", "tool_call_id": one["id"], "content": result}
+            if took:
+                # How long the tool itself took, which is a different question
+                # from how long the model took and often the more interesting
+                # one: a turn that felt slow is as likely to have been a
+                # 40-second web fetch as a slow model, and until now nothing on
+                # the screen could tell you which. A denied call has no timing
+                # because nothing ran.
+                entry["timing"] = took
+            turns.append(entry)
+            sync()
+            if on_tool_result:
+                on_tool_result(one.get("shown_result", result), one["tool"], took, one["id"])
 
     return json.dumps(turns, indent=2)
 
@@ -3555,7 +3944,7 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
          safety=None, safety_prompt=None, inject=None, safety_threshold=None,
          safety_extra=None, on_begin=None, on_message=None,
          on_reasoning=None, on_timing=None, on_request=None, on_thought=None,
-         on_reclassify=None):
+         on_reclassify=None, on_call_delta=None):
     """One turn of agent `c` through run(), mirrored to its file as it goes.
     Serialised against other turns of the same agent by its turn slot; turns of
     OTHER agents run in parallel. on_text/approve pass through to run(), so a
@@ -3660,6 +4049,7 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
                         on_request=turnctx.guard(ctx, on_request),
                         on_thought=turnctx.guard(ctx, on_thought),
                         on_reclassify=turnctx.guard(ctx, on_reclassify),
+                        on_call_delta=turnctx.guard(ctx, on_call_delta),
                         pinned=c.pinned, safety=safe_on, safety_prompt=safe_prompt,
                         safety_threshold=safe_level, safety_extra=safe_extra,
                         inject=inject, workspace_id=c.workspace)

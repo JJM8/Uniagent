@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import provider
+import tool_results
 import turnctx
 import workspace
 
@@ -192,6 +193,10 @@ def load_tools():
                     # tools_schema()'s native-calling list, same as it always
                     # was invisible to anything but the prose prompt.
                     "schema": getattr(m, "SCHEMA", None),
+                    # Also optional, and declared the same way - in the tool's
+                    # own file, not in a config somewhere else. See
+                    # parallel_safe() for what it means and who reads it.
+                    "parallel": bool(getattr(m, "PARALLEL", True)),
                 })
             except Exception as e:
                 # A broken tool gets skipped, not crashed on. Otherwise one bad
@@ -224,6 +229,35 @@ def load_tools():
     # Published only now that both lists are complete.
     TOOLS = tools
     BROKEN = broken
+
+
+def parallel_safe(name):
+    """Whether that tool may run at the same time as other tools.
+
+    A model can ask for several tools in one response, and main._batches uses
+    this to decide which of them go off together and which get the floor to
+    themselves. True is the default and the common case: a tool that reads a
+    file, searches, or fetches a page has nothing to say to the one running
+    beside it, and running them together is most of what makes a batch faster
+    than the same calls made one at a time.
+
+    A tool opts out by declaring `PARALLEL = False` at the top of its own
+    file - the same way it declares NAME and SCHEMA, and for the same reason:
+    a fact about a tool belongs in the tool. Two kinds of tool should:
+
+      - one holding something there is only one of. The terminal keeps a
+        single shell per chat, so two commands at once would interleave into
+        each other's output and neither would be read correctly.
+      - one whose ORDER matters against the calls around it. Two edits to the
+        same file, or an edit and the read that checks it, mean something
+        different depending on which lands first, and a tool that runs alone
+        keeps the order the model actually asked for.
+
+    An unknown tool is treated as unsafe. It is about to come back "there is
+    no tool called ..." from _run anyway, and guessing generously about
+    something we cannot see is the wrong way round."""
+    t = _find(name)
+    return bool(t and t.get("parallel", True))
 
 
 def source_meta(text):
@@ -478,11 +512,42 @@ def _tools_text():
     # here, once, for every model, because it has to sit next to the tool
     # instructions to be read at the moment it matters.
     return text + (
+        # Said because the capability is worth nothing unsaid. Several models
+        # will make one call and wait, turn after turn, purely because nothing
+        # told them the alternative was open - and every one of those waits is
+        # a whole round trip through the prompt. The independence caveat is
+        # the load-bearing half: a batch's calls are decided together, before
+        # any of their results exist, so anything whose arguments depend on
+        # what another call returns has to wait for the next turn.
+        "CALL SEVERAL TOOLS AT ONCE when the next step needs more than one and "
+        "they do not depend on each other - three files to read, a search and "
+        "a fetch. They are sent together and run together, so a batch costs "
+        "one round trip where the same calls made one at a time cost one "
+        "each. Only what you can decide RIGHT NOW belongs in a batch: if a "
+        "call's arguments depend on what another call returns, it waits for "
+        "the result. Never guess at an argument to fit more into one batch.\n\n"
+
         "NEVER end a reply with only a promise of action - if your reply says "
         "you WILL look at, run, read or check something, it must contain the "
         "tool call that does it. Act first, then report what you found. When "
         "a request is reasonably clear, use the tools rather than asking what "
-        "to do; ask only when genuinely stuck or the action is risky.\n")
+        "to do; ask only when genuinely stuck or the action is risky.\n\n"
+
+        # Said explicitly because NOT saying it cost a whole turn. A model
+        # that needs to read a diagram - a pinout, a chart, a screenshot -
+        # will keep inventing ways to look at it (open it in the browser,
+        # convert it, "let me view the image"), fail at every one, and try the
+        # next, because nothing ever told it the capability is absent. That is
+        # the loop main._looping now cuts; this is what stops it starting.
+        "YOU CANNOT SEE IMAGES. There is no tool that shows you a picture, and "
+        "there is no way to make one - opening a file in a browser, rendering "
+        "a PDF page, converting a format: none of them let you look at it. If "
+        "something you need is only in an image, do not keep trying: get at it "
+        "another way (extract the text, read the source data, find the same "
+        "figure written down), or say plainly that you cannot see it and ask "
+        "the user what it shows. You CAN write an image into a reply for the "
+        "USER to look at - ![name](/path/to/file.png) - and you should when a "
+        "picture is the answer. That shows it to them, not to you.\n")
 
 
 def prompt_text():
@@ -535,12 +600,17 @@ def _gemini_schema(node):
     Two things happen. Any keyword outside _GEMINI_KEYS is dropped, and a
     oneOf/anyOf union is COLLAPSED onto its first branch rather than dropped -
     dropping it would leave a property with a description and no type at all,
-    which Gemini rejects in its own right. Our unions are all of the shape
-    "a string, or a list of strings" (email_send's to/cc/bcc, email_manage's
-    uid), so the first branch is the plain string - the form the tool handles
-    anyway, and the narrower of the two. The model loses the option of passing
-    a list to those arguments on Gemini specifically; every other provider
-    still gets the real union, because only this function rewrites anything."""
+    which Gemini rejects in its own right. Every union we write puts the
+    ordinary form FIRST and the escape hatch second, so collapsing onto branch
+    one keeps the case that matters: "a string, or a list of strings"
+    (email_send's to/cc/bcc, email's uid) collapses to the single string, and
+    "a number, or the empty string that clears it" (cron's temperature and
+    safety) collapses to the number. On Gemini the model loses the second form
+    of those arguments - it cannot pass a list of uids or clear a cron job's
+    temperature back to the default - and their descriptions still mention it,
+    which is the honest cost of a wire that will not take a union at all. Every
+    other provider gets the real thing, because only this function rewrites
+    anything."""
     if isinstance(node, list):
         return [_gemini_schema(n) for n in node]
     if not isinstance(node, dict):
@@ -718,6 +788,20 @@ def _find(name):
 
 
 def process(call, chat_id=None, workspace_id=None):
+    """Run the tool the call asks for and return its output as text, clipped
+    to a size a conversation can afford to carry.
+
+    Every result in the app comes back through here - run(), the Claude
+    session, cron - which is the whole reason the size limit lives at this
+    line and not at the two places that append the result to a history. A
+    third place to append one gets written eventually; a third place to
+    forget the limit should not exist. See tool_results.clamp() for what
+    "clipped" means and where the full copy is kept."""
+    return tool_results.clamp(_run(call, chat_id, workspace_id),
+                              call.get("tool"), chat_id)
+
+
+def _run(call, chat_id=None, workspace_id=None):
     """Run the tool the call asks for and return its output as text.
 
     chat_id is the conversation the call came from, and is handed to any tool

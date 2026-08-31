@@ -700,18 +700,25 @@ class Stream:
         self.spent = None
         return [MUTE + "  " + line + RESET] if line.strip() else []
 
-    def tool_call(self, shown):
+    def tool_call(self, shown, name=None, id=None):
+        # `name` and `id` are which tool this is and the id its result will
+        # come back under. Accepted and unused, exactly as tool_result below
+        # accepts `name`: the terminal prints a call and then its result
+        # directly underneath, in the order they happen, so it has nothing to
+        # pair up. They are taken so a caller that knows them can always say
+        # so - the web UI needs both to draw a call before its result exists.
         raw = (self.held + self.pending).strip() or shown
         self.held, self.pending, self.holding = "", "", False
         self.md = md.Renderer()  # a fence cannot span a tool call
         self.wrote = True
         self.console.update(commit=self._took() + [""] + _call_block(raw), tail=[])
 
-    def tool_result(self, result, name=None, spent=None):
-        # `name` is which call this answered. Accepted and unused: the terminal
-        # prints results in the order they happen directly under the call that
-        # made them, so there is nothing here for it to disambiguate - it is
-        # taken so that a caller which knows the name can always say so.
+    def tool_result(self, result, name=None, spent=None, id=None):
+        # `name` is which call this answered and `id` is that call's id. Both
+        # accepted and unused: the terminal prints results in the order they
+        # happen directly under the call that made them, so there is nothing
+        # here for it to disambiguate - they are taken so that a caller which
+        # knows them can always say so.
         #
         # `spent` is how long the call took ({"ms": n}), which is worth a line
         # for the same reason it is worth a label in the web UI: a turn that

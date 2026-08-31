@@ -1,5 +1,10 @@
-# Secrets - never commit these
+# Secrets - never commit these. Every .env variant: a backup like
+# .env.bak-before-groq holds the same live API keys the real one does, and
+# GitHub's push protection caught exactly that file mid-push. .env.example is
+# the documented template and is deliberately kept.
 .env
+.env.*
+!.env.example
 
 # The https listener's self-signed certificate and its private key - made on
 # this machine, for this machine's own addresses (see server.py). No other
@@ -11,6 +16,20 @@ __pycache__/
 
 # Python virtualenv - created by install.ps1 on Windows (and handy on Linux)
 .venv/
+
+# Python virtualenvs - one per machine, and .venv-stt holds the CUDA/cuDNN
+# stack for speech-to-text: single files of 700MB+. GitHub refuses anything
+# over 100MB, so committing these did not just bloat the repo, it made every
+# push fail - which is how this repo sat 64 commits behind GitHub for four
+# days while autopush reported success. Any .venv* belongs to its machine.
+.venv*/
+
+# Syncthing's own working files. A sync-conflict copy is an artifact of two
+# machines writing at once, not a file anyone wrote, and .fuse_hidden/.tmp
+# files are half-copied data mid-transfer.
+*.sync-conflict-*
+.syncthing.*
+*.fuse_hidden*
 
 # The 'uniagentcli' shim copied here by install.ps1 - regenerated on install
 bin/

@@ -352,16 +352,20 @@ def measure(name, model, segments):
     """Total tokens for a list of text segments, counted one at a time so each
     is cached on its own (see the module docstring on why).
 
-    Returns {"tokens", "exact", "settled"}. `exact` is True only when EVERY
-    segment was counted by this model's own tokenizer - one segment falling
-    back to chars/4 (no key, tokenizer down, borrowed encoding) makes the
-    whole total approximate, because it is. `settled` is False while a
-    background count is still in flight, which is the caller's cue that this
-    number will firm up shortly on its own."""
-    total, all_exact, settled = 0, True, True
+    Returns {"tokens", "each", "exact", "settled"}. `each` is the per-segment
+    counts in the order they were given - what cache_ledger needs to say how
+    much of a prompt falls after the point two prompts stopped matching, and
+    free here because every segment was counted separately anyway. `exact` is
+    True only when EVERY segment was counted by this model's own tokenizer -
+    one segment falling back to chars/4 (no key, tokenizer down, borrowed
+    encoding) makes the whole total approximate, because it is. `settled` is
+    False while a background count is still in flight, which is the caller's
+    cue that this number will firm up shortly on its own."""
+    each, all_exact, settled = [], True, True
     for text in segments:
         n, state = count(name, model, text)
-        total += n
+        each.append(n)
         all_exact = all_exact and state == "exact"
         settled = settled and state != "pending"
-    return {"tokens": total, "exact": all_exact, "settled": settled}
+    return {"tokens": sum(each), "each": each,
+            "exact": all_exact, "settled": settled}

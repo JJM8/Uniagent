@@ -47,11 +47,11 @@ def main():
     def on_text(piece):
         print(piece, end="", flush=True)
 
-    def on_tool_call(shown):
+    def on_tool_call(shown, name=None, id=None):
         gated.append(shown)
         print("\n  [tool call] " + shown[:120])
 
-    def on_tool_result(text, name=None, spent=None):
+    def on_tool_result(text, name=None, spent=None, id=None):
         print("  [tool result] " + text.strip()[:120].replace("\n", " | "))
 
     def on_safety(safe, reason, checked=True):

@@ -63,6 +63,7 @@ HELP = """commands:
 /cronsafety <job> 0-10 - the highest danger rating that job runs unasked
 /cronsafety <job> default - unset it, follow the cron default again
 /continue - pick a stopped or failed turn back up where it left off
+/cache - whether the next request will hit the provider's prompt cache
 /stop - cut this chat's running turn short
 /stop <subagent> - stop just that subagent, leaving this chat's turn alone
 /restart - restart the web server on new code (not available in the terminal)
@@ -271,6 +272,57 @@ def _continue(arg, chat):
             "now. Carry on with what you were doing.")
 
 
+def _cache(arg, chat):
+    """What this chat's NEXT request will be charged full price for.
+
+    Prompt caching is a byte-for-byte match on the front of the prompt, so the
+    only question that matters is where this request and the last one stop
+    being the same - everything from there on is read fresh, at full price.
+    This answers that before the tokens are spent, which is the whole point:
+    the three causes worth catching (a tool written mid-conversation, an
+    edited context file, a rewritten turn) are all cheap to fix while the
+    request is still hypothetical and expensive to notice on a bill.
+
+    Says nothing reassuring about a provider with no cache to hit. An endpoint
+    that does not cache is told about as such rather than being given a
+    plausible number."""
+    prov, mod, _ = chat.models()
+    spec = provider.cache_spec(prov, mod)
+    if spec.get("mode") == "none":
+        return (prov + " / " + mod + " has no prompt cache this can measure, "
+                "so every request is charged in full. Nothing is wrong - it is "
+                "simply not something this endpoint does (or admits to).")
+
+    look = main.cache_outlook(chat, prov, mod)
+    if not look:
+        return "could not work out this chat's cache outlook."
+
+    lines = [prov + " / " + mod + " - "
+             + ("caching is asked for explicitly on this model"
+                if spec.get("marks") else "this provider caches by itself"), ""]
+    lines.append("  next request  " + _num(look["total"]).rjust(10) + "  tokens")
+    if look["reason"]:
+        lines.append("  uncached      " + _num(look["uncached"]).rjust(10)
+                     + "  read fresh, at full price")
+        lines += ["", "  why: " + look["reason"]]
+    else:
+        lines.append("  should hit    "
+                     + _num(look["total"] - look["uncached"]).rjust(10)
+                     + "  matched the last request's prefix")
+
+    verified = look.get("verified")
+    if verified is not None:
+        lines += ["", "  last request actually read " + _num(verified)
+                  + " from the cache."]
+        if verified == 0 and not look["reason"]:
+            lines.append("  That is a miss where a hit was expected - something in "
+                         "the prompt is changing between requests.")
+    else:
+        lines += ["", "  the provider has not reported a cache figure for this "
+                  "chat yet."]
+    return "\n".join(lines)
+
+
 def _stop(arg, chat):
     """End a turn. Bare, it ends THIS chat's own turn; given a subagent name, it
     stops just that subagent and leaves the chat alone. The two are deliberately
@@ -394,6 +446,8 @@ def _model(arg, chat):
     # and remember it for every list/dropdown.
     chat.pin(chosen_provider, chosen_model)
     provider.remember_model(chosen_provider, chosen_model)
+    # Picked, not merely run - so it is at the top of the picker next time.
+    provider.note_pick(chosen_provider, chosen_model)
     return ("tested and switched: this chat is now on " + chosen_provider
             + " / " + chosen_model + ".")
 
@@ -832,6 +886,7 @@ COMMANDS = {
     "name": _name,
     "temperature": _temperature,
     "usage": _usage,
+    "cache": _cache,
     "workspace": _workspace,
     "approve": _approve,
     "cronsafety": _cronsafety,

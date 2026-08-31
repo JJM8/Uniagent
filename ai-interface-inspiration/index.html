@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Interface — Book Spread</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --bg: #0b0d12;
+    --surface: #12151b;
+    --surface2: #191d26;
+    --border: #1e2430;
+    --text: #e8edf5;
+    --text-dim: #7b84a0;
+    --accent: #6c8cff;
+    --accent-glow: rgba(108, 140, 255, 0.15);
+    --green: #34d399;
+    --green-glow: rgba(52, 211, 153, 0.12);
+    --amber: #fbbf24;
+    --amber-glow: rgba(251, 191, 36, 0.12);
+    --rose: #f472b6;
+    --purple: #a78bfa;
+    --radius: 12px;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  /* Background ambient glow */
+  body::before {
+    content: '';
+    position: fixed;
+    top: -30%;
+    left: -10%;
+    width: 60%;
+    height: 80%;
+    background: radial-gradient(ellipse, rgba(108, 140, 255, 0.06), transparent 70%);
+    pointer-events: none;
+  }
+  body::after {
+    content: '';
+    position: fixed;
+    bottom: -20%;
+    right: -10%;
+    width: 50%;
+    height: 60%;
+    background: radial-gradient(ellipse, rgba(168, 85, 247, 0.04), transparent 70%);
+    pointer-events: none;
+  }
+
+  .book {
+    display: flex;
+    gap: 2px;
+    width: 100%;
+    max-width: 1440px;
+    height: calc(100vh - 48px);
+    background: var(--surface);
+    border-radius: 16px;
+    box-shadow: 0 0 0 1px var(--border), 0 20px 60px rgba(0,0,0,0.5);
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Spine */
+  .book::before {
+    content: '';
+    position: absolute;
+    left: 33.33%;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, transparent, var(--border), transparent);
+    box-shadow: 0 0 8px rgba(108, 140, 255, 0.05);
+  }
+  .book::after {
+    content: '';
+    position: absolute;
+    left: 66.66%;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, transparent, var(--border), transparent);
+    box-shadow: 0 0 8px rgba(108, 140, 255, 0.05);
+  }
+
+  .page {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 28px 24px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .page:nth-child(1) {
+    background: linear-gradient(180deg, rgba(108, 140, 255, 0.02) 0%, transparent 60%);
+  }
+  .page:nth-child(2) {
+    background: linear-gradient(180deg, rgba(52, 211, 153, 0.015) 0%, transparent 60%);
+  }
+  .page:nth-child(3) {
+    background: linear-gradient(180deg, rgba(168, 85, 247, 0.02) 0%, transparent 60%);
+  }
+
+  /* Page number header */
+  .page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    flex-shrink: 0;
+  }
+
+  .page-number {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-dim);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    opacity: 0.6;
+  }
+
+  .page-tag {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 999px;
+    background: var(--surface2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+
+  .page-tag.accent { background: var(--accent-glow); color: var(--accent); border-color: rgba(108, 140, 255, 0.2); }
+  .page-tag.green { background: var(--green-glow); color: var(--green); border-color: rgba(52, 211, 153, 0.2); }
+  .page-tag.purple { background: rgba(168, 85, 247, 0.1); color: var(--purple); border-color: rgba(168, 85, 247, 0.2); }
+
+  /* ===== PAGE 1: AGENT DASHBOARD / STATE ===== */
+
+  .agent-status {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px;
+    background: var(--surface2);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    margin-bottom: 20px;
+    flex-shrink: 0;
+  }
+
+  .agent-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+
+  .agent-info h3 {
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .agent-info p {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .state-indicator {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--green);
+  }
+
+  .state-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s ease-in-out infinite;
+    box-shadow: 0 0 8px var(--green-glow);
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+  }
+
+  .thinking-steps {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
+  .thinking-steps::-webkit-scrollbar { width: 3px; }
+  .thinking-steps::-webkit-scrollbar-track { background: transparent; }
+  .thinking-steps::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+  .step {
+    display: flex;
+    gap: 12px;
+    padding: 12px 14px;
+    background: var(--surface2);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .step.active {
+    border-color: rgba(108, 140, 255, 0.3);
+    background: linear-gradient(135deg, rgba(108, 140, 255, 0.06), transparent);
+  }
+
+  .step.done {
+    border-color: rgba(52, 211, 153, 0.2);
+  }
+
+  .step-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+  }
+
+  .step.done .step-icon { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+  .step.active .step-icon { background: var(--accent-glow); color: var(--accent); }
+  .step.pending .step-icon { background: var(--surface); color: var(--text-dim); border: 1px solid var(--border); }
+
+  .step-content {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .step-content h4 {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 2px;
+  }
+
+  .step-content p {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.4;
+  }
+
+  .step-time {
+    font-size: 10px;
+    color: var(--text-dim);
+    opacity: 0.6;
+    flex-shrink: 0;
+    align-self: flex-start;
+  }
+
+  .step-status-bar {
+    margin-top: 6px;
+    height: 2px;
+    background: var(--border);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+
+  .step-status-bar .fill {
+    height: 100%;
+    border-radius: 99px;
+    transition: width 0.3s;
+  }
+
+  .step.active .step-status-bar .fill {
+    width: 65%;
+    background: linear-gradient(90deg, var(--accent), var(--purple));
+    animation: progress 2s ease-in-out infinite;
+  }
+
+  @keyframes progress {
+    0% { width: 20%; }
+    50% { width: 70%; }
+    100% { width: 30%; }
+  }
+
+  .step.done .step-status-bar .fill {
+    width: 100%;
+    background: var(--green);
+  }
+
+  .step.pending .step-status-bar .fill {
+    width: 0%;
+  }
+
+  /* ===== PAGE 2: MAIN CONVERSATION ===== */
+
+  .conversation {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
+  .conversation::-webkit-scrollbar { width: 3px; }
+  .conversation::-webkit-scrollbar-track { background: transparent; }
+  .conversation::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+  .message {
+    display: flex;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .message.user {
+    flex-direction: row-reverse;
+  }
+
+  .message-avatar {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }
+
+  .message.user .message-avatar {
+    background: linear-gradient(135deg, var(--amber), #f59e0b);
+  }
+
+  .message.agent .message-avatar {
+    background: linear-gradient(135deg, var(--accent), var(--purple));
+  }
+
+  .message-bubble {
+    max-width: 85%;
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+
+  .message.user .message-bubble {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  .message.agent .message-bubble {
+    background: linear-gradient(135deg, rgba(108, 140, 255, 0.08), rgba(168, 85, 247, 0.04));
+    border: 1px solid rgba(108, 140, 255, 0.15);
+  }
+
+  .message-bubble .label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+    opacity: 0.5;
+  }
+
+  .message-bubble strong {
+    color: var(--accent);
+  }
+
+  .message-bubble .inline-chip {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 7px;
+    border-radius: 4px;
+    background: rgba(108, 140, 255, 0.1);
+    color: var(--accent);
+    font-weight: 500;
+    margin: 0 2px;
+    cursor: default;
+  }
+
+  /* Response card */
+  .response-card {
+    padding: 14px;
+    background: var(--surface2);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    margin-top: 4px;
+    flex-shrink: 0;
+  }
+
+  .response-card .card-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .response-card table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+  }
+
+  .response-card td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .response-card td:first-child {
+    color: var(--text-dim);
+    width: 35%;
+  }
+
+  .response-card td:last-child {
+    font-weight: 500;
+  }
+
+  .response-card tr:last-child td {
+    border-bottom: none;
+  }
+
+  .response-card .badge {
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+
+  .badge.green { background: var(--green-glow); color: var(--green); }
+  .badge.amber { background: var(--amber-glow); color: var(--amber); }
+
+  /* ===== PAGE 3: SOURCES / CONTEXT ===== */
+
+  .sources-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+
+  .sources-panel::-webkit-scrollbar { width: 3px; }
+  .sources-panel::-webkit-scrollbar-track { background: transparent; }
+  .sources-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+  .source-card {
+    padding: 12px 14px;
+    background: var(--surface2);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    transition: border-color 0.2s;
+  }
+
+  .source-card:hover {
+    border-color: rgba(108, 140, 255, 0.2);
+  }
+
+  .source-num {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    opacity: 0.5;
+    min-width: 20px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  .source-body h4 {
+    font-size: 12px;
+    font-weight: 500;
+    margin-bottom: 2px;
+  }
+
+  .source-body .domain {
+    font-size: 10px;
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .source-body .snippet {
+    font-size: 11px;
+    color: var(--text-dim);
+    line-height: 1.4;
+    margin-top: 4px;
+  }
+
+  .source-body .relevance {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    margin-top: 6px;
+    color: var(--text-dim);
+  }
+
+  .relevance .bar {
+    width: 50px;
+    height: 3px;
+    background: var(--border);
+    border-radius: 99px;
+    overflow: hidden;
+  }
+
+  .relevance .bar .fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--green), var(--accent));
+    border-radius: 99px;
+  }
+
+  /* Context memory chips */
+  .context-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 12px;
+    flex-shrink: 0;
+  }
+
+  .context-chip {
+    font-size: 10px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .context-chip .dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+  }
+
+  .context-chip .dot.blue { background: var(--accent); }
+  .context-chip .dot.green { background: var(--green); }
+  .context-chip .dot.amber { background: var(--amber); }
+
+  /* Mini timeline */
+  .timeline {
+    flex-shrink: 0;
+  }
+
+  .timeline-item {
+    display: flex;
+    gap: 10px;
+    padding: 8px 0;
+    position: relative;
+  }
+
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: 7px;
+    top: 28px;
+    bottom: -8px;
+    width: 1px;
+    background: var(--border);
+  }
+
+  .timeline-item:last-child::before { display: none; }
+
+  .timeline-dot {
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    border: 2px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 7px;
+  }
+
+  .timeline-dot.done { border-color: var(--green); background: var(--green-glow); color: var(--green); }
+  .timeline-dot.current { border-color: var(--accent); background: var(--accent-glow); color: var(--accent); }
+
+  .timeline-content h4 {
+    font-size: 11.5px;
+    font-weight: 500;
+  }
+
+  .timeline-content p {
+    font-size: 10.5px;
+    color: var(--text-dim);
+  }
+
+  /* Page footer */
+  .page-footer {
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+    font-size: 10px;
+    color: var(--text-dim);
+    opacity: 0.5;
+    display: flex;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  /* ===== RESPONSIVE ===== */
+  @media (max-width: 1024px) {
+    .book { gap: 0; }
+    .page { padding: 20px 16px; }
+    .page:nth-child(3) { display: none; }
+    .book::before, .book::after { display: none; }
+  }
+
+  @media (max-width: 700px) {
+    body { padding: 0; }
+    .book { height: 100vh; border-radius: 0; max-width: 100%; }
+    .page:nth-child(2) { display: none; }
+  }
+
+  /* Input bar mock at bottom of page 2 */
+  .input-bar {
+    flex-shrink: 0;
+    margin-top: 14px;
+    padding: 10px 14px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .input-bar .placeholder {
+    flex: 1;
+    font-size: 12px;
+    color: var(--text-dim);
+    opacity: 0.5;
+  }
+
+  .input-bar .tools {
+    display: flex;
+    gap: 6px;
+  }
+
+  .input-bar .tool-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    cursor: default;
+    color: var(--text-dim);
+  }
+
+  .input-bar .send-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: var(--accent);
+    border: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    cursor: default;
+    color: white;
+    box-shadow: 0 0 20px var(--accent-glow);
+  }
+</style>
+</head>
+<body>
+
+<div class="book">
+
+  <!-- PAGE 1: AGENT STATUS / THINKING -->
+  <div class="page">
+    <div class="page-header">
+      <span class="page-number">Page 1/3 · Agent</span>
+      <span class="page-tag accent">● Active</span>
+    </div>
+
+    <div class="agent-status">
+      <div class="agent-avatar">🤖</div>
+      <div class="agent-info">
+        <h3>DeepResearch Agent</h3>
+        <p>o3 · research mode · 4 tools</p>
+      </div>
+      <div class="state-indicator">
+        <span class="state-dot"></span>
+        Thinking
+      </div>
+    </div>
+
+    <div class="thinking-steps">
+      <div class="step done">
+        <div class="step-icon">✓</div>
+        <div class="step-content">
+          <h4>Analysed your query</h4>
+          <p>"Compare Q4 revenue across all three divisions"</p>
+          <div class="step-status-bar"><div class="fill"></div></div>
+        </div>
+        <span class="step-time">0.4s</span>
+      </div>
+
+      <div class="step done">
+        <div class="step-icon">✓</div>
+        <div class="step-content">
+          <h4>Searched internal databases</h4>
+          <p>Querying finance · sales · operations</p>
+          <div class="step-status-bar"><div class="fill"></div></div>
+        </div>
+        <span class="step-time">1.2s</span>
+      </div>
+
+      <div class="step done">
+        <div class="step-icon">✓</div>
+        <div class="step-content">
+          <h4>Retrieved 47 source documents</h4>
+          <p>Revenue reports, forecasts, board summaries</p>
+          <div class="step-status-bar"><div class="fill"></div></div>
+        </div>
+        <span class="step-time">2.8s</span>
+      </div>
+
+      <div class="step active">
+        <div class="step-icon">⟳</div>
+        <div class="step-content">
+          <h4>Synthesising cross-division report</h4>
+          <p>Building comparison tables · cross-referencing sources</p>
+          <div class="step-status-bar"><div class="fill"></div></div>
+        </div>
+        <span class="step-time">—</span>
+      </div>
+
+      <div class="step pending">
+        <div class="step-icon">···</div>
+        <div class="step-content">
+          <h4>Generating visual summary</h4>
+          <p>Charts · key takeaways · confidence ratings</p>
+          <div class="step-status-bar"><div class="fill"></div></div>
+        </div>
+        <span class="step-time">—</span>
+      </div>
+    </div>
+
+    <div class="page-footer">
+      <span>4 tools · 47 sources</span>
+      <span>~2.4s remaining</span>
+    </div>
+  </div>
+
+  <!-- PAGE 2: MAIN CONVERSATION / OUTPUT -->
+  <div class="page">
+    <div class="page-header">
+      <span class="page-number">Page 2/3 · Conversation</span>
+      <span class="page-tag green">● Streaming</span>
+    </div>
+
+    <div class="conversation">
+      <div class="message user">
+        <div class="message-avatar">🧑</div>
+        <div class="message-bubble">
+          <div class="label">You asked</div>
+          Compare Q4 revenue across all three divisions — include YoY change and flag anything that needs attention.
+        </div>
+      </div>
+
+      <div class="message agent">
+        <div class="message-avatar">🤖</div>
+        <div class="message-bubble">
+          <div class="label">Agent is responding</div>
+          Here's the <strong>Q4 Revenue Comparison</strong> across all three divisions.
+        </div>
+      </div>
+
+      <div class="response-card">
+        <div class="card-title">📊 Q4 Revenue Overview</div>
+        <table>
+          <tr><td>Division</td><td>Q4 Revenue</td><td>YoY Change</td><td>Status</td></tr>
+          <tr><td style="color: var(--text-dim);">Enterprise SaaS</td><td>$4.2M</td><td style="color: var(--green);">+18.3%</td><td><span class="badge green">On target</span></td></tr>
+          <tr><td style="color: var(--text-dim);">Consumer Apps</td><td>$2.8M</td><td style="color: var(--rose);">−2.1%</td><td><span class="badge amber">Needs review</span></td></tr>
+          <tr><td style="color: var(--text-dim);">Platform API</td><td>$3.6M</td><td style="color: var(--green);">+42.7%</td><td><span class="badge green">Exceeding</span></td></tr>
+        </table>
+        <div style="margin-top: 10px; font-size: 11px; color: var(--text-dim);">
+          ⚠️ <strong style="color: var(--amber);">Consumer Apps</strong> is the only division showing decline — attributed to seasonality and one-off churn. Recommended: review retention strategy.
+        </div>
+      </div>
+
+      <div class="message agent">
+        <div class="message-avatar">🤖</div>
+        <div class="message-bubble">
+          Supporting detail from <span class="inline-chip">🔗 finance/q4_report.pdf</span> and <span class="inline-chip">🔗 sales/board_summary</span> — including <span class="inline-chip">+27 sources</span>.
+        </div>
+      </div>
+    </div>
+
+    <div class="input-bar">
+      <span class="placeholder">Ask a follow-up…</span>
+      <div class="tools">
+        <span class="tool-btn">🔗</span>
+        <span class="tool-btn">📎</span>
+        <span class="tool-btn">🎤</span>
+      </div>
+      <span class="send-btn">→</span>
+    </div>
+
+    <div class="page-footer">
+      <span>Tokens: 1,432</span>
+      <span>Depth: 4 layers</span>
+    </div>
+  </div>
+
+  <!-- PAGE 3: SOURCES / CONTEXT / EVIDENCE -->
+  <div class="page">
+    <div class="page-header">
+      <span class="page-number">Page 3/3 · Sources</span>
+      <span class="page-tag purple">● 47 sources</span>
+    </div>
+
+    <div style="flex-shrink: 0; margin-bottom: 12px;">
+      <div class="context-chips">
+        <span class="context-chip"><span class="dot blue"></span> memory: Q3 context loaded</span>
+        <span class="context-chip"><span class="dot green"></span> finance database</span>
+        <span class="context-chip"><span class="dot amber"></span> board docs (restricted)</span>
+      </div>
+    </div>
+
+    <div class="sources-panel">
+      <div class="source-card">
+        <span class="source-num">01</span>
+        <div class="source-body">
+          <h4>Q4 Enterprise SaaS Financial Report</h4>
+          <span class="domain">finance.internal/reports/q4-enterprise</span>
+          <div class="snippet">"Enterprise SaaS revenue reached $4.2M, driven by new mid-market expansion and upsells to existing accounts…"</div>
+          <div class="relevance">
+            Relevance <div class="bar"><div class="fill" style="width: 95%;"></div></div> 95%
+          </div>
+        </div>
+      </div>
+
+      <div class="source-card">
+        <span class="source-num">02</span>
+        <div class="source-body">
+          <h4>Consumer Division — Q4 Performance Review</h4>
+          <span class="domain">sales.internal/reviews/consumer-q4</span>
+          <div class="snippet">"Consumer revenue declined 2.1% YoY, primarily due to the loss of two tier-1 accounts in October…"</div>
+          <div class="relevance">
+            Relevance <div class="bar"><div class="fill" style="width: 88%;"></div></div> 88%
+          </div>
+        </div>
+      </div>
+
+      <div class="source-card">
+        <span class="source-num">03</span>
+        <div class="source-body">
+          <h4>Platform API — Quarterly Growth Summary</h4>
+          <span class="domain">ops.internal/api/growth/q4</span>
+          <div class="snippet">"Platform API continues its growth trajectory at +42.7% YoY, now the fastest-growing division for the third consecutive quarter…"</div>
+          <div class="relevance">
+            Relevance <div class="bar"><div class="fill" style="width: 91%;"></div></div> 91%
+          </div>
+        </div>
+      </div>
+
+      <div class="source-card">
+        <span class="source-num">04</span>
+        <div class="source-body">
+          <h4>Board Summary — End of Year 2025</h4>
+          <span class="domain">board.internal/summaries/2025/12</span>
+          <div class="snippet">"The board noted the Platform API division's exceptional performance and flagged Consumer Apps retention as a key area for H1 strategy…"</div>
+          <div class="relevance">
+            Relevance <div class="bar"><div class="fill" style="width: 76%;"></div></div> 76%
+          </div>
+        </div>
+      </div>
+
+      <!-- Timeline at bottom -->
+      <div class="timeline" style="margin-top: 8px;">
+        <div class="timeline-item">
+          <div class="timeline-dot done">✓</div>
+          <div class="timeline-content">
+            <h4>Query parsed &amp; planned</h4>
+            <p>3-division comparison requested</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-dot done">✓</div>
+          <div class="timeline-content">
+            <h4>47 documents retrieved</h4>
+            <p>Finance, Sales, Operations, Board</p>
+          </div>
+        </div>
+        <div class="timeline-item">
+          <div class="timeline-dot current">◉</div>
+          <div class="timeline-content">
+            <h4>Synthesising structured answer</h4>
+            <p>Tables, flags, source citations</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="page-footer">
+      <span>47 sources · 4 categories</span>
+      <span>Confidence: high</span>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

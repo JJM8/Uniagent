@@ -23,6 +23,10 @@
     "               that leaves empty, outward - which is how systemInstruction",
     "               disappears whole on a turn with no system text.",
     "  models       the catalogue endpoint, and where the ids are in its reply.",
+    "  routes       for a router that serves one model from several companies:",
+    "               where to ask which endpoints a model has, and what to merge",
+    "               into the body to insist on one of them. Only OpenRouter",
+    "               has this; a wire without it simply cannot be routed.",
     "  fields       extra boxes this wire's settings form asks for, beyond a",
     "               base URL and a key. Saved on the provider itself, and",
     "               falling back to the environment variable of the same name.",
@@ -65,6 +69,34 @@
       "o3-mini",
       "o4-mini"
     ]
+  },
+
+  "openrouter": {
+    "label": "OpenRouter",
+    "help": "One key, every model - OpenRouter forwards each request to whichever company actually serves the model you named, which is why the id carries its vendor (\"deepseek/deepseek-chat-v3.1\"). The plain openai wire works against it too; what this one adds is ROUTING. The same model is served by several companies at different quantisations, context limits, prices and uptimes, and the endpoint box beside a model in the picker is how you say which of them to use - typed in as OpenRouter's own slug (\"baidu/fp8\"), or picked from the list this wire fetches.",
+    "icon": "/icons/unknown.svg",
+    "dialect": "openai",
+    "default_base_url": "https://openrouter.ai/api/v1",
+    "endpoint": "/chat/completions",
+    "auth": {"header": "Authorization", "template": "Bearer $key"},
+    "body": {
+      "model": "$model",
+      "temperature": "$temperature",
+      "stop": "$stop",
+      "stream": true,
+      "stream_options": {"include_usage": "$want_usage"},
+      "messages": "$messages",
+      "tools": "$tools"
+    },
+    "models": {"endpoint": "/models", "list": "data", "id": "id", "filter_chat": true},
+    "routes": {
+      "endpoint": "/models/$model/endpoints",
+      "list": "data.endpoints",
+      "id": "tag",
+      "label": "provider_name",
+      "send": {"provider": {"order": ["$route"], "allow_fallbacks": false}}
+    },
+    "suggested_models": []
   },
 
   "deepseek": {
@@ -118,7 +150,7 @@
       "system": "$system",
       "tools": "$tools"
     },
-    "max_tokens": 1024,
+    "max_tokens": 16384,
     "models": {
       "endpoint": "/v1/models",
       "list": "data",

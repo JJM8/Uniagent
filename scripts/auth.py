@@ -52,6 +52,15 @@ FREE_TRIES = 5
 BASE_LOCKOUT = 60
 MAX_LOCKOUT = 3600
 
+# How many IPs the lockout table will hold. It is keyed by client address and
+# written by anyone who can reach the port, so without a bound it is a way to
+# make the server eat memory: guess wrong once from each of a large number of
+# addresses and every one of them gets an entry that is never removed. Bounded,
+# and the entries that go when it is full are the ones that have already served
+# their wait - a live lockout is never evicted, which is what stops the cap
+# from being a way around the lockout itself.
+MAX_TRACKED = 4096
+
 _fails = {}  # ip -> [consecutive failures, locked-until timestamp]
 
 
@@ -152,13 +161,36 @@ def locked_for(ip):
     return int(remaining) + 1 if remaining > 0 else 0
 
 
+def _evict():
+    """Drop tracked IPs that are not serving a lockout, oldest allowance first,
+    until the table is under its cap again.
+
+    Only ever removes entries whose wait has EXPIRED. An IP part-way through a
+    lockout keeps its entry however full the table is - the alternative is a
+    table that can be flushed by filling it, which would turn the bound into
+    the bypass."""
+    if len(_fails) <= MAX_TRACKED:
+        return
+    now = time.time()
+    for ip in [k for k, v in _fails.items() if v[1] <= now]:
+        del _fails[ip]
+        if len(_fails) <= MAX_TRACKED:
+            return
+
+
 def note_failure(ip):
     """Count a wrong password and start (or extend) this IP's lockout."""
     entry = _fails.setdefault(ip, [0, 0])
     entry[0] += 1
     if entry[0] >= FREE_TRIES:
-        wait = min(BASE_LOCKOUT * 2 ** (entry[0] - FREE_TRIES), MAX_LOCKOUT)
+        # Capped exponent as well as capped wait: without it, an IP left
+        # guessing overnight reaches 2**1000 and every later attempt pays to
+        # compute a number thousands of digits long before min() throws it
+        # away. The wait is already at MAX_LOCKOUT long before then.
+        over = min(entry[0] - FREE_TRIES, 20)
+        wait = min(BASE_LOCKOUT * 2 ** over, MAX_LOCKOUT)
         entry[1] = time.time() + wait
+    _evict()
 
 
 def note_success(ip):

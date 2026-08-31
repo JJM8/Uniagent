@@ -106,22 +106,21 @@ def _servers_line():
 # instructions of the tools in its INJECTED tuple, and read_skill reads skills
 # and refuses tool names. DESCRIPTION and SCHEMA are the whole of what the
 # model is told about this tool, so anything it must know goes in one of them.
+# What each action MEANS is the `action` enum's job, and it says all of it -
+# this used to restate the whole list here as well, which sent the same
+# paragraph twice on every request. What is left is the part the enum cannot
+# carry: the live server list, and the three rules a model gets wrong without
+# being told, none of which is a description of an action.
 DESCRIPTION = ("Reach an MCP server - a separate program exposing abilities "
                "Uniagent doesn't have built in. " + _servers_line()
-               + "TOOLS: action \"tools\" to see what a server offers and what "
-                 "arguments each of its tools takes, then \"call\" to run one. "
-                 "You cannot know a tool's arguments before you have listed "
-                 "them and a guessed name is rejected, so do not skip the "
-                 "listing. RESOURCES, meaning data the server exposes such as "
-                 "files, logs or project state: action \"resources\" to list "
-                 "them, then \"read\" with the exact uri. PROMPTS, meaning "
-                 "ready-made instructions it offers: action \"prompts\" to "
-                 "list, then \"prompt\" to load one - what comes back is "
-                 "guidance to follow, with nothing to call afterwards. Also "
-                 "\"complete\" for the values an argument will accept, "
-                 "\"logs\" for what a server has reported about itself, and "
-                 "\"reconnect\" if one stops working - do not go looking for "
-                 "its process in the terminal.")
+               + "Pick the action from the list in its own description. Three "
+                 "things it won't tell you: list a server's tools before "
+                 "calling one, because you cannot know the arguments in "
+                 "advance and a guessed name is rejected; what \"prompt\" "
+                 "returns is guidance to follow, with nothing to call "
+                 "afterwards; and a server that stops working is fixed with "
+                 "\"reconnect\", not by hunting for its process in the "
+                 "terminal.")
 
 # NOT injected into any prompt - see the comment above DESCRIPTION. Kept
 # because every tool file must define it, and because it is the readable
@@ -219,6 +218,12 @@ Example, loading a prompt:
 Example, asking what an argument accepts:
   action "complete", server "unity", name "gameobject_handling",
   argument "target", value "Pl" """
+
+# Runs on its own, never alongside another tool call in the same batch.
+# Connecting, reconnecting and dropping servers rewrites the catalogue
+# that every MCP tool is looked up in, this turn included.
+# See tool_processor.parallel_safe().
+PARALLEL = False
 
 SCHEMA = {
     "type": "object",

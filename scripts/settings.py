@@ -29,7 +29,7 @@ ACCENT_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 # not just checked for type, so nothing can end up pointed at a provider with
 # no working credentials.
 PROVIDER_KEYS = ("provider", "sub_provider", "cron_provider", "verify_provider",
-                 "speak_summary_provider")
+                 "speak_summary_provider", "infini_provider")
 
 # Each model setting, paired with the provider setting it must belong to, so
 # a blank model is filled in from the right provider's list - see
@@ -41,6 +41,7 @@ MODEL_PAIRS = {
     "cron_model": "cron_provider",
     "verify_model": "verify_provider",
     "speak_summary_model": "speak_summary_provider",
+    "infini_model": "infini_provider",
 }
 
 # temperature isn't a standardised unit - it's just how far a provider's API
@@ -52,7 +53,8 @@ TEMPERATURE_RANGE = (0, 2)
 
 # Every setting that holds one, so they're all checked against the range above
 # rather than only the main one being.
-TEMPERATURE_KEYS = ("temperature", "speak_summary_temperature")
+TEMPERATURE_KEYS = ("temperature", "speak_summary_temperature",
+                    "infini_temperature")
 
 # How fast a spoken clip is played back, as a multiple of the pace the speech
 # model itself read at. Not sent to any provider: the page sets it on the audio
@@ -114,7 +116,8 @@ SPEAK_MODES = ("off", "final", "all", "summary", "summary_each", "summary_final"
 # because the generic
 # `isinstance(value, type(DEFAULTS[key]))` match would take a list of anything
 # at all, dicts and nulls included, and hand it to code that expects text.
-LIST_KEYS = ("safety_whitelist", "safety_blacklist", "market_repos", "wake_words")
+LIST_KEYS = ("safety_whitelist", "safety_blacklist", "terminal_whitelist",
+             "market_repos", "wake_words")
 
 # How careful a chat is, as one number: the highest 0-10 danger rating the
 # checking model can give a tool call and still have it run unattended.
@@ -134,6 +137,23 @@ SAFETY_MIN, SAFETY_MAX = 0, 10
 # key, so a new default threshold (a third front-end, say) is validated by
 # adding its name here and nothing else. See _valid().
 THRESHOLD_KEYS = ("safety_threshold", "cron_safety_threshold")
+
+# How many of a conversation's recent EXCHANGES the infinite-chat judge is
+# shown, and the bounds that number has to sit inside.
+#
+# An exchange is one thing the person said and the last thing the agent said
+# back - two lines - not one row of the history's JSON array. That is what the
+# number means to the person setting it ("check the last 5 turns"), and it is
+# also the only unit the majority rule in the prompt below can be counted in:
+# a chat where one question took thirty tool calls would otherwise be thirty
+# "turns" of a single subject.
+#
+# The floor is 2 because one exchange on its own cannot show a CHANGE of
+# subject - it takes at least a before and an after - and the ceiling is there
+# because the judge is meant to be a few hundred tokens a turn: a window big
+# enough to matter would be cheaper to answer by simply reading the chat. See
+# infini.py's exchanges() and parse().
+INFINI_TURNS_RANGE = (2, 100)
 
 DEFAULTS = {
     # The main agent's provider + model.
@@ -285,6 +305,32 @@ that, always.""",
     # command_processor.py. Left to the user because a blacklist that ships on
     # blocks work the user never asked to have blocked.
     "safety_blacklist": [],
+    # Terminal commands that run without being sent to the checking model.
+    # The tool whitelist above is no use for the terminal - "run any command
+    # on this computer" is not a thing to trust wholesale - so the terminal is
+    # trusted a command at a time instead, which is what this is.
+    #
+    # An entry matches on whole leading words: "git status" allows `git status
+    # --short` and not `git push`, and "ls" does not allow `lsof`. A call has
+    # to have EVERY one of its commands on the list to skip the check, so
+    # `ls && rm -rf /` is decided by the `rm`, and anything carrying a
+    # redirect, a substitution or an argument like find's -exec is refused
+    # whatever is on the list. See tool_validation.terminal_allowed, which is
+    # where those rules actually live.
+    #
+    # What ships is the commands that only ever READ - the ones an agent runs
+    # dozens of times an hour to find out where it is and what is there, and
+    # which cost a paid round trip each to be told they are fine. Nothing here
+    # writes a file, installs anything, or changes the machine. Take entries
+    # out to tighten it; add your own for the ones you are tired of approving.
+    "terminal_whitelist": [
+        "ls", "pwd", "cd", "cat", "head", "tail", "wc", "file", "stat",
+        "du", "df", "which", "whoami", "id", "hostname", "uname", "date",
+        "echo", "tree", "ps", "env", "printenv", "grep", "rg", "fd", "find",
+        "diff", "cmp", "sort", "uniq", "basename", "dirname", "realpath",
+        "git status", "git log", "git diff", "git show", "git branch",
+        "git remote", "git config --get",
+    ],
     # Which GitHub repositories the tools tab's marketplace browses, as
     # "owner/repo" or "owner/repo/sub/folder" when the tools or skills sit
     # somewhere other than the top level. Read live each time the marketplace
@@ -313,6 +359,81 @@ Do not start any line with "User:", "Uniagent:" or "Tool result:" - generation
 is cut off at those markers, so a summary written that way would lose
 everything after its first line. Reply with the compacted conversation and
 nothing else.""",
+    # ---- infinite chat (see infini.py) ------------------------------------
+    # The judge that reads a parsed transcript after each turn and says whether
+    # the subject has really changed. Its own provider/model/temperature trio,
+    # exactly like the safety check and the spoken summariser above - and for
+    # the same reason: it is a different question, asked far more often than a
+    # chat turn, and it must be cheap enough that nobody thinks about it.
+    #
+    # None of this does anything until a CHAT turns the mode on for itself
+    # (main.Agent's "infinite"). Off, not one of these settings is ever read.
+    "infini_provider": "deepseek",
+    "infini_model": "deepseek-v4-flash",
+    # 0: this is a classification, not writing. The same answer to the same
+    # transcript twice is the point - a judge that forks a chat on Tuesday and
+    # not on Wednesday for the same conversation is worse than one that is
+    # consistently a bit wrong, because it cannot be tuned.
+    "infini_temperature": 0,
+    # How many recent exchanges it sees - one exchange being what the person
+    # said and the last thing the agent said back. See INFINI_TURNS_RANGE.
+    "infini_turns": 10,
+    # What it is asked. Sent AFTER the parsed transcript, the same way round as
+    # the compaction prompt and for the same reason: the thing being judged is
+    # a conversation, not text pasted into an instruction, so there is no
+    # placeholder here and what is written reaches the model verbatim.
+    #
+    # Blank is a real value and means "the prompt below", which is how the
+    # infiniagent tab's empty box restores the shipped default.
+    "infini_prompt": """That is the recent conversation, abbreviated. Each numbered pair of lines
+is one exchange - what the person said, and the LAST thing the agent said back.
+Everything the agent said on the way there has been left out; what it DID is on
+its line as [calls: ...], the tools it ran and the files they touched. Long
+messages are cut to their first and last words, and any long pause between two
+exchanges is written out as [n hours later].
+
+You are deciding ONE thing: has the SUBJECT of this conversation really
+changed - a different project, a different piece of work - or is the latest
+part still the same job?
+
+Weigh these, roughly in this order:
+- the file paths in the tool calls. A move from one project's folder to
+  another's is the strongest signal there is.
+- a long gap. The same words after three hours are usually a new session; the
+  same words after two minutes are a follow-up.
+- what is actually being talked about, and whether the earlier turns are still
+  needed to understand the later ones.
+
+Be conservative. A question that wanders and comes back, a quick aside, a
+tangent that serves the same job - all of those are the SAME subject. Only say
+the subject changed when the recent turns would make complete sense as a
+conversation of their own, with nothing above them.
+
+There is a hard rule on top of that, and it decides the answer whenever it
+applies. Count the exchanges you were shown. MORE THAN HALF of them must be on
+the one same new subject before you may answer "new". If the new subject
+occupies half of them or fewer - however clearly different it is - it has not
+taken the conversation over yet, and the answer is "aside". Say so in "why":
+how many of the exchanges you were shown are on the new subject, out of how
+many there are.
+
+Answer with strict JSON on one line and nothing else - no code fence, no
+commentary:
+
+{"verdict": "continue", "cutoff": 0, "title": "", "why": "one short sentence"}
+
+  verdict   "continue" - same subject.
+            "aside"    - a different subject, but either a quick detour that
+                         belongs in this conversation or one that has not yet
+                         taken over more than half the exchanges above.
+            "new"      - the subject has really changed.
+  cutoff    only meaningful for "new": the NUMBER of the first exchange of the
+            new subject, taken from the numbers above. Not the latest one - the
+            exchange where the new subject actually began, however far back
+            that is.
+  title     only for "new": three or four words naming the new subject, to be
+            used as the new chat's name.
+  why       one short sentence saying what decided it.""",
     # UI only.
     "theme": "dark",
     # The one colour the whole page is built out of - every button outline,
@@ -385,15 +506,18 @@ nothing else.""",
     "wake_auto": False,
     # Whether the whole clip captured so far is re-transcribed roughly once a
     # second while you talk, so a caption can be shown live above the message
-    # box (see wakePollLoop/wakePoll in web/index.html). Off by default - it's
-    # a nicety, not a requirement: the pause that ends a session is judged
-    # locally, by loudness, with no transcription involved (see wakeArmSilence
-    # there), and the one transcription that actually matters is the single
-    # pass wakeFinish runs once you've gone quiet. Polling every second bills a
-    # lot more than that one pass would: each poll re-sends everything said so
-    # far, not just what's new, so talking for ten seconds bills roughly what
-    # fifty-five seconds of audio would.
-    "wake_captions": False,
+    # box (see sayPollLoop/sayPoll in web/index.html). Governs BOTH ways of
+    # speaking to it - the held button and the wake word - because both record
+    # the same way and through the same code; it was wake_captions while only
+    # one of them could do it. Off by default - it's a nicety, not a
+    # requirement: the pause that ends a wake-word session is judged locally,
+    # by loudness, with no transcription involved (see wakeArmSilence there),
+    # and the one transcription that actually matters is the single pass
+    # sayFinish runs at the end. Polling every second bills a lot more than
+    # that one pass would: each poll re-sends everything said so far, not just
+    # what's new, so talking for ten seconds bills roughly what fifty-five
+    # seconds of audio would.
+    "voice_captions": False,
     # How long a pause after the last word means you're done talking, judged by
     # loudness alone - no transcription runs to answer this, live captions or
     # not. Too short and it sends mid-thought; too long and it sits there after
@@ -522,6 +646,10 @@ def _valid(key, value):
         # True would otherwise pass as the threshold 1.
         return (isinstance(value, int) and not isinstance(value, bool)
                 and SAFETY_MIN <= value <= SAFETY_MAX)
+    if key == "infini_turns":
+        # Same bool exclusion as the thresholds above, for the same reason.
+        return (isinstance(value, int) and not isinstance(value, bool)
+                and INFINI_TURNS_RANGE[0] <= value <= INFINI_TURNS_RANGE[1])
     if key == "max_repeats":
         # Same bool exclusion as the thresholds above, for the same reason.
         return (isinstance(value, int) and not isinstance(value, bool)
@@ -649,12 +777,24 @@ def get(key):
 
 def save(updates):
     """Merge `updates` in and write. Returns the full settings as they now are.
-    Locked, so two pages saving at once can't interleave into a broken file."""
+    Locked, so two pages saving at once can't interleave into a broken file.
+
+    A model setting that actually CHANGES is also stamped as a recent pick, so
+    the picker offers it first next time - the settings page and the corner
+    picker are two ways of choosing a model and both should feed the same
+    short list. Only a change counts: saving the tab to edit the safety prompt
+    must not re-stamp five models nobody touched."""
     with _write_lock:
         data = load(fallback=False)
+        before = {key: (data.get(key), data.get(MODEL_PAIRS[key]))
+                  for key in MODEL_PAIRS}
         for key, value in updates.items():
             if _valid(key, value):
                 data[key] = value
         _heal_models(data)
         SETTINGS_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        for key, provider_key in MODEL_PAIRS.items():
+            now = (data.get(key), data.get(provider_key))
+            if all(now) and now != before.get(key):
+                provider.note_pick(now[1], now[0])
         return data

@@ -44,6 +44,13 @@ do not need to read the file back to check it worked."""
 # matters for the old text-embedded-call path, where a model could invent a
 # slightly different name; a native call sends exactly what's declared here,
 # so "old"/"new" are the names that matter now.
+# Runs on its own, never alongside another tool call in the same batch.
+# An edit means something different depending on what landed before
+# it: two edits to one file, or an edit and the read that checks it,
+# have to happen in the order the model asked for them.
+# See tool_processor.parallel_safe().
+PARALLEL = False
+
 SCHEMA = {
     "type": "object",
     "properties": {

@@ -28,7 +28,13 @@ DESCRIPTION = ("Manage scheduled jobs (cron jobs) - things that run automaticall
 
 # Recomputed on every reload (tools/ modules reload every turn), so a key
 # added to .env is enforced here on the very next turn - no restart needed.
-AVAILABLE_PROVIDERS = provider_module.available()
+#
+# chat_providers() rather than available(): a job RUNS on this provider, and
+# available() also lists the cards that cannot answer a prompt at all (a piper
+# text-to-speech provider is fully configured and completely unusable here).
+# Offering one in the enum would be advertising a value guaranteed to fail at
+# 3am with nobody watching.
+AVAILABLE_PROVIDERS = provider_module.chat_providers()
 
 INSTRUCTIONS = """HOW TO CALL: use the tool-call syntax already given to you, with tool name "cron". Do not explain what you are doing first.
 
@@ -102,6 +108,12 @@ plain words ("every day at 07:00"), never as a raw timestamp.""".replace(
 # start/interval are typed as strings so a model can send either a raw number
 # of seconds or "07:00"/"6h" without the provider rejecting it on type; both
 # forms are parsed below.
+# Runs on its own, never alongside another tool call in the same batch.
+# Every job lives in one cron.json, read and rewritten whole. Two of
+# these at once would each save a copy that never saw the other's job.
+# See tool_processor.parallel_safe().
+PARALLEL = False
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -126,10 +138,19 @@ SCHEMA = {
             "Optional - which provider the job runs on. Omit to use the settings default."},
         "model": {"type": "string", "description":
             "Optional, one of the chosen provider's models."},
-        "temperature": {"type": "number", "description":
+        # temperature and safety are unions because BOTH forms are real: the
+        # value itself, and "" to clear it back to the default on an edit. They
+        # were typed as one or the other, which left every schema saying the
+        # opposite of what its own description told the model to send. The
+        # number goes first so Gemini - which collapses a union onto its first
+        # branch (tool_processor._gemini_schema) - keeps the common case and
+        # loses only the clear.
+        "temperature": {"oneOf": [{"type": "number"}, {"type": "string"}],
+                         "description":
             "Optional, 0-2 - 0 is most predictable, higher is more random. "
             "For edit, an empty string clears it back to the default."},
-        "safety": {"type": "string", "description":
+        "safety": {"oneOf": [{"type": "integer"}, {"type": "string"}],
+                    "description":
             "Optional - a whole number 0-10, the highest danger rating a tool "
             "call of this job's can be given and still run. Same scale as a "
             "chat's safety number: 0 stops on everything, 10 checks nothing. "
@@ -263,10 +284,12 @@ def _check_name(name):
 
 
 def _check_provider(provider):
-    if provider and provider.strip().lower() not in AVAILABLE_PROVIDERS:
-        return ("'" + provider + "' is not available - it needs an API key/credentials "
-                "this machine doesn't have. Retry with one of these:\n"
-                + provider_module.options_text())
+    """Asked of provider.py rather than of AVAILABLE_PROVIDERS, so the refusal
+    says which of the two things went wrong - no credentials, or a provider
+    that cannot answer a prompt at all."""
+    reason = provider_module.unusable_reason(provider)
+    if reason:
+        return reason + "\n" + provider_module.options_text()
 
 
 def _check_temperature(temperature):

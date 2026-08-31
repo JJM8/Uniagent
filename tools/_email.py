@@ -1,4 +1,4 @@
-"""Shared email plumbing for the email/email_send/email_manage tools.
+"""Shared email plumbing for the email and email_send tools.
 
 The leading underscore marks this as a helper, not a tool: the loaders skip
 `_`-prefixed files, so this never shows up in the tool list.

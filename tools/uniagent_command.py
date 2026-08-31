@@ -67,6 +67,13 @@ tells you the part that matters.
 """
 
 # For native provider tool-calling.
+# Runs on its own, never alongside another tool call in the same batch.
+# These are the chat's own slash commands - /model, /compact,
+# /workspace - so a call here changes the conversation the other
+# calls are part of.
+# See tool_processor.parallel_safe().
+PARALLEL = False
+
 SCHEMA = {
     "type": "object",
     "properties": {

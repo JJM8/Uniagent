@@ -57,6 +57,7 @@ import claude_session
 import command_processor
 import compaction
 import cron
+import infini
 import main
 import market
 import provider
@@ -241,7 +242,14 @@ def _live_begin(route):
     A new record starts in the waiting phase because that is what is true of
     it: the turn is working and no token is on its way yet."""
     _live_set(route, started=time.time(), phase=None, phase_at=None,
-              thinking="", partial="", thought=None, latency=None)
+              thinking="", partial="", thought=None, latency=None,
+              # The call this turn is waiting on, if it is waiting on one.
+              # Cleared by the result that answers it (on_tool_result below),
+              # and again here, because a response beginning means whatever
+              # was running has finished one way or another - a turn that died
+              # inside a tool must not leave a row counting forever on the
+              # window that rejoins it.
+              tool=None, tool_name=None, tool_id=None, tool_at=None)
     _live_phase(route, "waiting")
 
 
@@ -316,6 +324,40 @@ _last_input_chat = None
 _last_input_lock = threading.Lock()
 
 
+# How close together two identical spoken messages have to be to be one
+# message said once and heard twice. Comfortably longer than the gap between
+# two devices finishing their own final transcription of the same sentence
+# (they start recording within a few hundred ms of each other and transcribe
+# the same audio), and comfortably shorter than any real repetition.
+_SPOKEN_WINDOW = 5.0
+_spoken_lock = threading.Lock()
+_spoken_seen = {}
+
+
+def _spoken_before(text):
+    """Whether this exact spoken message has just been taken from somewhere
+    else. True means drop it - see the caller in POST /input.
+
+    Keyed on the text rather than on the device, because the device is not the
+    thing that repeats: two listeners transcribe the same air and produce the
+    same sentence, and that sameness is the only signal there is. Case and
+    surrounding space are ignored, since two transcriptions of one sentence
+    can differ by a capital letter and nothing else.
+
+    Entries older than the window are dropped on the way past, so this never
+    grows: it holds at most the handful of things said in the last five
+    seconds."""
+    key = " ".join(text.lower().split())
+    now = time.time()
+    with _spoken_lock:
+        for old in [k for k, at in _spoken_seen.items() if now - at > _SPOKEN_WINDOW]:
+            del _spoken_seen[old]
+        if key in _spoken_seen:
+            return True
+        _spoken_seen[key] = now
+    return False
+
+
 def _voice_chat():
     """Where a clip from the hold-to-talk key goes: the chat last spoken to
     from a browser, or the terminal's if this process hasn't seen one yet."""
@@ -355,6 +397,29 @@ def _queue_inject(c, text):
             return False
         _injects.setdefault(c.id, []).append(text)
         return True
+
+
+def _inject_or_run(c, text, kind="user"):
+    """Say `text` to `c` the way enter does: folded into the turn it is already
+    running, landing at that turn's next pass, and started as a turn of its own
+    only when there is no turn to fold it into. True when it was folded in.
+
+    Spoken input comes through here for the same reason typed input does. A
+    sentence said while the agent is working is aimed at the work in front of
+    it - "no, the front room" - and a turn of its own would queue behind the
+    whole of that work before the model ever heard it, answering a question
+    that had already been overtaken.
+
+    Only the LOCAL hold-to-talk key reaches this directly now. Both of the
+    browser's ways of speaking - the mic button and the wake word - go out
+    through POST /input like anything typed, and arrive at the bottom of that
+    handler, which calls this. That is the point: there is one path, and the
+    wake word having had a route of its own is exactly what let two windows
+    disagree about which chat was being spoken to."""
+    if _queue_inject(c, text):
+        return True
+    _run_turn(text, kind=kind, target=c)
+    return False
 
 
 def _drain_inject(stem, route=None):
@@ -521,6 +586,22 @@ def _broadcast_context(chat=None):
     # .route, not .id: the page compares this against the id IT holds, and for
     # a cron job those are two different strings (see main.chat_route).
     _broadcast({"type": "context", "chat": chat.route if chat else None})
+
+
+def _forked(c):
+    """Run the infinite-chat judge over the turn that just ended in `c`, and
+    tell the browsers if it split the chat.
+
+    The "fork" event carries the parent's route and the child's, and the page
+    switches itself only if it is LOOKING at the parent - a window sitting in
+    another chat is never yanked anywhere (see index.html's by-chat filter).
+    The "chats" event goes with it because the sidebar has a chat in it that
+    did not exist a moment ago."""
+    child = infini.after_turn(c)
+    if not child:
+        return
+    _broadcast({"type": "fork", "chat": c.route, "to": child})
+    _broadcast_chats()
 
 
 def _broadcast_tools():
@@ -1002,17 +1083,49 @@ def _run_turn(text, kind="user", target=None):
             main.turn(c, text,
                       on_text=stream_chunk,
                       on_begin=lambda history: mark.__setitem__(0, main.turn_count(history)),
-                      on_tool_call=lambda shown: _broadcast({"type": "toolcall",
-                                                        "text": shown, "chat": route}),
-                      # `name` is which call this is the result of, when the
-                      # caller knows - the page draws it on the box so several
-                      # calls at once stay tellable apart. Optional, so a caller
-                      # that doesn't pass one behaves exactly as before.
-                      on_tool_result=lambda result, name=None, took=None: _broadcast(
-                                                       {"type": "toolresult",
-                                                        "text": result, "name": name,
-                                                        "timing": took,
-                                                        "chat": route}),
+                      # The tool call being written, delta by delta. The page
+                      # does NOT show this as text - it draws the call as its own
+                      # compact row from on_tool_call/on_tool_result below - so
+                      # the deltas are taken here only to mark the phase as
+                      # "writing" (the same side effect stream_chunk had when the
+                      # call used to stream as reply text), without recording or
+                      # broadcasting the syntax. This is what stops the raw call
+                      # text ever appearing in the reply bubble.
+                      on_call_delta=lambda piece: _live_phase(route, "writing"),
+                      # A call the model has committed to, sent the moment it
+                      # is parsed and long before it has run. The page draws
+                      # its row there and then - name, argument and a counter -
+                      # and fills the result in when it lands, so a forty-second
+                      # call is forty seconds of visibly running rather than
+                      # forty seconds of nothing followed by a finished box.
+                      #
+                      # Recorded as well as broadcast, for the same reason the
+                      # half-written reply is: the broadcast only reaches the
+                      # windows watching right now, and a window that switches
+                      # to this chat (or comes back from a dropped connection)
+                      # mid-call rebuilds the running row out of the record.
+                      # `tool_at` is when it started, so that rebuilt counter
+                      # resumes at the right number instead of restarting at 0.
+                      on_tool_call=lambda shown, name=None, id=None: (
+                          _live_set(route, tool=shown, tool_name=name,
+                                    tool_id=id, tool_at=time.time()),
+                          _broadcast({"type": "toolcall", "text": shown,
+                                      "name": name, "id": id, "chat": route})),
+                      # `name` is which call this is the result of and `id`
+                      # is that call's id - together they are how the page puts
+                      # a result into the row its own "toolcall" event opened,
+                      # which is the whole trick when a provider makes several
+                      # calls at once. Both optional, so a caller that passes
+                      # neither behaves exactly as before.
+                      on_tool_result=lambda result, name=None, took=None, id=None: (
+                          # Nothing is running any more, so the record stops
+                          # saying one is - see _live_begin.
+                          _live_set(route, tool=None, tool_name=None,
+                                    tool_id=None, tool_at=None),
+                          _broadcast({"type": "toolresult",
+                                      "text": result, "name": name,
+                                      "timing": took, "id": id,
+                                      "chat": route})),
                       # The model thinking, live. Its own event and never
                       # folded into "chunk": the reply bubble is the reply,
                       # and thinking appended to it would be indistinguishable
@@ -1197,6 +1310,19 @@ def _run_turn(text, kind="user", target=None):
             # the by-recency order has changed, and if this was its first turn
             # it only just appeared on disk at all.
             _broadcast_chats()
+            # Infinite chat, if this chat is in it: the judge reads the turn
+            # that just ended and may split the conversation here (see
+            # infini.py). Last of everything, and only when nothing is queued
+            # behind this turn - a fork rewrites the chat's history, and the
+            # one moment it must not do that is with another turn about to
+            # start on it. The queued turn's own end judges it instead.
+            #
+            # After "done", never before: the user has already been told the
+            # turn is over, so nothing here can make them wait. after_turn()
+            # swallows its own failures and returns None for every outcome but
+            # a fork, so this line cannot break a turn either.
+            if not left:
+                _forked(c)
             # Last, so the turn that just ended has finished being wound up -
             # read out, counted, filed - before the next one starts writing to
             # the same chat. The slot is free by now, so this doesn't wait.
@@ -2251,6 +2377,24 @@ def _safety(c):
             "blacklist": chosen["safety_blacklist"]}
 
 
+def _infini(c):
+    """Infinite chat's state: whether chat `c` is in the mode, and the last
+    judgement this server made in any chat.
+
+    Two things on one route because they are read together and neither is worth
+    a poll: the toggle beside the safety slider asks when the panel opens, and
+    the infiniagent tab asks when it opens. The last judgement is global rather
+    than per chat on purpose - it is there to be READ while the prompt is being
+    tuned, and "the last one that happened" is what you want to see, whichever
+    chat it happened in.
+
+    A window whose chat does not exist yet answers "off", which is what a
+    message sent from it would run under."""
+    return {"chat": None if c is None else c.route,
+            "on": bool(getattr(c, "infinite", None)) if c is not None else False,
+            "last": infini.last()}
+
+
 def _settings():
     """The settings, plus what the page needs to offer choices: only the
     providers actually usable right now (a working key/credentials), and every
@@ -2262,10 +2406,24 @@ def _settings():
     overwritten can still show what it started as - the compaction tab draws
     the default prompt as its empty box's placeholder, which is the only
     honest way to say "clear this and you get that back"."""
+    usable = provider.available()
     return {"values": settings.load(),
             "defaults": settings.DEFAULTS,
-            "providers": provider.available(),
-            "models": provider.known_models()}
+            "providers": usable,
+            "models": provider.known_models(usable),
+            # The head of every model list on the page: what was picked most
+            # recently, newest first. Five, because the picker shows five - the
+            # number lives here so the page never has to trim a longer list it
+            # was given for no reason.
+            "recent": provider.recent_models(5, usable),
+            # Which providers serve one model from several companies, so the
+            # picker knows whether an endpoint box belongs under a model at
+            # all. A name here means "ask /model/routes about this one".
+            "routes": [n for n in usable if provider.routes_supported(n)],
+            # And which of them have actually been pointed somewhere, so the
+            # picker can say "@ deepinfra" beside a model without a request
+            # per row. Read off the same file the models come from.
+            "model_routes": provider.model_routes(usable)}
 
 
 def _stt(name):
@@ -3218,8 +3376,30 @@ class Handler(BaseHTTPRequestHandler):
             # chat folder into existence. _safety() answers for None.
             self._send(json.dumps(_safety(_chat_of(self, create=True))),
                        "application/json")
+        elif self.path == "/infini" or self.path.startswith("/infini?"):
+            # create=True, not mint: reading whether this chat is in infinite
+            # mode must not bring a chat folder into existence, the same rule
+            # /safety above follows.
+            self._send(json.dumps(_infini(_chat_of(self, create=True))),
+                       "application/json")
         elif self.path == "/settings":
             self._send(json.dumps(_settings()), "application/json")
+        elif self.path.startswith("/model/routes"):
+            # Which endpoints a router serves one model from, and which of them
+            # it is currently sent to. Its own route rather than a field on
+            # /settings for the reason /voice/models is: it is a round trip to
+            # somebody else's server, asked about ONE model, and only when
+            # somebody has actually opened the endpoint box.
+            q = parse_qs(urlparse(self.path).query)
+            name = q.get("provider", [""])[0]
+            model = q.get("model", [""])[0]
+            self._send(json.dumps({
+                "provider": name,
+                "model": model,
+                "supported": provider.routes_supported(name),
+                "chosen": provider.model_route(name, model),
+                "endpoints": provider.route_options(name, model),
+            }), "application/json")
         elif self.path == "/providers":
             self._send(json.dumps(_providers()), "application/json")
         elif self.path == "/env":
@@ -3335,6 +3515,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/settings":
             self._post_settings()
             return
+        if self.path == "/model/route":
+            self._post_model_route()
+            return
+        if self.path == "/model/recent":
+            self._post_model_recent()
+            return
         if self.path == "/providers":
             self._post_provider()
             return
@@ -3404,9 +3590,6 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/wake" or self.path.startswith("/wake?"):
             self._post_wake()
             return
-        if self.path == "/voice/say" or self.path.startswith("/voice/say?"):
-            self._post_voice_say()
-            return
         if self.path == "/attach" or self.path.startswith("/attach?"):
             self._post_attach()
             return
@@ -3440,6 +3623,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/safety" or self.path.startswith("/safety?"):
             self._post_chat_safety()
             return
+        if self.path == "/infini" or self.path.startswith("/infini?"):
+            self._post_chat_infini()
+            return
         if self.path != "/input" and not self.path.startswith("/input?"):
             self._send("not found", code=404)
             return
@@ -3447,6 +3633,19 @@ class Handler(BaseHTTPRequestHandler):
         text = self.rfile.read(length).decode().strip()
         if not text:
             self._send(json.dumps({"type": "system", "text": ""}), "application/json")
+            return
+
+        # One sentence, said once, arriving twice - two devices in earshot,
+        # each with its own browser and so its own wake-word listener. The
+        # page's own lease (index.html's wakeClaim) settles this between tabs
+        # of ONE browser and cannot reach across a phone and a desktop, so the
+        # last word on it has to be here, where both arrive.
+        #
+        # Only spoken messages are checked. Typing the same thing twice on
+        # purpose is a real thing people do, and quietly eating the second one
+        # would be far worse than the duplicate this prevents.
+        if text.startswith(main.VOICE_INPUT) and _spoken_before(text):
+            self._send(json.dumps({"type": "duplicate"}), "application/json")
             return
 
         # Which chat this is for comes off the request, not off a global. A
@@ -3549,6 +3748,47 @@ class Handler(BaseHTTPRequestHandler):
         # The model can have changed, and with it both the injection list this
         # chat follows and the context window it's measured against.
         _broadcast_context()
+
+    def _post_model_route(self):
+        """Say which endpoint one provider/model pair runs on - {"provider",
+        "model", "route"} - or clear it with a blank route.
+
+        Free text on purpose. The box is filled from a list where the router
+        can be asked for one, but the slug is the router's own ("baidu/fp8"),
+        it is printed on the model's page, and a list fetched from anywhere
+        goes stale - so anything typed is saved as typed. A wrong slug is the
+        router's own error on the next turn, which names it.
+
+        It applies to the PAIR, not to whoever asked: this chat, a subagent
+        and a cron job on the same model all run on the endpoint chosen here.
+        """
+        body = self._body() or {}
+        name = str(body.get("provider") or "")
+        model = str(body.get("model") or "")
+        if not name or not model:
+            self._send('expected "provider" and "model"', code=400)
+            return
+        if name not in provider.available():
+            self._send("there is no usable provider called " + name, code=400)
+            return
+        route = provider.set_model_route(name, model, str(body.get("route") or ""))
+        self._send(json.dumps({"provider": name, "model": model, "route": route}),
+                   "application/json")
+
+    def _post_model_recent(self):
+        """Record that a provider/model pair was just picked, so it floats to
+        the top of the picker next time - {"provider", "model"}.
+
+        The models tab posts this when a default is saved, and the corner
+        picker gets it for free through /model. Deliberately not written on
+        every turn: see provider.note_pick."""
+        body = self._body() or {}
+        name = str(body.get("provider") or "")
+        model = str(body.get("model") or "")
+        if name and model:
+            provider.note_pick(name, model)
+        self._send(json.dumps({"recent": provider.recent_models(5)}),
+                   "application/json")
 
     def _post_provider(self):
         """Add a provider object, or update the one already under this name.
@@ -4064,6 +4304,28 @@ class Handler(BaseHTTPRequestHandler):
                                "ok": ok, "message": message}),
                    "application/json")
 
+    def _post_chat_infini(self):
+        """Turn infinite chat on or off for THIS chat - the toggle beside the
+        safety slider. Per chat and nothing else: there is no global on/off,
+        for the reasons in Agent.set_infinite.
+
+        The whole state back, like /safety, so the panel redraws from what is
+        actually saved rather than from what it sent."""
+        body = self._body()
+        if not isinstance(body, dict) or not isinstance(body.get("on"), bool):
+            self._send("expected {\"on\": true|false}", code=400)
+            return
+        c = _chat_of(self, create=True, mint=True)
+        if c is None:
+            self._send("no chat to set infinite mode on", code=400)
+            return
+        try:
+            c.set_infinite(body["on"])
+        except OSError as e:
+            self._send("could not save: " + str(e), code=500)
+            return
+        self._send(json.dumps(_infini(c)), "application/json")
+
     def _post_chat_safety(self):
         """Set THIS chat's safety gate - the slider in the corner of the chat
         window. Written to the chat's own settings.json, never to any global:
@@ -4522,94 +4784,6 @@ class Handler(BaseHTTPRequestHandler):
                        + str(e)[:200], code=503)
             return
         self._send(json.dumps(answer), "application/json")
-
-    def _post_voice_say(self):
-        """A message the wake-word listener heard, as the pieces it was said
-        in: {"parts": [...], "fresh": n, "interrupt": bool}.
-
-        Not the same thing as POST /voice, which only turns audio into words
-        and knows nothing about chats. This is where those words become a turn,
-        and it exists as its own route rather than going through /input because
-        of one case /input has no way to express: the user carried on talking
-        after the message had already gone.
-
-        `fresh` is how many of `parts` have not been sent yet - all of them for
-        an ordinary message, fewer when this is somebody finishing a sentence
-        late. In that second case the turn already running is stopped and the
-        whole message re-sent as one, with the late words marked as the
-        continuation they are (see main.voice_message). What that buys is a
-        model answering the sentence the user actually said instead of the
-        first half of it; what it costs is the tokens the stopped turn had
-        produced, which is why "interrupt": false is allowed to say no and fold
-        the late words into the running turn the way enter does instead.
-
-        A turn that had already called a tool is never unwound - main.voice_
-        rewind refuses, and the late words go on top of the work as their own
-        message."""
-        body = self._body()
-        if not isinstance(body, dict):
-            self._send("expected a JSON object", code=400)
-            return
-        parts = [p.strip() for p in (body.get("parts") or [])
-                 if isinstance(p, str) and p.strip()]
-        if not parts:
-            self._send("nothing was said", code=400)
-            return
-        # A `fresh` that doesn't describe this list is treated as "all of it",
-        # which is the safe misreading: the worst it does is send the whole
-        # message as a new one, where the alternative is sending half a
-        # sentence with no idea what came before it.
-        fresh = body.get("fresh")
-        if (not isinstance(fresh, int) or isinstance(fresh, bool)
-                or not 1 <= fresh <= len(parts)):
-            fresh = len(parts)
-
-        c = _chat_of(self, create=True, mint=True)
-        if c is None:
-            self._send(json.dumps({"type": "system",
-                                   "text": "that chat no longer exists."}),
-                       "application/json")
-            return
-
-        global _last_input_chat
-        with _last_input_lock:
-            _last_input_chat = c
-
-        if fresh == len(parts):
-            # Nothing of this has been said to the model yet - an ordinary
-            # turn, and the whole of the wake word's normal path.
-            _run_turn(main.voice_message(parts), target=c)
-            self._send(json.dumps({"type": "started", "chat": c.route}),
-                       "application/json")
-            return
-
-        late = main.voice_message(parts[-fresh:], first=False)
-
-        if not body.get("interrupt", True):
-            # The setting says don't interrupt. Same arrangement as a message
-            # typed with enter into a working chat: it waits for the next tool
-            # result, and starts a turn of its own if there is nothing running.
-            if _queue_inject(c, late):
-                self._send(json.dumps({"type": "queued", "chat": c.route}),
-                           "application/json")
-                return
-            _run_turn(late, target=c)
-            self._send(json.dumps({"type": "started", "chat": c.route}),
-                       "application/json")
-            return
-
-        # request_stop does the whole job on this thread - cancels the turn,
-        # closes the transcript out and hands the chat on - so by the line
-        # below there is no turn running and the history on disk is settled,
-        # which is exactly what voice_rewind needs to be able to edit it. False
-        # means there was nothing running to stop: the turn finished in the
-        # time it took to say the rest of the sentence, and its answer stands.
-        stopped = main.request_stop(c.id)
-        merged = main.voice_rewind(c) if stopped else False
-        _run_turn(main.voice_message(parts) if merged else late, target=c)
-        self._send(json.dumps({"type": "started", "chat": c.route,
-                               "stopped": stopped, "merged": merged}),
-                   "application/json")
 
     def _post_attach(self):
         """One file on its way into a chat's attachments folder: the raw bytes
@@ -5113,7 +5287,7 @@ def serve():
     # The hold-to-talk key, which has no browser behind it to say which chat it
     # means - so it aims at the one last spoken to. Everything arriving over
     # HTTP names its own chat and never comes through here.
-    voice_input.start(lambda text: _run_turn(text, target=_voice_chat()))
+    voice_input.start(lambda text: _inject_or_run(_voice_chat(), text))
     # The only thing left watching anything on a timer, and it watches with
     # stat() rather than by reading - see _watch_chats.
     threading.Thread(target=_watch_chats, daemon=True).start()

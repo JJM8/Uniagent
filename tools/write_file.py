@@ -42,6 +42,12 @@ If the user refuses you get back a string starting with "DENIED" and nothing
 was written - do not immediately retry the same write, ask what they'd prefer."""
 
 # For native provider tool-calling.
+# Runs on its own, never alongside another tool call in the same batch.
+# Same as edit_file - what a file ends up containing depends on the
+# order it was written in, so a write never overlaps another call.
+# See tool_processor.parallel_safe().
+PARALLEL = False
+
 SCHEMA = {
     "type": "object",
     "properties": {

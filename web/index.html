@@ -40,6 +40,15 @@
     --red-h: 3;
     --red-s: 93%;
     --red-l: 63%;
+    /* Infinite chat's two states, on the corner toggle. Red for off and a
+       light blue for on - two colours that share nothing, because the one
+       thing this control has to say from across the room is which of the two
+       it is. Their own hue rather than the accent's: the accent moves with
+       whatever colour the user picked, and a toggle that turned green on a
+       green install would say nothing at all. */
+    --inf-h: 206;
+    --inf-s: 100%;
+    --inf-l: 71%;
     /* How a safety level is lit. Only the HUE changes between the five (see
        the .lv-* classes further down, green through to red); how saturated
        and how bright that hue is drawn is a property of the THEME, so the
@@ -62,6 +71,11 @@
     --red-h: 356;
     --red-s: 72%;
     --red-l: 47%;
+    /* Darker on white, for the same reason the level scale is: a #6cb6ff on
+       a white background is not a colour anybody can read. */
+    --inf-h: 212;
+    --inf-s: 76%;
+    --inf-l: 43%;
     /* Darker and a touch more saturated than the dark theme's, so a yellow
        and an orange still read as different things on white. */
     --lv-s: 72%;
@@ -87,6 +101,10 @@
     --red-a08:     hsl(var(--red-h) var(--red-s) var(--red-l) / 0.08);
     --red-a12:     hsl(var(--red-h) var(--red-s) var(--red-l) / 0.12);
     --red-a15:     hsl(var(--red-h) var(--red-s) var(--red-l) / 0.15);
+    --inf:         hsl(var(--inf-h) var(--inf-s) var(--inf-l));
+    --inf-a12:     hsl(var(--inf-h) var(--inf-s) var(--inf-l) / 0.12);
+    --inf-a25:     hsl(var(--inf-h) var(--inf-s) var(--inf-l) / 0.25);
+    --inf-a40:     hsl(var(--inf-h) var(--inf-s) var(--inf-l) / 0.40);
     /* web/uniagent-icon.png at 96px. Inlined for the same reason as the
        favicon: a linked file is fetched without the session cookie and would
        come back 401. */
@@ -293,12 +311,16 @@
   body.context-hidden #chat-bar { padding-right: 58px; }
   body.side-hidden #chat-bar { padding-left: 58px; }
 
+  /* margin-right:auto rather than the bar's space-between doing it: there are
+     three children now, and space-between would spread the two per-chat
+     controls apart instead of keeping them together on the right. */
   #ws-bar {
     display: flex;
     flex-direction: column;
     gap: 3px;
     min-width: 0;
     max-width: 45%;
+    margin-right: auto;
   }
   #ws-bar[hidden] { display: none; }
   #ws-bar > label {
@@ -398,6 +420,73 @@
      following the default" are one glance apart. */
   #safety-btn.own .safety-dot { box-shadow: 0 0 0 3px var(--level-a25); }
   #safety-btn .safety-caret { width: 9px; height: 9px; opacity: 0.7; flex: 0 0 auto; }
+
+  /* ---- infinite chat's toggle -------------------------------------------
+     Two states and no scale, so unlike the safety button this one has only
+     two colours: --red off, --inf (a light blue) on. Everything else about it
+     is the safety button's shape, because the two sit side by side and a
+     control that nearly matches its neighbour looks broken. */
+  #infini-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+  #infini-bar > label {
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--dim);
+    opacity: 0.8;
+    padding-left: 2px;
+    user-select: none;
+  }
+  #infini-btn {
+    /* Off. Written out from the red hue rather than reused from the --red-aNN
+       set, which has no 25 or 40 in it - the button wants the same weights the
+       safety button beside it uses, not the lighter washes those are. */
+    --state:     hsl(var(--red-h) var(--red-s) var(--red-l));
+    --state-a12: hsl(var(--red-h) var(--red-s) var(--red-l) / 0.12);
+    --state-a25: hsl(var(--red-h) var(--red-s) var(--red-l) / 0.25);
+    --state-a40: hsl(var(--red-h) var(--red-s) var(--red-l) / 0.40);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 6px 9px;
+    min-height: 29px;
+    box-sizing: border-box;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    background: var(--panel);
+    color: var(--state);
+    border: 1px solid var(--state-a40);
+    transition: border-color 0.15s, background 0.15s, color 0.15s;
+  }
+  /* On. */
+  #infini-btn.on {
+    --state:     var(--inf);
+    --state-a12: var(--inf-a12);
+    --state-a25: var(--inf-a25);
+    --state-a40: var(--inf-a40);
+  }
+  #infini-btn:hover { background: var(--state-a12); border-color: var(--state); }
+  #infini-btn .infini-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--state);
+    flex: 0 0 auto;
+  }
+  /* The same ring the safety button uses for "this chat chose it" - here it
+     says the mode is live, so a chat that can move out from under you is
+     lit rather than merely a different colour. */
+  #infini-btn.on .infini-dot { box-shadow: 0 0 0 3px var(--state-a25); }
+  /* Mid-request, so a slow save doesn't read as a toggle that did nothing. */
+  #infini-btn.saving { opacity: 0.55; pointer-events: none; }
 
   /* Fixed, and placed against the button by JS: .main-col clips its overflow,
      and a dropdown is exactly the thing that has to hang outside its parent. */
@@ -926,6 +1015,21 @@
   }
   #context-tokens-fill.warn { background: #d29922; }
   #context-tokens-fill.hot { background: #f85149; }
+  /* What the next request will be charged full price for. Under the bar
+     rather than in it: it is a different question from "how full is the
+     window", and putting the two in one bar would make each of them harder to
+     read. Silent when the prefix is intact - a line that is always there is a
+     line nobody sees. */
+  #context-cache {
+    margin-top: 7px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  #context-cache.warn { color: #d29922; }
+  #context-cache b { font-weight: 600; }
+  #context-cache .why { color: var(--dim); font-weight: 400; }
   /* The injection list takes only what it needs - a handful of one-line
      collapsed sections, usually - and the tools list gets everything left
      over, rather than the two splitting the panel evenly and leaving a band
@@ -1447,13 +1551,100 @@
   .msg li { margin: 2px 0; }
   .msg a { color: var(--accent); }
   .msg del { opacity: 0.6; }
-  .tool-head { cursor: pointer; user-select: none; }
-  .tool-head:hover { color: var(--text); }
-  .tool-body {
-    margin-top: 6px;
-    white-space: pre-wrap;
-    word-break: break-word;
+  /* Compact tool row: icon · name · argument preview ....... time · chevron,
+     the little dropdown arrow pinned to the RIGHT, opening to the full call and
+     its output. Replaces the old "▸ tool result - name" line. The wrapper keeps
+     .msg.tool for layout but sheds the dashed bubble so the row reads as one
+     clean line in the stream. */
+  .tool.tool-compact {
+    background: none;
+    border: none;
+    padding: 0;
+    max-width: 95%;
+    /* The row reads at the same size as the messages around it - it is part of
+       the conversation, not a footnote to it. .tool sets 12px; undo that here. */
+    font-size: 14px;
   }
+  .tool-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 3px 8px;
+    border-radius: 7px;
+    cursor: pointer;
+    user-select: none;
+    line-height: 1.5;
+  }
+  .tool-row:hover { background: var(--panel); }
+  .tool-ico {
+    flex: 0 0 auto; width: 14px; text-align: center;
+    color: var(--accent); opacity: 0.85;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .tool-name {
+    flex: 0 0 auto; color: var(--text); font-weight: 600;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  .tool-arg {
+    color: var(--dim);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tool-gap { flex: 1 1 auto; min-width: 6px; }
+  .tool-took {
+    flex: 0 0 auto; color: var(--dim); opacity: 0.65;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px;
+  }
+  .tool-chev {
+    flex: 0 0 auto; width: 14px; text-align: center; color: var(--dim);
+    opacity: 0.6; transition: transform 0.15s ease, color 0.15s ease;
+  }
+  .tool-row:hover .tool-chev { opacity: 0.9; }
+  .tool-row.open .tool-chev { transform: rotate(90deg); color: var(--accent); opacity: 1; }
+  /* ---- a call that has not come back yet ---------------------------------
+     The row is drawn the instant the model commits to the call, not when its
+     result lands - so a forty-second tool is forty seconds of something
+     visibly running, instead of forty seconds of nothing followed by a
+     finished box appearing out of nowhere. The icon breathes while it waits
+     and .tool-took counts up, the same two signals the thinking block uses,
+     and both are replaced by the measured figure the moment the result
+     arrives. Open the row meanwhile and the drawer shows the full call: what
+     it is doing is exactly the question you have while it is doing it. */
+  .tool-pending .tool-ico { animation: tool-pulse 1.4s ease-in-out infinite; }
+  .tool-pending .tool-took { opacity: 0.85; }
+  @keyframes tool-pulse { 0%, 100% { opacity: 0.85; } 50% { opacity: 0.25; } }
+  @media (prefers-reduced-motion: reduce) {
+    .tool-pending .tool-ico { animation: none; opacity: 0.6; }
+  }
+  /* A call with no output to show - still running, or one the turn died in
+     the middle of. The drawer says which rather than sitting empty. */
+  .tool-out .tool-result.tool-waiting { opacity: 0.6; font-style: italic; }
+  /* Nothing is ever going to fill this one in: the turn was stopped, or it
+     failed, while the call was still out. Dimmed so it does not read as a
+     call that ran and returned nothing. */
+  .tool-unfinished .tool-ico, .tool-unfinished .tool-name { opacity: 0.5; }
+  .tool-out {
+    margin: 3px 0 4px; padding: 9px 11px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px;
+    white-space: pre-wrap; word-break: break-word; color: var(--dim);
+    max-height: 340px; overflow: auto;
+  }
+  .tool-out .tool-call {
+    color: var(--text); margin-bottom: 7px; padding-bottom: 7px;
+    border-bottom: 1px solid var(--border);
+  }
+  /* The safety verdict lives INSIDE the drawer now, at its top, rather than as
+     its own row above the tool line - one thing to open, not two. */
+  .tool-out .tool-safety {
+    margin-bottom: 7px; padding-bottom: 7px;
+    border-bottom: 1px solid var(--border);
+  }
+  .tool-out .safety-line { font-weight: 600; }
+  .tool-out .safety-reason { margin-top: 3px; color: var(--dim); }
+  .verdict-safe { color: var(--accent); }
+  .verdict-unsafe { color: var(--red); }
+  .verdict-off { color: var(--dim); }
   .key-set { color: var(--accent); font-size: 12px; font-weight: 400; }
   .key-unset { color: var(--dim); font-size: 12px; font-weight: 400; }
   .safety-head { cursor: pointer; user-select: none; margin-bottom: 4px; }
@@ -1516,6 +1707,13 @@
   .msg-took {
     border-bottom: 1px dotted currentColor;
     cursor: help;
+  }
+  /* A reply the connection cut off part-way - see markCut. Warning-coloured
+     rather than error-coloured: the words above it are real and worth reading,
+     there are simply fewer of them than the model wrote. */
+  .msg-cut {
+    color: var(--warn, #d08a20);
+    font-weight: 600;
   }
   /* The request is out and nothing has come back yet. One line above where the
      reply will appear, counting - the only thing on the page during the one
@@ -1815,6 +2013,12 @@
     position: fixed;
     z-index: 40;
     width: min(360px, calc(100vw - 24px));
+    /* With recents, a search box and an endpoint box under the list, the panel
+       is now tall enough to run off the top of a short window. Capping it here
+       and letting the list be the part that gives (it shrinks below its own
+       max-height, being the only flexible row) keeps the search box and the
+       endpoint box on screen, which are the two halves you came for. */
+    max-height: calc(100vh - 16px);
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -1831,6 +2035,8 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
+    flex: 1 1 auto;
+    min-height: 96px;
     max-height: min(50vh, 320px);
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -1864,6 +2070,99 @@
   /* Said when the query matches nothing, in the list's own place, so the panel
      doesn't collapse to a bare search box. */
   #mq-list .mq-none { color: var(--dim); padding: 7px 9px; }
+  /* "recent" and "all" - one word each, because the list under them says the
+     rest. The first has no top rule: it is the top. */
+  #mq-list .mq-group {
+    color: var(--dim);
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    padding: 8px 9px 3px;
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+  }
+  #mq-list .mq-group:first-child { border-top: 0; margin-top: 0; padding-top: 2px; }
+  /* Which endpoint this model is pinned to, on the row itself - the one thing
+     about a routed model that isn't in its id. */
+  .mq-item .via {
+    margin-left: auto;
+    flex: 0 0 auto;
+    color: var(--dim);
+    font-size: 11px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 0 6px;
+  }
+  /* The endpoint box under the list. A row of the panel rather than a second
+     panel: it is about the model that is already chosen, so it belongs in the
+     same place that chose it. */
+  #mq-route {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  #mq-route[hidden] { display: none; }
+  #mq-route-label { color: var(--dim); font-size: 11px; }
+  #mq-route-input { width: 100%; padding: 6px 9px; font-size: 12px; }
+  #mq-route-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    max-height: 96px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  #mq-route-list button {
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    color: var(--dim);
+    background: transparent;
+    border: 1px solid var(--dim);
+    border-radius: 10px;
+    padding: 1px 7px;
+    opacity: 0.75;
+  }
+  #mq-route-list button:hover { opacity: 1; }
+  #mq-route-list button.on { opacity: 1; color: var(--text); font-weight: 600; }
+  #mq-route-note { color: var(--dim); font-size: 11px; line-height: 1.4; }
+  /* The models tab's own version of the box beside the input: same panel, same
+     search, same recents - the only difference is that it fills a setting in a
+     form instead of switching the loaded chat. */
+  .model-pick {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 400;
+    text-align: left;
+    padding: 9px 10px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .model-pick:hover, .model-pick[aria-expanded="true"] { border-color: var(--accent-pop); }
+  .model-pick .who { color: var(--dim); flex: 0 0 auto; }
+  .model-pick .what { overflow-wrap: anywhere; }
+  .model-pick .via {
+    margin-left: auto;
+    flex: 0 0 auto;
+    color: var(--dim);
+    font-size: 11px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 0 6px;
+  }
+  .model-pick .mq-caret { width: 9px; height: 9px; opacity: 0.7; flex: 0 0 auto; }
+  .model-pick .via + .mq-caret, .model-pick .what + .mq-caret { margin-left: auto; }
+  .model-pick .via + .mq-caret { margin-left: 0; }
   button {
     background: var(--accent);
     color: var(--on-accent);
@@ -2967,13 +3266,16 @@
     #side-foot .hint { display: none; }
     #side-toggle, #context-fold { padding: 6px 10px; font-size: 18px; }
     #messages { padding: 8px 10px 10px; gap: 8px; }
-    /* Both corner controls still fit on a phone, but only just - the labels
-       above them go, since a workspace name and a level name each say what
-       they are without one. */
+    /* All three corner controls still fit on a phone, but only just - the
+       labels above them go, since a workspace name and a level name each say
+       what they are without one. */
     #chat-bar { gap: 8px; padding: 6px 8px 2px; min-height: 36px; }
     #chat-bar label { display: none; }
     body.side-hidden #chat-bar { padding-left: 54px; }
-    #ws-bar { max-width: 46%; }
+    #ws-bar { max-width: 36%; }
+    /* "on"/"off" is the one of the three that does NOT say what it is about
+       without its label, so it carries its own mark once the label has gone. */
+    #infini-name::before { content: "\221E\00a0"; }
     .msg { max-width: 95%; font-size: 15px; line-height: 1.5; }
     .chat-item { padding: 14px 28px 14px 16px; min-height: 65px; }
     .sub-item { padding: 10px 0 10px 14px; }
@@ -3044,6 +3346,18 @@
     <label for="ws-quick">workspace</label>
     <select id="ws-quick" title="where this chat's files and terminal work"></select>
   </div>
+  <!-- Infinite chat, per chat (scripts/infini.py). Its own control rather
+       than a line inside the safety dropdown: it is not a safety setting, and
+       it is the one thing about this chat that can move you into a different
+       chat without being asked - so it belongs where it can be seen without
+       opening anything, next to the other per-chat control. -->
+  <div id="infini-bar">
+    <label for="infini-btn">infinite</label>
+    <button id="infini-btn" type="button" role="switch" aria-checked="false">
+      <span class="infini-dot"></span>
+      <span id="infini-name">off</span>
+    </button>
+  </div>
   <div id="safety-bar">
     <label for="safety-btn">safety</label>
     <button id="safety-btn" type="button" aria-haspopup="dialog" aria-expanded="false"
@@ -3072,7 +3386,8 @@
   <!-- What is attached to the message being written. Empty (and hidden) until
        the paperclip is used; CSS puts it on its own line above the box. -->
   <div id="attached" hidden></div>
-  <!-- Filled in while the wake word has a session open - see drawHeard(). -->
+  <!-- The live caption, filled in while anything is being said to it -
+       the mic button held down or the wake word woken. See drawHeard(). -->
   <div id="heard" hidden></div>
   <input id="input" placeholder="message, or /command" autofocus>
   <!-- The picker itself is never seen: the paperclip beside it opens it. -->
@@ -3098,7 +3413,8 @@
       <path d="M9.5 8.7a2.6 2.6 0 0 1 5 .3"></path>
     </svg>
   </button>
-  <button type="button" id="model-quick" title="model this chat runs on"
+  <button type="button" id="model-quick" class="mq-anchor"
+          title="model this chat runs on"
           aria-haspopup="listbox" aria-expanded="false" aria-controls="model-panel">
     <span id="mq-label">model</span>
     <svg class="mq-caret" viewBox="0 0 10 10" fill="none" stroke="currentColor"
@@ -3114,10 +3430,20 @@
 <!-- The model list, opened by the box beside the input. A sibling of .main-col
      rather than a child of the form, for the reason the safety panel below
      gives: the column clips its overflow. Placed by JS (placeModelPanel). -->
-<div id="model-panel" role="dialog" aria-label="pick a model for this chat" hidden>
+<div id="model-panel" role="dialog" aria-label="pick a model" hidden>
   <input id="mq-search" type="text" autocomplete="off" spellcheck="false"
          placeholder="search providers and models" aria-label="search models">
   <div id="mq-list" role="listbox" aria-label="models"></div>
+  <!-- Which company the router should serve the chosen model FROM. Only ever
+       shown for a provider that routes (OpenRouter), and empty means the
+       router picks - see drawRoutePicker. -->
+  <div id="mq-route" hidden>
+    <label id="mq-route-label" for="mq-route-input">endpoint</label>
+    <input id="mq-route-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="auto - the router chooses">
+    <div id="mq-route-list"></div>
+    <div id="mq-route-note"></div>
+  </div>
 </div>
 
 <!-- The safety dropdown. Everything about how carefully THIS chat runs is in
@@ -3170,6 +3496,7 @@
     <button type="button" class="sp-link" id="sp-to-settings">safety settings</button>
   </div>
 
+
 </div>
 
 <div id="context-panel">
@@ -3181,6 +3508,10 @@
   <div id="context-tokens">
     <div id="context-tokens-label">tokens <span id="context-tokens-value">-</span></div>
     <div id="context-tokens-track"><div id="context-tokens-fill"></div></div>
+    <!-- Whether the next request hits the provider's prompt cache, and what
+         it costs if not - see drawCache(). Hidden until there is something
+         worth saying. -->
+    <div id="context-cache" hidden></div>
   </div>
   <div id="context-body"></div>
   <div id="tools-section">
@@ -3256,6 +3587,7 @@
       <button class="set-tab" data-tab="context">context</button>
       <button class="set-tab" data-tab="tools">tools/skills</button>
       <button class="set-tab" data-tab="compaction">compaction</button>
+      <button class="set-tab" data-tab="infiniagent">infiniagent</button>
       <button class="set-tab" data-tab="cron">cron</button>
       <button class="set-tab" data-tab="usage">usage</button>
       <button class="set-tab" data-tab="safety">safety</button>
@@ -3500,6 +3832,23 @@
           </div>
         </div>
 
+        <div class="field toggle">
+          <input type="checkbox" id="s-voice-captions">
+          <label for="s-voice-captions">show live captions while you speak</label>
+          <div class="model-hint">
+            Re-transcribes the whole clip roughly once a second so you can see
+            what it's heard so far, above the message box. Applies to both ways
+            of speaking to it - the button held here and the wake word below -
+            since they record the same way. Off by default: it's not needed to
+            notice when you've stopped talking (with the wake word that's judged
+            locally, for free, by loudness) and it multiplies what a session
+            bills, because every poll re-sends everything said so far rather
+            than only what's new - talking for ten seconds bills roughly what
+            fifty-five would normally cost. The one transcription that always
+            runs, captions or not, is the single pass at the end.
+          </div>
+        </div>
+
         <!-- Listening for a phrase instead of holding a key. Two ways to do
              it: a small model that knows one phrase (openWakeWord), or the
              voice tab's own transcriber asked about short rolling clips -
@@ -3553,22 +3902,6 @@
           <div class="field toggle">
             <input type="checkbox" id="s-wake-auto">
             <label for="s-wake-auto">open the microphone as soon as a page loads</label>
-          </div>
-
-          <div class="field toggle">
-            <input type="checkbox" id="s-wake-captions">
-            <label for="s-wake-captions">show live captions while listening</label>
-            <div class="model-hint">
-              Re-transcribes the whole clip roughly once a second so you can see
-              what it's heard so far, above the message box. Off by default -
-              it's not needed to notice when you've stopped talking (that's
-              judged locally, for free, by loudness) and it multiplies what a
-              session bills: talking for ten seconds bills roughly what
-              fifty-five would normally cost, since every poll re-sends
-              everything said so far, not just what's new. The one
-              transcription that always runs, captions or not, is the single
-              pass once you go quiet.
-            </div>
           </div>
 
           <div class="field">
@@ -3641,6 +3974,55 @@
         <div class="field">
           <label>the instruction sent after the conversation</label>
           <textarea id="s-compaction-prompt" spellcheck="false"></textarea>
+        </div>
+      </div>
+
+      <!-- infiniagent -->
+      <!-- Everything GLOBAL about infinite chat. Which chats are actually IN
+           the mode is not here: that is the toggle beside the safety slider in
+           the corner of the chat window, per chat and deliberately with no
+           global on/off (see main.Agent.set_infinite). -->
+      <div class="tab-panel" data-panel="infiniagent" hidden>
+        <div class="set-note">
+          After each turn in a chat with infinite mode on, a small checking
+          model reads an abbreviated version of the recent conversation and says
+          whether the subject has really changed. Which chats are in the mode is
+          not set here - it is the "infinite" toggle in the corner of the chat
+          window, per chat. When the subject has changed, that chat forks:
+          the turns from where the new subject began are copied into a new chat
+          and this window follows. The old chat keeps everything it had.
+        </div>
+        <div class="field">
+          <label>the checking model - what judges whether the subject changed</label>
+          <div class="row">
+            <select id="s-infini-provider"></select>
+            <input id="s-infini-model" list="s-infini-model-list" autocomplete="off" placeholder="model id"><datalist id="s-infini-model-list"></datalist>
+          </div>
+          <div class="model-hint" id="s-infini-model-hint"></div>
+        </div>
+        <div class="field">
+          <label for="s-infini-turns">how many recent turns it checks - one
+            turn being what you said and the last thing the agent said back</label>
+          <div class="row temp-row">
+            <input type="range" id="s-infini-turns" min="2" max="100" step="1">
+            <span id="s-infini-turns-value" class="temp-value"></span>
+          </div>
+        </div>
+        <div class="field">
+          <label>temperature</label>
+          <div class="row temp-row">
+            <input type="range" id="s-infini-temperature" min="0" max="2" step="0.1">
+            <span id="s-infini-temperature-value" class="temp-value"></span>
+          </div>
+        </div>
+        <div class="field">
+          <label>what it is asked, after the transcript</label>
+          <textarea id="s-infini-prompt" spellcheck="false"></textarea>
+        </div>
+        <div class="field">
+          <label>the last judgement - exactly what was sent, and what came back</label>
+          <div id="infini-last" class="set-note"></div>
+          <textarea id="infini-last-text" spellcheck="false" readonly></textarea>
         </div>
       </div>
 
@@ -3758,6 +4140,17 @@
           <label>always allowed - tool names</label>
           <div class="list-edit" id="s-whitelist"></div>
           <button type="button" class="ghost list-add" data-add="s-whitelist">+ add a tool</button>
+        </div>
+
+        <div class="field">
+          <label>always allowed - terminal commands</label>
+          <div class="list-edit" id="s-terminal-whitelist"></div>
+          <button type="button" class="ghost list-add" data-add="s-terminal-whitelist">+ add a command</button>
+          <div class="live-note">Matched on whole leading words, so "git status" allows
+            <code>git status --short</code> and not <code>git push</code>. Every command in a
+            call has to be listed for it to skip the check, and anything with a redirect,
+            a <code>$(...)</code> or an argument like find's <code>-exec</code> goes to the
+            model however it is listed.</div>
         </div>
 
         <div class="field">
@@ -3951,6 +4344,23 @@ function endResponse(timing) {
   waitingNow = thinkingNow = null;
 }
 
+// Close out the reply bubble being streamed into and drop the reference. Called
+// at every point a response ends - a tool call, the turn finishing, a stop, an
+// error. Its live "still writing" counter is stopped HERE rather than only on
+// the "timing" broadcast, because a provider can end a response without ever
+// sending one (claude-sub does), and the counter left ticking then would run on
+// forever - past the tool result, past the next message, past the turn itself.
+// If "timing" already settled the figure the counter is no longer ticking, so
+// this leaves that measured value untouched; otherwise it clears the live
+// counter, exactly as a reload with no timing in the history would.
+function sealReply(timing) {
+  if (!streaming) return;
+  const wrap = streaming.parentElement;
+  const live = wrap.querySelector(".msg-took");
+  if (live && ticking.some(t => t.el === live)) attachTiming(wrap, timing || null);
+  streaming = null;
+}
+
 // Whether the current chat has a turn in flight right now - true from the
 // "user"/"report" broadcast that starts one until "done" closes it out.
 // A /stop closes it out too, and just as immediately: the server ends the turn
@@ -3971,6 +4381,23 @@ const TOOL = "tool", LATER = "later";
 // already running, mirrored from main.MID_TURN. It is written for the model,
 // so the page takes it back off before drawing what the user typed.
 const MID_TURN = "The user sent this while you were working, mid-task: ";
+// The two lines infinite chat writes when it splits a chat (scripts/infini.py):
+// the one that opens the new chat, naming where its first turns came from, and
+// the one left at the end of the old one, naming where things carried on. Both
+// are real user turns so the model reads them, and both are drawn as a thin
+// rule across the column rather than as a message, because nobody said them.
+const CARRIED_FROM = "[carried from ";
+const CONTINUED_IN = "[continued in ";
+
+// How a spoken message is marked, mirrored from main.VOICE_INPUT. Not stripped
+// for display - a bubble saying it was spoken rather than typed is worth
+// having - but the page has to be able to
+// build the string itself, so the grey bubble a spoken message leaves while it
+// waits for a running turn is the same text the server's own "user" event
+// comes back with, and the two never sit on screen together. Put on by the
+// page rather than by the server, which is what lets hold-to-talk and the wake
+// word share one send path and still be marked as spoken (see sayFinish).
+const VOICE_INPUT = "voice_input: ";
 
 // Messages written while turnBusy that are not on screen as themselves yet,
 // oldest first: {text, at, when, sent}.
@@ -4002,12 +4429,69 @@ let approvalBox = null;
 // first box - a safety row describing a different call than the one it sits on.
 let pendingSafety = [];
 
+// The call text (name + args) from the last "toolcall" event. The row for that
+// call is drawn the moment the event lands and carries the text itself (see
+// toolLine), so this is now only the fallback: what a "toolresult" arriving
+// with no row of its own to fill draws its argument preview and its drawer's
+// full-call line from. A single slot, not a queue, for the same reason it
+// always was - a call and its result arrive as a pair.
+let pendingCall = "";
+
 // Whether a scrolling box is (essentially) scrolled to its bottom already -
 // the signal for whether new content should pull the view down with it, or
 // leave it alone because the user has scrolled up to read something.
 function nearBottom(box) {
-  return box.scrollHeight - box.scrollTop - box.clientHeight < 4;
+  // A generous band, not a hairline. At 4px the follow broke the instant
+  // anything nudged the view even slightly off the exact bottom - an image
+  // finishing loading, a reasoning block opening, a live caption growing - and
+  // the next append would then decide you'd "scrolled up" and stop tracking.
+  // 80px is a few lines: comfortably still "at the bottom" to the eye, while a
+  // deliberate scroll up to read something is always further than that.
+  return box.scrollHeight - box.scrollTop - box.clientHeight < 80;
 }
+
+// ---- staying pinned to the latest message ------------------------------------
+// The chat box "follows" the newest text: while you sit at the bottom, anything
+// that arrives - streamed tokens, a tool result, a reasoning block opening -
+// pulls the view down with it. Scroll up by hand and that stops, so you can
+// read back without being yanked around; come near the bottom again and it
+// resumes.
+//
+// The per-append `nearBottom` checks scattered through the draw code decide
+// this a moment before each append, which is enough for content that arrives
+// THROUGH those paths. It is not enough for everything: an image finishing
+// loading, a font swapping, a caption line growing, the reasoning box toggling
+// - each changes the height without going through an append, drifts the view
+// off the bottom, and the next real append then reads that drift as "the user
+// scrolled up" and quietly stops following. That is the "even at the bottom it
+// stops tracking" this fixes.
+//
+// So the intent is held as one flag - are we following? - set ONLY by the
+// user's own scrolling, and a MutationObserver re-pins to the bottom on any
+// change to the box while that flag is on, no matter which path caused it.
+let stickBottom = true;
+function pinBottom() { messages.scrollTop = messages.scrollHeight; }
+
+// The user's own scrolling is the only thing that changes whether we follow:
+// scroll up out of the band and we stop; come back into it and we resume. Our
+// own pinBottom lands exactly at the bottom, which reads as "following", so it
+// never fights itself. rAF-coalesced because scroll fires in bursts.
+let stickTick = false;
+messages.addEventListener("scroll", () => {
+  if (stickTick) return;
+  stickTick = true;
+  requestAnimationFrame(() => { stickTick = false; stickBottom = nearBottom(messages); });
+}, { passive: true });
+
+// The catch-all: while following, any change to the box - a token streamed in,
+// a row added, a block expanded - re-pins to the bottom on the next frame.
+// Coalesced to once per frame so a burst of mutations is one scroll, not many.
+let pinQueued = false;
+new MutationObserver(() => {
+  if (!stickBottom || pinQueued) return;
+  pinQueued = true;
+  requestAnimationFrame(() => { pinQueued = false; if (stickBottom) pinBottom(); });
+}).observe(messages, { childList: true, subtree: true, characterData: true });
 
 // Whether the messages box is showing anything decides the empty-chat splash
 // layout (input centred, #messages hidden) vs. the normal bottom bar. Called
@@ -4629,6 +5113,24 @@ function timeRow(wrap) {
 // the hover. Replaces any live counter that was there (see startElapsed),
 // which is what turns the ticking number on a streaming reply into the settled
 // one the end-of-turn redraw will show.
+// A reply the wire cut off part-way through, said on the message itself.
+//
+// It goes on the same row as the timing rather than into the bubble, because
+// the bubble is the model's words and this is not one of them. The class
+// carries the colour (see .msg-cut); the title says what happened, since "cut
+// off" on its own invites the reasonable but wrong guess that Uniagent trimmed
+// it deliberately.
+function markCut(wrap) {
+  if (!wrap || wrap.querySelector(".msg-cut")) return;
+  const row = timeRow(wrap);
+  const span = document.createElement("span");
+  span.className = "msg-cut";
+  span.textContent = "cut off";
+  span.title = "the connection to the model dropped before this reply finished";
+  if (row.childNodes.length) row.append(" \u00b7 ");
+  row.append(span);
+}
+
 function attachTiming(wrap, timing) {
   const row = timeRow(wrap);
   const old = row.querySelector(".msg-took");
@@ -4853,7 +5355,18 @@ function renderLive(live, box = messages, carried = null, said = null) {
   // error - and if the two ever fail to match, the text is DRAWN. Showing a
   // paragraph twice is a redraw away from being right; not showing it at all is
   // what this whole path exists to stop.
-  const written = squash((said && said.content) || "") + squash((said && said.raw_call) || "");
+  // What the history already shows of that response, in the TWO shapes its
+  // reply can have reached this page in. A front-end that draws the call as
+  // its own row never has the call text in `partial` - server.py hands those
+  // deltas to on_call_delta instead of on_text (see main._stream's show_call)
+  // - so the record's copy is the prose alone; one that doesn't have that
+  // separate channel has the prose with the call written onto the end of it.
+  // The history keeps the two apart either way, so both are reconstructed
+  // here and either counts as a match. Checking only the second is what made
+  // a window rebuilt mid-tool-call draw the prose a second time, underneath
+  // the call's own row.
+  const prose = squash((said && said.content) || "");
+  const written = [prose, prose + squash((said && said.raw_call) || "")];
   const thought = squash((said && said.reasoning_content) || "");
   // The WHOLE of it, not a substring of it. "The history has caught up" means
   // the turn up there is this same response, which is an equality - and a
@@ -4864,8 +5377,16 @@ function renderLive(live, box = messages, carried = null, said = null) {
   // being too clever about avoiding the other one.
   const drawn = (text, into) => {
     const want = squash(text);
-    return want && want !== into;
+    if (!want) return false;
+    return !(Array.isArray(into) ? into : [into]).includes(want);
   };
+  // Whether the transcript above has caught up with the response the record is
+  // holding - all of it, not just its reply. The three parts below are parts
+  // of ONE response, so a record that overlaps the history overlaps it whole;
+  // asking the question only of the reply is what drew a second "waited for"
+  // line under a running call's row, on a window rebuilt while the tool was
+  // still out.
+  const caughtUp = !!said && !drawn(partial, written) && !drawn(thinking, thought);
   const since = (at) => (typeof at === "number" && typeof live.now === "number"
                          ? Math.max(0, (live.now - at) * 1000) : 0);
   const responseAge = since(live.started);
@@ -4877,11 +5398,18 @@ function renderLive(live, box = messages, carried = null, said = null) {
   // long the wait lasted before the first token.
   if (live.phase === "waiting") {
     waitingNow = waitedLine(box, phaseAge);
-  } else if (typeof live.latency === "number") {
+  } else if (typeof live.latency === "number" && !caughtUp) {
     // The measured wait, stamped by the server the moment the first token
     // arrived. Not derived from the current phase's start - once the model is
     // writing, that start is the end of the thinking, and the wait would come
     // out as the wait plus everything it thought.
+    //
+    // Only while this response is still the record's alone. Once the history
+    // has it, the history draws this line itself (render's assistant branch,
+    // from the same timing dict) and drawing it here as well puts two of them
+    // on the page - which is what a rebuild during a tool call did, because a
+    // tool call is precisely the stretch where the record has finished a
+    // response that the history has already written.
     sealedWaited({ latency: live.latency }, box);
   }
 
@@ -4964,65 +5492,335 @@ function callName(raw) {
   return (open === -1 ? raw : raw.slice(0, open)).trim();
 }
 
+// A glyph for the tool, so the eye sorts a run of calls by shape before it
+// reads a word. Matched loosely by name - the same tool wears a few names
+// across providers (Bash/terminal/shell) and this catches the family.
+function toolIcon(name) {
+  const n = (name || "").toLowerCase();
+  if (/bash|terminal|shell|command|exec|run/.test(n)) return "⌘";   // ⌘
+  if (/edit|write|patch|apply|replace|create/.test(n)) return "✎";  // ✎
+  if (/read|cat|view|open|file|notebook/.test(n))      return "◇";  // ◇
+  if (/search|grep|find|glob/.test(n))                 return "⌕";  // ⌕
+  if (/fetch|http|url|firefox|web|browse/.test(n))     return "⊙";  // ⊙
+  if (/mail|email/.test(n))                            return "✉";  // ✉
+  if (/workspace|cd|move|dir/.test(n))                 return "▤";  // ▤
+  if (/cron|schedule|timer|wake/.test(n))              return "⏲";  // ⏲
+  if (/input|key|click|mouse|type/.test(n))            return "⌨";  // ⌨
+  return "•";                                                       // •
+}
+
+// One tidy line, collapsed and clipped - what rides beside the tool name as a
+// preview of what the call actually did.
+function oneLine(s) {
+  s = String(s == null ? "" : s).replace(/\s+/g, " ").trim();
+  return s.length > 140 ? s.slice(0, 139) + "…" : s;
+}
+
+// The text of ONE call out of an assistant turn, for the row that draws it.
+//
+// A turn stores what the model wrote in raw_call, and when it called several
+// tools at once that is every one of them, newline separated - which is right
+// for what raw_call is for (replaying the response as text on a provider with
+// no native tool role, and telling whether the history has caught up with what
+// is on screen) and wrong for a row, which is a single call. Handed the whole
+// turn's text, two parallel rows each showed both calls, and the safety log -
+// one line per call, keyed on that call's own text - matched neither of them.
+//
+// Three sources, best first:
+//
+//   raw_calls[n]  the call exactly as it streamed, whitespace and all. Written
+//                 only when a turn made more than one call, so it is absent
+//                 from every single-call turn and from every transcript
+//                 written before batching existed.
+//   the call      rebuilt as name(arguments) from tool_calls itself, which has
+//                 always been in the history. The arguments are re-serialised
+//                 rather than the original text, so the spacing can differ
+//                 from what was watched being typed - close enough for a row,
+//                 which is why this is the fallback and not the first choice.
+//   raw_call      the whole turn, which for ONE call is that call and nothing
+//                 else. Never reached by a turn with several.
+function callRaw(turn, call, n) {
+  const exact = turn.raw_calls && turn.raw_calls[n];
+  if (exact) return exact;
+  const fn = call && call.function;
+  if (fn && fn.name && (turn.tool_calls || []).length > 1) {
+    return fn.name + "(" + (fn.arguments || "{}") + ")";
+  }
+  return turn.raw_call;
+}
+
+// The argument worth showing next to a tool's name. raw_call is `name(args)`
+// with args normally JSON, so this reaches in and picks the ONE field that is
+// the heart of the call - the command run, the file touched, the thing searched
+// for - rather than dumping the whole args blob. Falls back to the first string
+// argument, then to the raw inner text, so an unfamiliar tool still shows
+// something useful rather than nothing.
+function callPreview(raw) {
+  if (!raw) return "";
+  const open = raw.indexOf("(");
+  if (open === -1) return "";
+  let inner = raw.slice(open + 1).trim();
+  if (inner.endsWith(")")) inner = inner.slice(0, -1).trim();
+  let args = null;
+  try { args = JSON.parse(inner); } catch (e) { /* not JSON - shown as-is below */ }
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    const primary = ["command", "cmd", "file_path", "path", "query", "q", "url",
+                     "pattern", "expression", "code", "text", "content", "prompt",
+                     "message", "name", "id"];
+    for (const k of primary) {
+      if (typeof args[k] === "string" && args[k].trim()) return oneLine(args[k]);
+    }
+    for (const v of Object.values(args)) {
+      if (typeof v === "string" && v.trim()) return oneLine(v);
+      if (typeof v === "number" || typeof v === "boolean") return oneLine(v);
+    }
+    return "";
+  }
+  return oneLine(inner);
+}
+
 // `timing` is how long the call took to run ({"ms": n}), from the turn or from
 // the live broadcast. It goes on the head rather than inside the box because
 // that is the question you have while the box is still shut: a turn that felt
 // slow is as likely to have been a 40-second web fetch as a slow model, and
 // without this nothing on the page could tell you which.
-function toolLine(text, box, name, timing) {
+//
+// `text` is the tool's output - or NULL for a call that has been made and has
+// not come back yet, which is the ordinary live case: the row is drawn off the
+// "toolcall" broadcast, which fires the moment the model commits to the call
+// and long before it has run, and settleTool() below drops the result into
+// this same row when it arrives. A pending row counts up where its duration
+// will go, so the wait is visible while it is happening rather than only
+// measurable once it is over.
+//
+// `id` is the tool_call_id, kept on the element so a result can find its own
+// row again - which is what stops several calls made at once from settling
+// into each other's boxes (see pendingToolRow).
+function toolLine(text, box, name, timing, callText, id) {
+  const running = text === null || text === undefined;
   const wrap = document.createElement("div");
-  wrap.className = "msg tool";
-  const head = document.createElement("div");
-  head.className = "tool-head";
-  const body = document.createElement("div");
-  body.className = "tool-body";
-  body.hidden = true;
-  body.textContent = text;
-  // Named when we know which call this is the result OF. It matters as soon as
-  // a model makes several calls at once - three identical "tool result" boxes
-  // under three different calls is a puzzle, and the name is the whole answer.
-  const took = timing && humanMs(timing.ms);
-  const label = "tool result" + (name ? " - " + name : "") + (took ? " · " + took : "");
-  head.textContent = "▸ " + label;
-  head.addEventListener("click", () => {
-    body.hidden = !body.hidden;
-    head.textContent = (body.hidden ? "▸" : "▾") + " " + label;
+  wrap.className = "msg tool tool-compact" + (running ? " tool-pending" : "");
+  // What this row is, for the result that comes looking for it. Both are
+  // best-effort - a provider can report neither - so pendingToolRow falls back
+  // through them in order rather than relying on any one being there.
+  if (id) wrap.dataset.callId = id;
+  if (name) wrap.dataset.tool = name;
+  if (callText) wrap.dataset.call = callText;
+
+  // The one clean line: icon · name · argument preview ....... time · chevron.
+  const row = document.createElement("div");
+  row.className = "tool-row";
+
+  const ico = document.createElement("span");
+  ico.className = "tool-ico";
+  ico.textContent = toolIcon(name);
+
+  const nm = document.createElement("span");
+  nm.className = "tool-name";
+  // Named when we know which call this is the result OF - the whole point once
+  // a model makes several calls at once, where three bare "tool result" rows
+  // are a puzzle and the name is the answer.
+  nm.textContent = name || "tool";
+
+  const arg = document.createElement("span");
+  arg.className = "tool-arg";
+  arg.textContent = callPreview(callText);
+
+  const gap = document.createElement("span");
+  gap.className = "tool-gap";
+
+  const took = document.createElement("span");
+  took.className = "tool-took";
+  // On the row, not inside: it is the question you have while the drawer is
+  // still shut - a turn that felt slow is as likely a 40-second fetch as a slow
+  // model, and this is what tells you which without a click.
+  //
+  // While the call is still out there is no figure to show, so it shows the
+  // one thing that is true - how long it has been running - the same way the
+  // wait and the thinking block do. settleTool replaces it with the server's
+  // measured number the moment the result lands.
+  if (running) startTick(took, counter("running…"));
+  else if (timing) took.textContent = humanMs(timing.ms);
+
+  const chev = document.createElement("span");
+  chev.className = "tool-chev";
+  chev.textContent = "›";
+
+  row.append(ico, nm, arg, gap, took, chev);
+
+  // The drawer: the full call at the top (so the compact row loses nothing that
+  // the old syntax-in-the-bubble used to show), then the result below it.
+  const out = document.createElement("div");
+  out.className = "tool-out";
+  out.hidden = true;
+  if (callText) {
+    const call = document.createElement("div");
+    call.className = "tool-call";
+    call.textContent = callText;
+    out.append(call);
+  }
+  const res = document.createElement("div");
+  res.className = "tool-result" + (running ? " tool-waiting" : "");
+  res.textContent = running ? "running…" : text;
+  out.append(res);
+
+  row.addEventListener("click", () => {
+    out.hidden = !out.hidden;
+    row.classList.toggle("open", !out.hidden);
   });
-  wrap.append(head, body);
+
+  wrap.append(row, out);
   const stick = nearBottom(box);
   box.appendChild(wrap);
   if (box === messages) updateEmptyChat();
   if (stick) box.scrollTop = box.scrollHeight;
-  return body;
+  // Returns the drawer element, whose .parentElement is the wrap - which is
+  // what callers reach for to hang a safety dropdown on (see attachSafety).
+  return out;
 }
 
-// A small expandable "safety check: SAFE/UNSAFE" row put at the top of a tool
-// result, opening to the verification model's reasoning.
+// ---- filling a pending row in -------------------------------------------
+// A call's row goes up when the call is made and is completed when its result
+// arrives, which are two different moments and often a long way apart. These
+// three are the second moment, in its three flavours: the result came back,
+// nothing ever will, and every row at once when a turn ends.
+
+// The result for a row that was drawn when its call was made. Everything is
+// replaced IN PLACE - the row does not move and nothing is inserted around it,
+// so a result landing cannot shift the transcript under whatever you were
+// reading.
+function settleTool(wrap, text, name, timing) {
+  if (!wrap) return null;
+  const box = messages.contains(wrap) ? messages : null;
+  const stick = box ? nearBottom(box) : false;
+  wrap.classList.remove("tool-pending");
+  const took = wrap.querySelector(".tool-took");
+  if (took) {
+    // The server's measured figure, or - when the caller has none, which is
+    // what a denied call answers with - the page's own count. A row that has
+    // stopped counting has to say what it counted; blanking it would throw
+    // away the one number anybody was watching for.
+    const ran = stopTick(took);
+    took.textContent = humanMs(timing ? timing.ms : ran);
+  }
+  // The result knows which tool it came from. Taken in preference to whatever
+  // the row was drawn with, because a provider that names one and not the
+  // other is exactly the case this is here for - and a row that opened as a
+  // bare "tool" should not stay that way once the answer says what it was.
+  if (name) {
+    const nm = wrap.querySelector(".tool-name");
+    const ico = wrap.querySelector(".tool-ico");
+    if (nm) nm.textContent = name;
+    if (ico) ico.textContent = toolIcon(name);
+    wrap.dataset.tool = name;
+  }
+  const res = wrap.querySelector(".tool-result");
+  if (res) {
+    res.classList.remove("tool-waiting");
+    res.textContent = text;
+  }
+  if (stick) box.scrollTop = box.scrollHeight;
+  return wrap;
+}
+
+// A pending row picked back up by a redraw: the call is still out, so it goes
+// back to counting - from where it had actually got to, on the server's clock.
+// The page's own would start the count again from zero and draw a call that
+// has been running for two minutes as one that had just begun.
+function resumeTool(wrap, already = 0) {
+  if (!wrap) return null;
+  const took = wrap.querySelector(".tool-took");
+  if (took) startTick(took, counter("running…"), already);
+  return wrap;
+}
+
+// A row whose call is never going to come back: the turn was stopped, or it
+// failed, while the tool was still out. Says so, rather than leaving a counter
+// running forever on a chat that has finished working - and dimmed, so it does
+// not read as a call that ran and returned nothing.
+function abandonTool(wrap) {
+  if (!wrap) return null;
+  wrap.classList.remove("tool-pending");
+  wrap.classList.add("tool-unfinished");
+  const took = wrap.querySelector(".tool-took");
+  if (took) { stopTick(took); took.textContent = ""; }
+  const res = wrap.querySelector(".tool-result");
+  if (res) {
+    res.classList.add("tool-waiting");
+    res.textContent = "no result - the turn ended while this call was still running";
+  }
+  return wrap;
+}
+
+// Every row still waiting, given up on together, because the turn is over.
+// The redraw that follows a turn ending rebuilds them from the history and
+// reaches the same conclusion; this is what stops them counting in the second
+// or two before it lands, and what covers the endings that never redraw.
+function abandonTools() {
+  messages.querySelectorAll(".msg.tool.tool-pending").forEach(abandonTool);
+}
+
+// The pending row for one specific call - by the id the server sent with it,
+// or, with no id, by the exact text of the call. Null when that call has no
+// row yet, which is what the live path asks before drawing one: the call is
+// written to the history before its broadcast goes out, so a window that
+// happened to rebuild in between already has the row from there and must not
+// draw a second.
+function toolRowFor(id, callText) {
+  const rows = Array.from(messages.querySelectorAll(".msg.tool.tool-pending"));
+  if (id) return rows.find(r => r.dataset.callId === id) || null;
+  if (callText) return rows.find(r => r.dataset.call === callText) || null;
+  return null;
+}
+
+// The row a result belongs in: the one its own call opened.
+//
+// By id when there is one, which is exact. By name and then by age when there
+// is not - a provider that reports neither leaves only order to go on, and the
+// oldest row still waiting is the right one far more often than not. Guessing
+// wrong costs a result in the wrong box until the end-of-turn redraw, which
+// rebuilds every row from the history and its ids and cannot be wrong; so the
+// three cheap tries are worth making and none of them is worth agonising over.
+function pendingToolRow(name, id) {
+  const rows = Array.from(messages.querySelectorAll(".msg.tool.tool-pending"));
+  return toolRowFor(id, null)
+      || (name && rows.find(r => r.dataset.tool === name))
+      || rows[0] || null;
+}
+
+// The "safety check: SAFE/UNSAFE" verdict, folded into the TOP of the tool
+// row's own drawer - so opening a call shows its verdict, its reasoning, the
+// call and its result together, one dropdown instead of a second row stacked
+// above the first. The verdict colour carries the meaning at a glance; the
+// reason sits under it.
 //
 // checked === false is the third case: the gate was OFF, so this call ran
-// without being vetted at all. It gets a row of its own (reading OFF, opening
-// to where that setting lives - cron.json for a cron job, the safety tab for
-// everything else) rather than no row, because "not checked" and "the log
-// didn't load" used to look exactly the same from here: like nothing.
+// without being vetted at all. It reads OFF (dim, not red - a job deliberately
+// set to safety: off isn't an alarm every time it calls a tool) with the reason
+// pointing at where that setting lives.
 function attachSafety(wrap, v) {
+  const out = wrap.querySelector(".tool-out");
+  if (!out) return;  // a degenerate tool line with no drawer - nothing to embed in
   const off = v.checked === false;
-  const head = document.createElement("div");
-  head.className = "safety-head";
-  const body = document.createElement("div");
-  body.className = "safety-body";
-  body.hidden = true;
-  body.textContent = v.reason;
-  const label = () => {
-    head.innerHTML = "";
-    head.append((body.hidden ? "▸" : "▾") + " safety check: ");
-    const verdict = document.createElement("span");
-    verdict.className = off ? "verdict-off" : (v.safe ? "verdict-safe" : "verdict-unsafe");
-    verdict.textContent = off ? "OFF" : (v.safe ? "SAFE" : "UNSAFE");
-    head.append(verdict);
-  };
-  label();
-  head.addEventListener("click", () => { body.hidden = !body.hidden; label(); });
-  wrap.prepend(head, body);
+  const block = document.createElement("div");
+  block.className = "tool-safety";
+
+  const verdictLine = document.createElement("div");
+  verdictLine.className = "safety-line";
+  verdictLine.append("safety check: ");
+  const verdict = document.createElement("span");
+  verdict.className = off ? "verdict-off" : (v.safe ? "verdict-safe" : "verdict-unsafe");
+  verdict.textContent = off ? "OFF" : (v.safe ? "SAFE" : "UNSAFE");
+  verdictLine.append(verdict);
+  block.append(verdictLine);
+
+  if (v.reason) {
+    const reason = document.createElement("div");
+    reason.className = "safety-reason";
+    reason.textContent = v.reason;
+    block.append(reason);
+  }
+  out.prepend(block);  // above the call and the result
 }
 
 // Draw a chat transcript into a container as bubbles. The history is now a
@@ -5037,7 +5835,16 @@ function attachSafety(wrap, v) {
 // and fetched separately for the same reason `vals` is: neither has ever been
 // sent to a model, and neither should be. Paired by index, which is what
 // stamp_history reconciles on every save to keep true.
-function render(text, box = messages, vals = null, stamps = null, live = null) {
+//
+// `working` is whether this transcript's turn is still in flight, which is
+// what decides how a call with no result yet is drawn: as one still running,
+// or as one a turn died in the middle of. Left out, the live record answers
+// it - it exists for exactly as long as the turn does (see server.py's
+// _live_begin), and it carries when the running call started so the counter
+// can resume at the right number. A subagent's transcript is a file with no
+// such record beside it, so its caller passes the answer in.
+function render(text, box = messages, vals = null, stamps = null, live = null,
+                working = null) {
   // A redraw clears the box, so the "am I at the bottom" check has to happen
   // before that - and if it says no, the old position is restored after,
   // rather than the fresh scrollHeight it would otherwise land on.
@@ -5089,9 +5896,20 @@ function render(text, box = messages, vals = null, stamps = null, live = null) {
     return;
   }
 
-  const toolWraps = [];  // role:"tool" boxes, in the order they appear
+  const toolWraps = [];  // tool boxes, in the order their calls were made
   const toolCalls = [];  // the call text behind each one, for pairing verdicts
   const rawById = {};    // tool_call_id -> the exact text the model wrote
+  // Which of this transcript's calls have a result in it. One that doesn't is
+  // either running right now or one the turn died in the middle of, and both
+  // want a row on the page: a call drawn only when its result arrives is a
+  // call that is missing from the screen for exactly as long as it is the
+  // thing being waited for. Which of the two it is gets decided after the
+  // loop, where the whole list is known - see `unanswered`.
+  const answered = new Set();
+  for (const t of turns) {
+    if (t && t.role === "tool" && t.tool_call_id) answered.add(t.tool_call_id);
+  }
+  const unanswered = [];  // their rows, in the order the calls were made
   // This turn's [short, full] time, or ["", ""] when the chat has no stamps
   // (or fewer than it has turns, which is any conversation that was already
   // going before this existed - the old messages stay undated, the new ones
@@ -5128,6 +5946,13 @@ function render(text, box = messages, vals = null, stamps = null, live = null) {
         // (see main.note_turn) - but nobody typed it, so it is drawn as the
         // note it is rather than as a message.
         line("system", t.content, box, ...when(i));
+      } else if (t.content.startsWith(CARRIED_FROM) || t.content.startsWith(CONTINUED_IN)) {
+        // A fork's seam. The carried turns sit UNDER this line in the new chat
+        // and the parent's tail sits above it in the old one, so the same thin
+        // divider reads correctly at both ends of the split.
+        gapLine(t.content.replace(/^\[|\]$/g, "")
+                  .replace("carried from", "split from")
+                  .replace("continued in", "continued in chat"), box);
       } else if (t.content.startsWith(MID_TURN)) {
         // A message sent with the agent already working, folded into that turn
         // between two of its passes. The label in front of it is there for the
@@ -5141,20 +5966,22 @@ function render(text, box = messages, vals = null, stamps = null, live = null) {
         line("user", t.content, box, ...when(i));
       }
     } else if (t.role === "assistant") {
-      // Never invent tool-call syntax here. raw_call, when there is one, is
-      // the exact text the model actually wrote - DSML tags, plain JSON,
-      // whatever its own syntax was that turn - shown completely as-is. No
-      // reconstruction, no reformatting, no synthetic "name(args)" text: that
-      // used to exist as a fallback and it's exactly the "weird syntax" that
-      // caused real confusion, both for the user reading it and (worse) for the
-      // model reading its own history back. Older turns saved before
-      // raw_call existed just show their prose, nothing invented in its place.
+      // The bubble is the model's PROSE only. The tool call it made is no longer
+      // dumped here as raw syntax - it rides on the compact tool row below (see
+      // toolLine), where its name and argument show at a glance and the full
+      // exact call is one click away in the drawer. This also makes reload match
+      // the live view, which never showed the call syntax in the bubble either.
       let shown = t.content || "";
-      if (t.raw_call) shown += (shown ? "\n\n" : "") + t.raw_call;
       // Remember which call this turn made, by id. The validation log records
       // the same raw text against its verdict, so this is what lets a verdict
-      // be attached to the call it was actually about (see below).
-      for (const c of t.tool_calls || []) rawById[c.id] = t.raw_call;
+      // be attached to the call it was actually about, AND what the tool row
+      // reads back to show the call's name and argument (see below).
+      //
+      // Each call's OWN text, never the whole turn's - see callRaw. A row is
+      // one call, and raw_call is the whole response, so a turn that called
+      // two tools at once drew both rows showing both calls the moment the
+      // history redrew over the live ones.
+      (t.tool_calls || []).forEach((c, n) => { rawById[c.id] = callRaw(t, c, n); });
       // main.append_error() files a failed turn as a plain assistant turn
       // (so it survives into the next request) prefixed this exact way -
       // draw it red on reload the same as the live broadcast does, instead
@@ -5165,14 +5992,68 @@ function render(text, box = messages, vals = null, stamps = null, live = null) {
       // was sent - so a reload changes nothing on the screen.
       if (t.timing && t.timing.latency) sealedWaited(t.timing, box);
       if (t.reasoning_content) sealedThinking(t.reasoning_content, t.timing, box);
-      const wrap = (shown.startsWith(TURN_ERROR_TEXT)
-                    ? line("error", shown, box, ...when(i))
-                    : line("agent", shown, box, ...when(i))).parentElement;
-      attachTiming(wrap, t.timing);
+      // A pure tool-call turn - a call with no prose in front of it - draws no
+      // bubble at all now (the row below carries it), the same as live. A turn
+      // with prose, or an old turn with neither, still gets its bubble.
+      if (shown || !t.raw_call) {
+        const wrap = (shown.startsWith(TURN_ERROR_TEXT)
+                      ? line("error", shown, box, ...when(i))
+                      : line("agent", shown, box, ...when(i))).parentElement;
+        attachTiming(wrap, t.timing);
+        // The wire cut this reply off part-way (main.run, from provider._sse).
+        // Marked rather than left looking finished: a reply that stops
+        // mid-sentence is otherwise indistinguishable from one that simply had
+        // nothing more to say, which is exactly how the end of a message went
+        // missing without anybody being able to tell.
+        if (t.truncated) markCut(wrap);
+      }
+      // Every call this turn made that nothing in the transcript answers,
+      // drawn as the same pending row the live path draws - so a window
+      // rebuilt in the middle of a call (switching to this chat, a dropped
+      // connection coming back, a plain reload) shows exactly what it would
+      // have shown had it never left.
+      for (const c of t.tool_calls || []) {
+        if (answered.has(c.id)) continue;
+        const raw = rawById[c.id];
+        const nm = (c.function && c.function.name) || callName(raw);
+        const wrap = toolLine(null, box, nm, null, raw, c.id).parentElement;
+        unanswered.push(wrap);
+        // Into the verdict lists with the finished ones: the safety check runs
+        // BEFORE the tool does, so a call still out already has its line in
+        // the log and leaving its row out here would put every verdict after
+        // it on the wrong call.
+        toolWraps.push(wrap);
+        toolCalls.push(raw);
+      }
     } else if (t.role === "tool") {
-      const body = toolLine(t.content, box, callName(rawById[t.tool_call_id]), t.timing);
+      const raw = rawById[t.tool_call_id];
+      const body = toolLine(t.content, box, callName(raw), t.timing, raw,
+                            t.tool_call_id);
       toolWraps.push(body.parentElement);
-      toolCalls.push(rawById[t.tool_call_id]);
+      toolCalls.push(raw);
+    }
+  }
+
+  // Those calls are all in flight, or all abandoned, according to whether the
+  // turn that made them is still going - a provider can have several out at
+  // once, and they live and die together. Which of the two it is, is the one
+  // thing here that has to be got right: a row counting up forever on a chat
+  // that stopped working an hour ago is worse than no row at all, and a row
+  // written off as dead while the tool is still running is worse than both.
+  if (unanswered.length) {
+    if (working === null ? !!live : working) {
+      // How long they have been out, on the SERVER's clock, so the counter
+      // carries on from where it had got to instead of restarting. One figure
+      // for all of them: calls made in the same breath start in the same
+      // breath, and a transcript with no record beside it (a subagent's) has
+      // no figure at all and counts from the redraw, which is the most that
+      // file can honestly say.
+      const at = (live && typeof live.now === "number"
+                  && typeof live.tool_at === "number")
+                 ? Math.max(0, (live.now - live.tool_at) * 1000) : 0;
+      unanswered.forEach(w => resumeTool(w, at));
+    } else {
+      unanswered.forEach(abandonTool);
     }
   }
 
@@ -5464,8 +6345,9 @@ function stopChatTurn(q) {
     q = chatQuery("?");
     stopEpoch++;
     // Seal whatever was streaming and take the bar down now.
-    streaming = null;
+    sealReply(null);
     pendingSafety = [];
+    pendingCall = "";
     status.hidden = true;
     statusText.textContent = "";
   }
@@ -5860,6 +6742,7 @@ function markToolsDirty() { toolsDirty = true; syncContextPanel(); }
 
 const contextTokensValue = document.getElementById("context-tokens-value");
 const contextTokensFill = document.getElementById("context-tokens-fill");
+const contextCache = document.getElementById("context-cache");
 const contextBody = document.getElementById("context-body");
 // Hash of the injection payload currently drawn. Sent back on each poll so an
 // unchanged one isn't resent at all (see loadInjection), which is also what
@@ -5948,7 +6831,89 @@ function drawTokens(t) {
   contextTokensFill.style.width = pct + "%";
   contextTokensFill.className = [pct > 90 ? "hot" : pct > 70 ? "warn" : "",
                                  projected ? "projected" : ""].filter(Boolean).join(" ");
+  // Only when this payload actually carries one. The status poll draws from
+  // the count a chat last wrote into its settings .json (main.stored_usage),
+  // which does no counting and so has no cache outlook in it - and clobbering
+  // the panel's own answer with a missing key would blink the line away every
+  // couple of seconds.
+  if ("cache" in t) lastCache = t.cache || null;
+  drawCache();
 }
+
+// ---- what the next request costs --------------------------------------------
+// The context bar answers "how full is the window". This answers the other
+// question, which is the one that shows up on the bill: how much of the next
+// request the provider has to read at full price, because it no longer matches
+// the prefix it cached last time.
+//
+// Prefix caching is a byte-for-byte match from the start of the prompt, so a
+// single changed byte anywhere invalidates everything after it. Three of the
+// four causes are mistakes worth catching while they are still cheap - a tool
+// written mid-conversation, a context file edited, a turn already sent going
+// back and changing - and the fourth is just time passing.
+//
+// Held rather than drawn once, because half of it is a clock: the panel is
+// fetched when something CHANGES, and a cache expiring changes nothing the
+// server would notice. So the expiry half is recomputed here, on a timer,
+// against the "at" the server sent.
+let lastCache = null;
+
+function drawCache() {
+  const c = lastCache;
+  if (!c || c.mode === "none" || !c.total) { contextCache.hidden = true; return; }
+
+  // The expiry half, redone locally - see above. Only when the prefix is
+  // otherwise intact: a prompt that already diverged is uncached for a reason
+  // that has nothing to do with the clock, and saying both would be noise.
+  let reason = c.reason;
+  let uncached = c.uncached;
+  const age = c.at ? (Date.now() / 1000) - c.at : 0;
+  if (!reason && c.ttl && age > c.ttl) {
+    const mins = Math.floor(age / 60);
+    reason = "the cache has probably expired - "
+           + (mins ? mins + " minutes" : "under a minute") + " since the last request";
+    uncached = c.total;
+  }
+
+  contextCache.hidden = false;
+  contextCache.textContent = "";
+  const head = document.createElement("b");
+  const why = document.createElement("span");
+  why.className = "why";
+
+  if (reason) {
+    contextCache.className = "warn";
+    head.textContent = uncached.toLocaleString() + " uncached";
+    why.textContent = " of " + c.total.toLocaleString() + " - " + reason;
+  } else {
+    contextCache.className = "";
+    head.textContent = "~" + c.total.toLocaleString() + " should hit cache";
+    why.textContent = c.verified != null
+      ? " - last request read " + c.verified.toLocaleString() + " from it"
+      : "";
+  }
+  contextCache.append(head, why);
+
+  // What the provider actually did last time, against what was predicted for
+  // it. A prediction of "should hit" that came back at zero is not a rounding
+  // error - it is an invalidator nobody has found yet - so it is worth saying
+  // out loud rather than leaving the two numbers to be compared by hand.
+  contextCache.title = [
+    c.mode === "explicit"
+      ? "this model caches only what the request asks it to - breakpoints are sent"
+      : "this provider caches by itself",
+    c.verified != null
+      ? "last request: " + c.verified.toLocaleString() + " tokens served from cache"
+      : "the provider has not reported a cache figure for this chat yet",
+    c.verified === 0 && !reason
+      ? "predicted a hit and got none - something in the prefix is changing"
+      : "",
+  ].filter(Boolean).join("\n");
+}
+
+// The clock half of drawCache. Cheap enough to leave running: it touches one
+// element and only when the text it would write has changed.
+setInterval(() => { if (lastCache && !contextCache.hidden) drawCache(); }, 30000);
 
 // Back to "no number yet", which is what a chat switch shows for the moment
 // before the new chat's own count arrives, and what a chat with nothing
@@ -5959,6 +6924,8 @@ function clearTokens() {
   contextTokensValue.title = "counting...";
   contextTokensFill.style.width = "0%";
   contextTokensFill.className = "";
+  lastCache = null;
+  contextCache.hidden = true;
 }
 
 async function loadInjection() {
@@ -6412,6 +7379,9 @@ function markCurrentChat() {
 async function switchChat(id) {
   if (id === currentChat) return;
   currentChat = id;
+  // A freshly opened chat starts at its newest message and follows from there,
+  // whatever the follow state of the chat being left.
+  stickBottom = true;
   // Anything typed while the last chat was busy belonged to THAT chat; it
   // does not follow you here.
   pendingMessages = [];
@@ -6449,7 +7419,7 @@ async function switchChat(id) {
   // Together, not one after the other - the transcript and the status bar
   // don't depend on each other, and this is the round trip the user is
   // actually waiting on when they tap a chat.
-  await Promise.all([refresh(), pollStatus()]);
+  await Promise.all([refresh(), pollStatus(), loadInfinite()]);
   syncContextPanel();
 }
 
@@ -6784,17 +7754,29 @@ const subStop = document.getElementById("sub-stop");
 // shuts any tool result the user has opened to read.
 let lastSubText = null;
 
+// Is this subagent still working? Only answerable for the chat this window is
+// in - /status reports the running subagents of that one - so a transcript
+// opened from anywhere else reads as finished, which is what it almost always
+// is by the time you are looking at it from another chat.
+function subWorking(chat, name) {
+  return chat === currentChat && runningSubs.includes(name);
+}
+
 async function openSub(chat, name) {
   const r = await fetch("/subagent?chat=" + encodeURIComponent(chat)
                         + "&name=" + encodeURIComponent(name));
   const text = r.ok ? await r.text() : "could not load transcript";
   lastSubText = r.ok ? text : null;
   modalTitle.textContent = "subagent " + name + " — " + chat;
-  render(text, modalBody);
+  // Whether it is still working, which is what tells a call with no result yet
+  // apart from one the subagent died on - /status lists the running subagents
+  // of the CURRENT chat, so that is the one case we can be sure of, the same
+  // limit the stop button below is drawn within.
+  render(text, modalBody, null, null, null, subWorking(chat, name));
   openedSub = { chat, name };
-  // Only offer stop while it's actually working - /status lists the running
-  // subagents of the CURRENT chat, so that's the one case we can be sure of.
-  subStop.hidden = !(chat === currentChat && runningSubs.includes(name));
+  // Only offer stop while it's actually working - the same question, and the
+  // same limit, as the tool rows above (see subWorking).
+  subStop.hidden = !subWorking(chat, name);
   subStop.disabled = false;
   subStop.textContent = "stop";
   modal.hidden = false;
@@ -6823,7 +7805,7 @@ async function refreshOpenSub() {
     lastSubText = text;
     // render() keeps the scroll where it is, or pinned to the bottom if that's
     // where it already was - same as a redraw of the main chat.
-    render(text, modalBody);
+    render(text, modalBody, null, null, null, subWorking(chat, name));
   } catch (e) { /* server away - leave the transcript as it is */ }
 }
 
@@ -7100,7 +8082,7 @@ events.onmessage = (e) => {
     // is the honest unit: the second request of a turn carries the whole
     // conversation plus a tool result, and waits longer for it.
     endResponse(null);
-    streaming = null;
+    sealReply(null);
     waitingNow = waitedLine();
   } else if (ev.type === "thinking") {
     // The model thinking, live. The wait ended when this arrived.
@@ -7112,7 +8094,7 @@ events.onmessage = (e) => {
     // first.
     tokenArrived();
     if (!thinkingNow || thinkingNow.sealed) {
-      streaming = null;
+      sealReply(null);
       thinkingNow = thinkingLine();
     }
     thinkingNow.append(ev.text);
@@ -7175,17 +8157,45 @@ events.onmessage = (e) => {
     // normally closes both lines out with their measured figures - so that a
     // provider which somehow reports none still can't leave one counting.
     endResponse(null);
-    streaming = null;
+    sealReply(null);
+    // And draw the row THERE AND THEN, with no result in it yet. This is the
+    // whole difference between watching an agent work and watching it go
+    // quiet: the tool's name, its argument and a counter are up for the whole
+    // length of the call, and the output drops into this same row when it
+    // finally lands (see settleTool). Before this, a forty-second fetch was
+    // forty seconds of nothing followed by a finished box out of nowhere.
+    //
+    // Not drawn twice: the call is written to the history before this event
+    // goes out, so a window that rebuilt in the gap between the two already
+    // has its row and only needs the id kept pointing at it.
+    pendingCall = ev.text || "";
+    if (!toolRowFor(ev.id, pendingCall)) {
+      toolLine(null, messages, ev.name || callName(pendingCall), null,
+               pendingCall, ev.id);
+    }
   } else if (ev.type === "safety") {
-    // Hold the verdict; it's drawn onto the result box once that arrives.
     // `checked` false is the gate being off - a row that says so, not a verdict.
-    pendingSafety.push({ safe: ev.safe, reason: ev.reason, checked: ev.checked });
+    const verdict = { safe: ev.safe, reason: ev.reason, checked: ev.checked };
+    // Straight onto the row of the call it is about, when there is exactly one
+    // call in flight - so the verdict is readable while the tool runs rather
+    // than only once it has finished, which is the half of the wait where
+    // "should this be running at all?" is a live question.
+    //
+    // With SEVERAL out at once it goes back in the queue instead. The two
+    // providers disagree about when this fires - run() sends it between the
+    // call and the result, claude_session holds it and sends it just ahead of
+    // each result - so with more than one row up there is no way to tell from
+    // here which one it is about, and pairing it with the result that follows
+    // is the arrangement that is right either way.
+    const waiting = messages.querySelectorAll(".msg.tool.tool-pending");
+    if (waiting.length === 1) attachSafety(waiting[0], verdict);
+    else pendingSafety.push(verdict);
   } else if (ev.type === "toolresult") {
     // A finished call, live: draw its collapsible result box (with the safety
     // dropdown if this call was checked) the moment it runs, not at done -
     // and, on the box's own head, how long the call took.
     endResponse(null);
-    streaming = null;
+    sealReply(null);
     // A tool just ran, so a file may have just been written - move the picture
     // stamp on for the same reason a new turn does (see "user" above). This
     // costs no redrawing: a call seals the bubble above it, so the stamp only
@@ -7194,7 +8204,15 @@ events.onmessage = (e) => {
     // it, an agent that renders a chart twice in one turn shows the first one
     // twice.
     imgTurn = Date.now();
-    const wrap = toolLine(ev.text, messages, ev.name, ev.timing).parentElement;
+    // Into the row this call's own "toolcall" event opened. A result with no
+    // row to go in still draws its own, exactly as it always did: a server too
+    // old to announce its calls, or a window that joined between the two
+    // events, ends up back at the old behaviour rather than at nothing.
+    let wrap = pendingToolRow(ev.name, ev.id);
+    if (wrap) settleTool(wrap, ev.text, ev.name, ev.timing);
+    else wrap = toolLine(ev.text, messages, ev.name, ev.timing, pendingCall,
+                         ev.id).parentElement;
+    pendingCall = "";
     const verdict = pendingSafety.shift();
     if (verdict) attachSafety(wrap, verdict);
   } else if (ev.type === "system") {
@@ -7203,8 +8221,11 @@ events.onmessage = (e) => {
     // The turn blew up - show the provider's own message in red where the
     // reply would have been, instead of ending in silence.
     endResponse(null);
-    streaming = null;
+    sealReply(null);
+    // Nothing is going to answer a call that is still out - the turn is over.
+    abandonTools();
     pendingSafety = [];
+    pendingCall = "";
     line("error", "error: " + ev.text);
   } else if (ev.type === "stopped") {
     // The turn is over: by the time the server sends this it has already been
@@ -7217,8 +8238,11 @@ events.onmessage = (e) => {
     // until its worker noticed - which is why turnBusy and the queue had to be
     // left alone here and waited on the real "done" minutes later.
     endResponse(null);
-    streaming = null;
+    sealReply(null);
+    // Nothing is going to answer a call that is still out - the turn is over.
+    abandonTools();
     pendingSafety = [];
+    pendingCall = "";
     // Shutting this chat's speech up (the agent now speaks as it works, so a
     // stopped turn that kept talking through everything it had already said
     // would be the most conspicuous thing on the page about a button meant to
@@ -7226,8 +8250,11 @@ events.onmessage = (e) => {
     // to reach a background chat's audio too, not just this window's own.
   } else if (ev.type === "done") {
     endResponse(null);
-    streaming = null;
+    sealReply(null);
+    // Nothing is going to answer a call that is still out - the turn is over.
+    abandonTools();
     pendingSafety = [];
+    pendingCall = "";
     // `next` is the server saying it has already started another turn on the
     // back of this one - a message sent with enter that the turn ended before
     // it could be folded into. The chat never went idle, so the bar stays up
@@ -7241,6 +8268,19 @@ events.onmessage = (e) => {
     // that's about to be sent; firing both at once risks the redraw landing
     // after the send and wiping its bubble until the new turn's own done.
     refresh().then(flushQueue);
+  } else if (ev.type === "fork") {
+    // Infinite chat split this conversation (see infini.py). The turns from
+    // where the subject changed have been COPIED into a new chat, this one
+    // still has everything it had, and this window follows without being
+    // asked. Only this window - the by-chat filter above already dropped this
+    // event in every window sitting in a different chat, which is what stops
+    // somebody being yanked out of work they are watching.
+    //
+    // Seamless means no action required, not invisible: the new chat opens
+    // with its carried turns under a "split from" divider naming where they
+    // came from (see render), so what happened and where the rest went are
+    // both on screen.
+    switchChat(ev.to);
   }
 };
 
@@ -7282,6 +8322,15 @@ async function submitChatText(text, when = "") {
   const q = "?chat=" + encodeURIComponent(requireChat()) + CLIENT_PARAM
           + (when ? "&when=" + encodeURIComponent(when) : "");
   const reply = await (await fetch("/input" + q, { method: "POST", body: text })).json();
+  // Another device in the same room heard the same sentence and got there
+  // first (see server.py's _spoken_before). Nothing was sent, so the grey
+  // bubble this window drew for it has to come off - left there it is a
+  // message the user believes is waiting to go.
+  if (reply.type === "duplicate") {
+    const i = pendingMessages.findIndex((m) => m.text === text && !m.sent);
+    if (i !== -1) { pendingMessages.splice(i, 1); renderPending(); }
+    return;
+  }
   if (reply.type === "system") {
     // /load, /new, or a /delete that removed the chat we were in: the reply
     // says where to go, and only this window goes there.
@@ -7317,6 +8366,12 @@ async function submitChatText(text, when = "") {
 // turn(s) ahead of it end. Commands (/stop above all) still go straight
 // through, since that's what lets them reach a busy turn.
 function sendUserText(text, when = TOOL) {
+  // Sending a message means the user has taken the floor - cut off whatever
+  // reply is still being read aloud, the same as leaning on the right arrow.
+  speakSkipAll();
+  // ...and start following the newest text again: you've just sent something
+  // and want to watch the reply, even if you'd scrolled up to read first.
+  stickBottom = true;
   if (turnBusy && !text.startsWith("/")) {
     // Two of a kind waiting is the limit, kept per kind: a message aimed at
     // this turn and one aimed at the next are different waits, and filling one
@@ -7522,11 +8577,16 @@ async function sendFromBox(when) {
 
 // ---- voice: hold to talk -----------------------------------------------------
 // Hold the mic button next to the message box (the only option on a phone) or
-// the configured key (the desktop one), speak, let go. The clip is recorded by
-// the browser, posted to /voice, transcribed by Whisper there, and the text
-// comes back and goes out through sendUserText() - so a spoken message reaches
-// the loaded chat down exactly the same path a typed one does, queueing behind
-// a running turn and all.
+// the configured key (the desktop one), speak, let go.
+//
+// The recording itself is NOT this section's - it is the shared capture down
+// in "voice: one spoken message", the same one the wake word drives, and the
+// only thing that differs is what opens and closes the session: a button held
+// here, a phrase and a silence there. That is deliberate and is the whole
+// reason the two behave identically now - same live caption while you speak,
+// same transcription, same sendUserText() at the end, so a spoken message
+// reaches the loaded chat down exactly the path a typed one does, queueing
+// behind a running turn and all.
 //
 // The microphone is only offered in a secure context - https, or localhost -
 // so opened over the LAN by plain http (which is how a phone reaches this) the
@@ -7541,9 +8601,6 @@ const voiceKeyBtn = document.getElementById("s-voice-key");
 // below changes it live, and saving settings sends whatever it currently is.
 let voiceKey = "F9";
 let holding = false;    // is the button/key down right now
-let recorder = null;    // the live MediaRecorder, only while recording
-let micStream = null;   // its microphone, released the moment the clip ends
-let clipStart = 0;
 
 const MIN_CLIP_MS = 300;  // an accidental tap of the key isn't speech
 
@@ -7564,94 +8621,31 @@ function setVoiceKey(code) {
   voiceKeyBtn.textContent = keyLabel(voiceKey);
 }
 
-async function startRecording() {
-  if (recorder) return;
-  if (!navigator.mediaDevices || !window.MediaRecorder) {
-    micState("", "no microphone - a browser only offers one over https or on localhost");
-    line("error", "voice: this browser won't give a page the microphone unless it's "
-                + "on https or localhost - this one is " + location.origin + ".");
-    holding = false;
-    return;
-  }
-
-  let stream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch (e) {
-    micState("", "microphone unavailable (" + e.name + ")");
-    line("error", "voice: no microphone - " + e.name);
-    holding = false;
-    return;
-  }
-
-  // Asking for permission takes a moment the first time, and the button may
-  // already have been let go by now - don't open a recording nobody is holding.
-  if (!holding) {
-    stream.getTracks().forEach(t => t.stop());
-    return;
-  }
-
-  const chunks = [];
-  micStream = stream;
-  recorder = new MediaRecorder(stream);
-  recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-  recorder.onstop = () => {
-    // Stop the tracks, not just the recorder: that's what actually closes the
-    // microphone and clears the browser's recording indicator.
-    micStream.getTracks().forEach(t => t.stop());
-    micStream = null;
-    recorder = null;
-    const held = Date.now() - clipStart;
-    micState("", "hold to talk");
-    if (held < MIN_CLIP_MS || !chunks.length) return;  // a tap, not a sentence
-    // The recorder's own mime type, whatever the browser chose (webm/opus on
-    // Chrome and Firefox, mp4 on Safari) - the server maps it to the file
-    // extension Whisper identifies the format by.
-    sendClip(new Blob(chunks, { type: chunks[0].type || "audio/webm" }));
-  };
-  clipStart = Date.now();
-  recorder.start();
-  micState("rec", "listening - let go to send");
-}
-
-function stopRecording() {
-  if (recorder && recorder.state !== "inactive") recorder.stop();
-}
-
-async function sendClip(blob) {
-  micState("busy", "transcribing...");
-  let text = "";
-  try {
-    const r = await fetch("/voice", {
-      method: "POST",
-      headers: { "Content-Type": blob.type },
-      body: blob,
-    });
-    if (!r.ok) {
-      // The server's message says what went wrong (no key, Whisper refused it),
-      // and is worth reading on the phone that recorded it.
-      line("error", "voice: " + (await r.text()));
-      return;
-    }
-    text = ((await r.json()).text || "").trim();
-  } catch (e) {
-    line("error", "voice: could not reach the server");
-  } finally {
-    micState("", "hold to talk");
-  }
-  if (text) sendUserText(text);
-}
-
-function pressTalk() {
+async function pressTalk() {
   if (holding) return;
   holding = true;
-  startRecording();
+  micState("rec", "listening - let go to send");
+  // The microphone may already be open (the wake word holds it), in which case
+  // this costs nothing and starts capturing on the very next frame. When it is
+  // not, asking for it takes a moment the first time - and the button may well
+  // have been let go by then, which is what the second check is for.
+  const ok = await audioOpen("mic");
+  if (!ok) { holding = false; micState("", "hold to talk"); return; }
+  if (!holding) { audioClose("mic"); return; }
+  sayBegin("mic");
 }
 
 function releaseTalk() {
   if (!holding) return;
   holding = false;
-  stopRecording();
+  // The capture is over the instant the key comes up, so the microphone is
+  // handed back here rather than after the transcription - a browser leaving
+  // its recording indicator lit through a two-second transcription looks like
+  // a page that is still listening when it is not. sayFinish() carries on with
+  // the frames it already has.
+  audioClose("mic");
+  micState("busy", "transcribing...");
+  sayFinish().finally(() => micState("", "hold to talk"));
 }
 
 mic.addEventListener("pointerdown", (e) => {
@@ -7701,7 +8695,7 @@ window.addEventListener("blur", releaseTalk);
 // not pretend to - it waits for wake_silence_ms of quiet, judged locally by
 // loudness (see wakeArmSilence), and only then sends, once, whatever the whole
 // clip turned out to be. Nothing about that wait costs anything: the optional
-// live captions (wake_captions, off by default) are a nicety layered on top,
+// live captions (voice_captions, off by default) are a nicety layered on top,
 // not what the wait is measured against.
 
 const wake = document.getElementById("wake");
@@ -7725,11 +8719,17 @@ const WAKE_HANG_MS = 1500;
 // of it is dropped. Being two seconds behind is worse than missing two seconds.
 const WAKE_BACKLOG_MS = 2000;
 
-const WAKE_MAX_CLIP_MS = 30000;    // a clip that never ends is a stuck door
+const SAY_MAX_CLIP_MS = 30000;     // a clip that never ends is a stuck door
 // How often the whole clip so far goes back to be re-transcribed, once a
 // session is open. A third of it would notice a finished thought sooner and
 // cost three times the transcription; a third as often would feel laggy.
-const WAKE_POLL_MS = 1000;
+//
+// Worth being clear about the cost, because it is not obvious: every poll
+// re-transcribes the WHOLE clip, so a ten-second sentence with captions on is
+// ten transcriptions rather than one. That is why voice_captions is off by
+// default, and why it governs the mic button and the wake word together
+// instead of being turned on for one of them by surprise.
+const SAY_POLL_MS = 1000;
 
 // The voice tab's answers. Fetched once on load rather than waiting for
 // somebody to open the settings overlay - most windows never do, and a window
@@ -7738,29 +8738,43 @@ const WAKE_POLL_MS = 1000;
 // changed there is live in every open window without a reload.
 let wakeCfg = { wake_provider: "oww", wake_model: "", wake_words: [],
                 wake_threshold: 0.5, wake_auto: false,
-                wake_captions: false, wake_silence_ms: 1200 };
+                voice_captions: false, wake_silence_ms: 1200 };
 
-let wakeOn = false;      // the microphone is open and the phrase is being listened for
-let wakeCtx = null;      // the AudioContext behind it
-let wakeStream = null;   // the microphone, closed the moment listening stops
-let wakeNode = null;     // whatever hands us frames - a worklet, or a script node
+let wakeOn = false;      // the ear is on: the phrase is being listened for
 // Which stream this window is, as far as the server is concerned. The model is
 // stateful - it hears a phrase across frames, not within one - so the server
 // keeps one per session, and this is what says which is ours.
 let wakeId = "w-" + Math.random().toString(36).slice(2, 12);
-
-let wakeLive = false;    // a session is open: capturing, between the phrase and the silence
-let wakeBusy = false;    // the session just ended and the last word of it is being sent
-let wakeClipFrames = []; // every frame captured this session, start to finish - never cut up
-let wakeClipMs = 0;      // its running length, against WAKE_MAX_CLIP_MS
-let wakeGrew = false;    // new audio since the last poll - skip a poll without any
-let wakeHeardText = "";  // the latest full re-transcription, shown in the popup
-let wakePolling = false; // a poll's request is in flight right now
-let wakePollSeq = 0;     // guards a slow poll from clobbering a newer one's answer
-let wakeApplied = 0;     // the seq of the last result actually shown
 let wakeScore = 0;       // what the model last scored the room at, for the slider
 let wakeSilenceTimer = null;
-let wakePollTimer = null;
+
+// ---- the microphone itself, held by whoever needs it ------------------------
+// One AudioContext, however many things want frames. The wake word holds it for
+// as long as the ear is on; hold-to-talk holds it only while the button is
+// down. Refcounted rather than owned by either, because both are true at once
+// the moment somebody presses the button in a window that was already
+// listening - and closing the microphone out from under the other one is how
+// the ear used to go deaf after a single hold-to-talk.
+const audioHolders = new Set();
+let audioCtx = null;     // the AudioContext behind it
+let audioStream = null;  // the microphone, closed when the last holder lets go
+let audioNode = null;    // whatever hands us frames - a worklet, or a script node
+
+// ---- voice: one spoken message ----------------------------------------------
+// Everything from the first captured frame to the text going out, shared by
+// hold-to-talk and the wake word. Neither owns any of it: they differ only in
+// what calls sayBegin() and what calls sayFinish().
+let sayLive = false;     // a session is open and frames are being kept
+let sayBusy = false;     // it has ended and the last word of it is being sent
+let sayFrom = "";        // "mic" or "wake" - which of the two opened it
+let sayFrames = [];      // every frame captured this session, start to finish
+let sayMs = 0;           // its running length, against SAY_MAX_CLIP_MS
+let sayGrew = false;     // new audio since the last poll - skip a poll without any
+let sayHeardText = "";   // the latest full re-transcription, shown as the caption
+let sayPolling = false;  // a poll's request is in flight right now
+let sayPollSeq = 0;      // guards a slow poll from clobbering a newer one's answer
+let sayApplied = 0;      // the seq of the last result actually shown
+let sayPollTimer = null;
 
 // Waiting to go past the wake model.
 let scanRing = [];       // the run-up, kept while the room is quiet
@@ -7769,7 +8783,7 @@ let scanQuiet = 0;       // ms of silence since the last loud frame
 let scanBusy = false;    // a chunk is at the server right now
 
 // The noise floor the loudness gate is measured against, adapted while the
-// room is quiet and frozen for the whole of a session (see wakeFrame) - a
+// room is quiet and frozen for the whole of a session (see audioFrame) - a
 // floor that kept moving through a long sentence would slowly learn that
 // speech is silence.
 let vadFloor = 0.005;
@@ -7854,31 +8868,31 @@ function resampleTo16k(samples, rate) {
 }
 
 // One frame of audio off the microphone, and the fork the whole feature turns
-// on: before a wake it goes to the model and nowhere else, after one it is
-// collected into a sentence for the transcriber.
-function wakeFrame(samples, rate) {
-  // Not while hold-to-talk is recording, or the same words would be recorded
-  // twice and sent twice. The speaker is NOT a reason to stop listening: the
-  // mic is opened with echo cancellation, so the agent's own reply is already
-  // removed from this stream and cannot wake the agent up - and dropping the
-  // frames while it talks would throw away the user's own words too.
-  if (holding) {
-    scanOut = [];
-    scanRing = [];
-    return;
-  }
-
+// on: inside a session it is collected into a sentence for the transcriber,
+// outside one it goes to the wake model and nowhere else.
+//
+// A session being open is what stops the phrase being scanned for meanwhile,
+// which is what used to be the `if (holding)` guard here: hold-to-talk now
+// opens a session like any other, so the same branch covers it and the words
+// can no longer be captured twice and sent twice.
+//
+// The speaker is NOT a reason to stop listening: the mic is opened with echo
+// cancellation, so the agent's own reply is already removed from this stream
+// and cannot wake it up - and dropping frames while it talks would throw away
+// the user's own words along with them.
+function audioFrame(samples, rate) {
   if (rate !== 16000) { samples = resampleTo16k(samples, rate); rate = 16000; }
 
   const ms = (samples.length / rate) * 1000;
   let sum = 0;
   for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
   const rms = Math.sqrt(sum / samples.length);
-  if (!wakeLive) vadFloor = vadFloor * 0.95 + rms * 0.05;
+  if (!sayLive) vadFloor = vadFloor * 0.95 + rms * 0.05;
   const loud = rms > Math.max(vadFloor * 3, 0.008);
 
-  if (wakeLive) wakeCapture(samples, ms, loud);
-  else wakeScanFrame(samples, rate, loud, ms);
+  if (sayLive) sayCapture(samples, ms, loud);
+  else if (wakeOn) wakeScanFrame(samples, rate, loud, ms);
+  else { scanOut = []; scanRing = []; }
 }
 
 // Before a wake. Everything here is thrown away unless the model says the
@@ -7945,34 +8959,50 @@ async function wakeScan(frames) {
 }
 
 // The model said yes. From here until the silence at the end, everything said
-// is captured whole - see wakeCapture - and, only when wake_captions is on,
+// is captured whole - see sayCapture - and, only when voice_captions is on,
 // re-transcribed as it grows so a caption can follow along. The silence that
 // ends the session is judged separately, by loudness, and never waits on this.
 function wakeWoke() {
-  wakeLive = true;
-  wakeClipFrames = [];
-  wakeClipMs = 0;
-  wakeGrew = false;
-  wakeHeardText = "";
-  wakePollSeq = 0;
-  wakeApplied = 0;
   scanOut = [];
   scanRing = [];
-  drawHeard();
+  sayBegin("wake");
+  // The only thing the wake word adds to a session: a clock that ends it. Hold-
+  // to-talk has a finger on a button instead and needs none.
   wakeArmSilence();
-  if (wakeCfg.wake_captions) wakePollLoop();
 }
 
-// After a wake. No cutting into sentences and nothing to decide frame by frame
-// - every frame captured is kept, in order, for as long as the session lasts,
-// and what it amounts to is worked out by re-transcribing the whole thing (see
-// wakePollLoop) rather than by guessing where the gaps are first.
-function wakeCapture(samples, ms, loud) {
-  wakeClipFrames.push(samples);
-  wakeClipMs += ms;
-  wakeGrew = true;
-  if (loud) wakeArmSilence();
-  if (wakeClipMs >= WAKE_MAX_CLIP_MS) wakeFinish();
+// A session opens. Everything from here to sayFinish() is the same whichever
+// of the two started it, which is the point: one capture, one caption, one
+// transcription, one way out.
+function sayBegin(from) {
+  // Someone is about to speak to it - stop reading the old reply aloud so it
+  // isn't talking over them, just as sending a message does.
+  speakSkipAll();
+  sayLive = true;
+  sayBusy = false;
+  sayFrom = from;
+  sayFrames = [];
+  sayMs = 0;
+  sayGrew = false;
+  sayHeardText = "";
+  sayPollSeq = 0;
+  sayApplied = 0;
+  drawHeard();
+  if (wakeCfg.voice_captions) sayPollLoop();
+}
+
+// Inside a session. No cutting into sentences and nothing to decide frame by
+// frame - every frame captured is kept, in order, for as long as the session
+// lasts, and what it amounts to is worked out by re-transcribing the whole
+// thing (see sayPollLoop) rather than by guessing where the gaps are first.
+function sayCapture(samples, ms, loud) {
+  sayFrames.push(samples);
+  sayMs += ms;
+  sayGrew = true;
+  // Only the wake word ends on a silence. A held button ends when it is let
+  // go, and a pause mid-sentence is a pause, not the end of one.
+  if (loud && sayFrom === "wake") wakeArmSilence();
+  if (sayMs >= SAY_MAX_CLIP_MS) sayFinish();
 }
 
 // The wake phrase off the front of a transcript, if it is there at all. The
@@ -8025,29 +9055,30 @@ function wakeLabelOf(file) {
                      .replace(/[_-]+/g, " ").trim().toLowerCase();
 }
 
-// The wait that decides you've stopped talking. Restarted on every loud frame
-// (see wakeCapture), so it always counts from the last word rather than the
-// first - and it is the only clock this feature has: no separate "sentence
-// done" and "message done" any more, because there's no separate sentence
-// left to be done. When it fires uninterrupted, wakeFinish takes it from here.
+// The wait that decides you've stopped talking - the wake word's way of
+// ending a session, and only its. Restarted on every loud frame (see
+// sayCapture), so it always counts from the last word rather than the first,
+// and it is the only clock this feature has: no separate "sentence done" and
+// "message done", because there's no separate sentence left to be done. When
+// it fires uninterrupted, sayFinish takes it from here.
 function wakeArmSilence() {
   clearTimeout(wakeSilenceTimer);
-  wakeSilenceTimer = setTimeout(wakeFinish, wakeCfg.wake_silence_ms);
+  wakeSilenceTimer = setTimeout(sayFinish, wakeCfg.wake_silence_ms);
 }
 
 // One pass of the whole clip captured so far, through the transcriber -
 // whatever it says REPLACES what's shown, not appended to it, because a
 // re-transcription of more audio is a better answer than the last one was,
 // not an addition to it. Called two ways: repeatedly, roughly once a second,
-// by wakePollLoop below while wake_captions is on and a session is open - and
-// exactly once, always, by wakeFinish asking for one last, authoritative pass
+// by sayPollLoop below while voice_captions is on and a session is open - and
+// exactly once, always, by sayFinish asking for one last, authoritative pass
 // over everything captured, once nothing further is coming. That second call
 // is the only one that has to happen; the first is a paid nicety.
-async function wakePoll(final) {
-  const frames = wakeClipFrames.slice();
+async function sayPoll(final) {
+  const frames = sayFrames.slice();
   if (!frames.length) return "";
-  const seq = ++wakePollSeq;
-  wakePolling = true;
+  const seq = ++sayPollSeq;
+  sayPolling = true;
   let text = "";
   try {
     const r = await fetch("/voice", {
@@ -8055,94 +9086,101 @@ async function wakePoll(final) {
       headers: { "Content-Type": "audio/wav" },
       body: wakeWav(frames, 16000),
     });
-    if (r.ok) text = withoutPhrase(((await r.json()).text || "").trim());
+    if (r.ok) text = ((await r.json()).text || "").trim();
     else if (!final) line("error", "voice: " + (await r.text()));
   } catch (e) {
     if (!final) line("error", "voice: could not reach the server");
   } finally {
-    wakePolling = false;
+    sayPolling = false;
   }
+  // Only what the wake word recorded can have the phrase at the front of it.
+  // A held button records from the moment it went down, and stripping "hey
+  // computer" off the front of that would eat the first words of anybody whose
+  // sentence happened to start the same way.
+  if (sayFrom === "wake") text = withoutPhrase(text);
   // A final pass is authoritative regardless of ordering; an ordinary one is
   // dropped if a later poll's answer already made it to the screen first -
   // every poll transcribes a superset of the one before it, so an older
   // answer arriving late is never worth showing over a newer one.
-  if (final || seq > wakeApplied) {
-    wakeApplied = seq;
-    wakeHeardText = text;
+  if (final || seq > sayApplied) {
+    sayApplied = seq;
+    sayHeardText = text;
     drawHeard();
   }
   return text;
 }
 
-function wakePollLoop() {
-  wakePollTimer = setTimeout(async () => {
-    if (!wakeLive) return;
-    if (wakeGrew && !wakePolling) {
-      wakeGrew = false;
-      await wakePoll(false);
+function sayPollLoop() {
+  sayPollTimer = setTimeout(async () => {
+    if (!sayLive) return;
+    if (sayGrew && !sayPolling) {
+      sayGrew = false;
+      await sayPoll(false);
     }
-    if (wakeLive) wakePollLoop();
-  }, WAKE_POLL_MS);
+    if (sayLive) sayPollLoop();
+  }, SAY_POLL_MS);
 }
 
-// Silence has run long enough: one last, complete re-transcription (a poll
-// mid-word can lag behind what was actually said by up to WAKE_POLL_MS), then
-// that text - if there's any left once the wake phrase is stripped off it -
-// goes as the one message this session ever sends.
-async function wakeFinish() {
-  if (!wakeLive) return;
+// The session is over - the button let go, or the silence run long enough.
+// One last, complete re-transcription (a caption poll mid-word can lag behind
+// what was actually said by up to SAY_POLL_MS), then that text goes out
+// through sendUserText() exactly as a typed message does.
+//
+// That last part is the whole of what makes the two ways in the same feature.
+// It used to be otherwise: hold-to-talk went through sendUserText and the wake
+// word posted to a route of its own, which meant they could disagree about
+// which chat they were talking to - and did, whenever more than one window was
+// listening. There is one path now, and it is the typed one.
+async function sayFinish() {
+  if (!sayLive) return;
   clearTimeout(wakeSilenceTimer);
-  clearTimeout(wakePollTimer);
-  wakeLive = false;
-  wakeBusy = true;
+  clearTimeout(sayPollTimer);
+  sayLive = false;
+  const from = sayFrom;
+  const ms = sayMs;
+  sayBusy = true;
   drawHeard();
-  const text = await wakePoll(true);
-  wakeBusy = false;
-  wakeClipFrames = [];
+  // A tap of the key is not speech. Checked for the button only: the wake word
+  // has already decided somebody is talking to it, and a short answer to a
+  // question it asked is still a message.
+  const text = (from === "mic" && ms < MIN_CLIP_MS) ? "" : await sayPoll(true);
+  sayBusy = false;
+  sayFrames = [];
   drawHeard();
   // "Computer." on its own, then silence, is somebody who didn't get to the
   // rest of it - nothing said, nothing to send.
-  if (text) wakeSend(text);
-}
-
-async function wakeSend(text) {
-  try {
-    const q = "?chat=" + encodeURIComponent(requireChat());
-    const r = await fetch("/voice/say" + q, {
-      method: "POST",
-      body: JSON.stringify({ parts: [text], fresh: 1 }),
-    });
-    if (!r.ok) line("error", "voice: " + (await r.text()));
-  } catch (e) {
-    line("error", "voice: could not reach the server");
-  }
+  if (text) sendUserText(VOICE_INPUT + text);
 }
 
 // The session is abandoned rather than finished - the microphone turned off,
 // or the model switched out from under it - so nothing captured is sent: it
 // was said into a window that's being closed, not one that ran its course.
-function wakeEnd() {
+function sayAbort() {
   clearTimeout(wakeSilenceTimer);
-  clearTimeout(wakePollTimer);
-  wakeLive = false;
-  wakeBusy = false;
-  wakeClipFrames = [];
-  wakeHeardText = "";
+  clearTimeout(sayPollTimer);
+  sayLive = false;
+  sayBusy = false;
+  sayFrames = [];
+  sayHeardText = "";
   drawHeard();
 }
 
+// The live caption, under the message box, for both ways in. It is the only
+// thing on screen while you are speaking, so it says which of the two states
+// it is in as well as what it has heard so far - "listening" while frames are
+// still arriving, "sending" for the last transcription after that.
 function drawHeard() {
-  const active = wakeLive || wakeBusy;
+  const active = sayLive || sayBusy;
   heard.hidden = !active;
-  wake.classList.toggle("live", active);
+  wake.classList.toggle("live", active && sayFrom === "wake");
   if (!active) return;
   // Built as elements, not markup: this is text from outside the page, by way
   // of a microphone and a speech model, and it has no business being parsed.
   heard.textContent = "";
   const tag = document.createElement("b");
-  tag.textContent = wakeBusy ? "sending" : "listening";
+  tag.textContent = sayBusy ? "sending" : "listening";
   const said = document.createElement("span");
-  said.textContent = wakeHeardText || "…";
+  said.textContent = sayHeardText || "…";
   heard.append(tag, said);
 }
 
@@ -8172,28 +9210,79 @@ function drawWakeButton() {
 async function wakeStart(quiet) {
   if (wakeOn) return;
   const say = (text) => { if (!quiet) line("error", "voice: " + text); };
+  // One listener at a time, across every tab of this browser. Claimed BEFORE
+  // the microphone is asked for, so two tabs racing to auto-start on the same
+  // page load settle it without either of them opening a device.
+  if (!wakeClaim()) {
+    say("another tab of this browser is already listening for the wake word - "
+        + "only one can be, or a sentence said once arrives twice.");
+    return;
+  }
+  if (!(await audioOpen("wake", quiet))) { wakeRelease(); return; }
+  wakeOn = true;
+  scanQuiet = WAKE_HANG_MS;   // start closed: the room has said nothing yet
+  wakeLeaseTimer = setInterval(wakeRenew, WAKE_LEASE_BEAT_MS);
+  drawWakeButton();
+}
+
+function wakeStop() {
+  sayAbort();
+  audioClose("wake");
+  wakeOn = false;
+  scanOut = [];
+  scanRing = [];
+  wakeRelease();
+  drawWakeButton();
+  // Let the server drop the model it was holding for us rather than waiting for
+  // it to time out. Best effort: a page being closed will not get this far, and
+  // the server reaps idle sessions for exactly that reason.
+  navigator.sendBeacon
+    ? navigator.sendBeacon("/wake?stop=1&session=" + encodeURIComponent(wakeId))
+    : fetch("/wake?stop=1&session=" + encodeURIComponent(wakeId),
+            { method: "POST", body: "" }).catch(() => {});
+}
+
+// ---- the microphone, opened once and shared ---------------------------------
+// `who` is "wake" or "mic". The device is opened on the first holder and closed
+// on the last, so pressing hold-to-talk in a window that is already listening
+// reuses the open stream instead of opening a second one - and letting go of it
+// does not take the wake word's microphone away with it.
+async function audioOpen(who, quiet) {
+  const say = (text) => { if (!quiet) line("error", "voice: " + text); };
+  if (audioCtx) { audioHolders.add(who); return true; }
+
   if (!navigator.mediaDevices || !window.AudioContext) {
     say("this browser won't give a page the microphone unless it's on https or "
         + "localhost - this one is " + location.origin + ".");
-    return;
+    return false;
   }
 
   let stream;
   try {
-    // Echo cancellation is not a nicety here, for the reason wakeFrame gives.
+    // Echo cancellation is not a nicety here, for the reason audioFrame gives.
     stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
   } catch (e) {
     say("no microphone - " + e.name);
-    return;
+    return false;
+  }
+
+  // Two openers racing - the ear auto-starting while a finger is already on the
+  // button - both awaited getUserMedia and both got a stream. The second one
+  // hands its device straight back rather than leaving it open with nothing
+  // reading it.
+  if (audioCtx) {
+    stream.getTracks().forEach((t) => t.stop());
+    audioHolders.add(who);
+    return true;
   }
 
   // Not forced to 16k: a MediaStreamAudioSourceNode has to match the
   // AudioContext's own rate exactly in every browser that matters (Firefox
   // throws outright on a mismatch instead of resampling, unlike Chrome), and
   // the microphone rarely captures at 16k regardless of what's asked for.
-  // Native rate here, brought down to 16k once in wakeFrame, works everywhere.
+  // Native rate here, brought down to 16k once in audioFrame, works everywhere.
   const ctx = new AudioContext();
   const rate = ctx.sampleRate;
 
@@ -8202,7 +9291,7 @@ async function wakeStart(quiet) {
     await ctx.audioWorklet.addModule(URL.createObjectURL(
       new Blob([WAKE_WORKLET], { type: "application/javascript" })));
     node = new AudioWorkletNode(ctx, "wake-tap");
-    node.port.onmessage = (e) => wakeFrame(e.data, rate);
+    node.port.onmessage = (e) => audioFrame(e.data, rate);
   } catch (e) {
     // No worklet available. The deprecated node does the same job on the main
     // thread, and every browser still has it - except the ones that have
@@ -8210,13 +9299,13 @@ async function wakeStart(quiet) {
     try {
       node = ctx.createScriptProcessor(4096, 1, 1);
       node.onaudioprocess = (ev) =>
-        wakeFrame(new Float32Array(ev.inputBuffer.getChannelData(0)), rate);
+        audioFrame(new Float32Array(ev.inputBuffer.getChannelData(0)), rate);
     } catch (e2) {
       stream.getTracks().forEach((t) => t.stop());
       try { ctx.close(); } catch (e3) { /* already closed */ }
       say("this browser has neither AudioWorklet nor the older node it "
-          + "replaced, so it can't listen for a wake word. Hold-to-talk still works.");
-      return;
+          + "replaced, so it can't record from the microphone.");
+      return false;
     }
   }
 
@@ -8234,38 +9323,97 @@ async function wakeStart(quiet) {
   } catch (e) {
     stream.getTracks().forEach((t) => t.stop());
     try { ctx.close(); } catch (e2) { /* already closed */ }
-    say("couldn't wire up the microphone for wake-word listening - " + e.message);
-    return;
+    say("couldn't wire up the microphone - " + e.message);
+    return false;
   }
 
-  wakeStream = stream;
-  wakeCtx = ctx;
-  wakeNode = node;
-  wakeOn = true;
+  audioStream = stream;
+  audioCtx = ctx;
+  audioNode = node;
+  audioHolders.add(who);
   vadFloor = 0.005;
-  scanQuiet = WAKE_HANG_MS;   // start closed: the room has said nothing yet
-  drawWakeButton();
+  return true;
 }
 
-function wakeStop() {
-  wakeEnd();
-  if (wakeNode) { try { wakeNode.disconnect(); } catch (e) { /* already gone */ } }
+function audioClose(who) {
+  audioHolders.delete(who);
+  if (audioHolders.size) return;   // somebody else still wants frames
+  if (audioNode) { try { audioNode.disconnect(); } catch (e) { /* already gone */ } }
   // The tracks, not just the node: that is what actually closes the microphone
   // and clears the browser's recording indicator.
-  if (wakeStream) wakeStream.getTracks().forEach((t) => t.stop());
-  if (wakeCtx) { try { wakeCtx.close(); } catch (e) { /* already closed */ } }
-  wakeNode = wakeStream = wakeCtx = null;
-  wakeOn = false;
-  scanOut = [];
-  scanRing = [];
-  drawWakeButton();
-  // Let the server drop the model it was holding for us rather than waiting for
-  // it to time out. Best effort: a page being closed will not get this far, and
-  // the server reaps idle sessions for exactly that reason.
-  navigator.sendBeacon
-    ? navigator.sendBeacon("/wake?stop=1&session=" + encodeURIComponent(wakeId))
-    : fetch("/wake?stop=1&session=" + encodeURIComponent(wakeId),
-            { method: "POST", body: "" }).catch(() => {});
+  if (audioStream) audioStream.getTracks().forEach((t) => t.stop());
+  if (audioCtx) { try { audioCtx.close(); } catch (e) { /* already closed */ } }
+  audioNode = audioStream = audioCtx = null;
+}
+
+// ---- one listener per browser -----------------------------------------------
+// The wake word is the only part of this that a window can run without anybody
+// looking at it, which is exactly what made it duplicate: every page auto-
+// started its own listener, so one sentence spoken near two open tabs was
+// detected twice, transcribed twice and sent twice - into whichever chat each
+// of those tabs happened to be sitting in.
+//
+// So it is a lease, held in localStorage (shared across tabs of one browser,
+// which is the case that actually happens) and stamped with a heartbeat. A tab
+// that dies without releasing it goes stale rather than locking the feature
+// out forever, and the BroadcastChannel is only there to make the handover
+// prompt: without it the next tab still takes over, just a stale window later.
+//
+// This cannot reach ACROSS devices - a phone and a desktop are two browsers -
+// which is what the server-side guard in _post_input is for.
+const WAKE_LEASE_KEY = "uniagent-wake-lease";
+const WAKE_LEASE_BEAT_MS = 3000;
+const WAKE_LEASE_STALE_MS = 9000;
+const wakeChan = ("BroadcastChannel" in window)
+  ? new BroadcastChannel("uniagent-wake") : null;
+let wakeLeaseTimer = null;
+
+function wakeLease() {
+  try { return JSON.parse(localStorage.getItem(WAKE_LEASE_KEY) || "null"); }
+  catch (e) { return null; }   // private mode, or somebody else's key
+}
+
+function wakeWrite(lease) {
+  try { localStorage.setItem(WAKE_LEASE_KEY, JSON.stringify(lease)); }
+  catch (e) { /* private mode: the lease is a nicety, not a requirement */ }
+}
+
+// True if this window may listen. A lease nobody has renewed for
+// WAKE_LEASE_STALE_MS is a tab that was closed or suspended, and is taken.
+function wakeClaim() {
+  const held = wakeLease();
+  if (held && held.id !== CLIENT_ID
+      && Date.now() - (held.at || 0) < WAKE_LEASE_STALE_MS) return false;
+  wakeWrite({ id: CLIENT_ID, at: Date.now() });
+  return true;
+}
+
+function wakeRenew() {
+  const held = wakeLease();
+  // Somebody else took it while this window was suspended (a phone with the
+  // tab in the background stops firing timers). Theirs now - stop listening
+  // rather than both of us doing it.
+  if (held && held.id !== CLIENT_ID) { wakeStop(); return; }
+  wakeWrite({ id: CLIENT_ID, at: Date.now() });
+}
+
+function wakeRelease() {
+  clearInterval(wakeLeaseTimer);
+  wakeLeaseTimer = null;
+  const held = wakeLease();
+  if (held && held.id !== CLIENT_ID) return;   // not ours to give away
+  try { localStorage.removeItem(WAKE_LEASE_KEY); } catch (e) { /* ignore */ }
+  if (wakeChan) wakeChan.postMessage({ type: "free" });
+}
+
+// The listening tab has gone. Any window that was told to auto-start, and was
+// refused because that tab held the lease, takes over now.
+if (wakeChan) {
+  wakeChan.onmessage = (e) => {
+    if (!e.data || e.data.type !== "free") return;
+    if (wakeOn || !wakeCfg.wake_auto || !wakeConfigured()) return;
+    wakeStart(true);
+  };
 }
 
 // New settings, from the load below or from the voice tab being saved.
@@ -8280,7 +9428,7 @@ function wakeSettings(values) {
   // microphone off rather than leaving a page listening for something that
   // can never now be said.
   if (!wakeConfigured() && wakeOn) wakeStop();
-  else if (now !== was && wakeOn) wakeEnd();
+  else if (now !== was && wakeOn) sayAbort();
   drawWakeButton();
 }
 
@@ -8575,6 +9723,17 @@ function speakSkip(direction) {
   launchReader();
 }
 
+// Skip past everything queued or playing and go quiet - exactly the effect of
+// leaning on the right arrow. speakSkip advances one clip and, once it reaches
+// the live edge with nothing left, early-returns doing nothing, so calling it
+// a good few times over walks off the end of whatever is queued and then stops.
+// Twenty is just comfortably more than any reply is ever split into. Used when
+// the user takes the floor - sends a message, or says the wake word - where the
+// old reply being read aloud is no longer what they want to hear.
+function speakSkipAll() {
+  for (let i = 0; i < 20; i++) speakSkip(1);
+}
+
 // Arrow keys inside a field with something in it would just move a text
 // cursor, so this steps aside there - moving a cursor while composing a
 // message (or editing anything else) is completely untouched. Checked by
@@ -8743,7 +9902,7 @@ const F = {
   wake_model: document.getElementById("s-wake-model"),
   wake_threshold: document.getElementById("s-wake-threshold"),
   wake_auto: document.getElementById("s-wake-auto"),
-  wake_captions: document.getElementById("s-wake-captions"),
+  voice_captions: document.getElementById("s-voice-captions"),
   wake_silence_ms: document.getElementById("s-wake-silence-ms"),
   temperature: document.getElementById("s-temperature"),
   max_repeats: document.getElementById("s-max-repeats"),
@@ -8753,8 +9912,15 @@ const F = {
   safety_prompt: document.getElementById("s-safety-prompt"),
   cron_safety_extra: document.getElementById("s-cron-safety-extra"),
   compaction_prompt: document.getElementById("s-compaction-prompt"),
+  infini_provider: document.getElementById("s-infini-provider"),
+  infini_model: document.getElementById("s-infini-model"),
+  infini_turns: document.getElementById("s-infini-turns"),
+  infini_temperature: document.getElementById("s-infini-temperature"),
+  infini_prompt: document.getElementById("s-infini-prompt"),
 };
 const tempValue = document.getElementById("s-temperature-value");
+const infiniTurnsValue = document.getElementById("s-infini-turns-value");
+const infiniTempValue = document.getElementById("s-infini-temperature-value");
 const repeatsValue = document.getElementById("s-max-repeats-value");
 const speakSummaryTemp = document.getElementById("s-speak-summary-temperature-value");
 const speakSpeedValue = document.getElementById("s-speak-speed-value");
@@ -8780,6 +9946,7 @@ function flash(text) {
 const listBoxes = {
   safety_whitelist: document.getElementById("s-whitelist"),
   safety_blacklist: document.getElementById("s-blacklist"),
+  terminal_whitelist: document.getElementById("s-terminal-whitelist"),
   market_repos: document.getElementById("s-market-repos"),
   wake_words: document.getElementById("s-wake-words"),
 };
@@ -8794,6 +9961,10 @@ const LIST_HINTS = {
   "s-whitelist": {
     placeholder: "screenshot_tool",
     empty: "no tools trusted outright - every call goes to the model.",
+  },
+  "s-terminal-whitelist": {
+    placeholder: "git status",
+    empty: "no commands trusted outright - every terminal call goes to the model.",
   },
   "s-blacklist": {
     placeholder: "main.py",
@@ -8891,6 +10062,9 @@ const PAIRS = [
   // The summarising model on the voice tab is an ordinary chat model - unlike
   // the two speech pairs above it, whose models come off their own endpoints.
   [F.speak_summary_provider, F.speak_summary_model],
+  // The infinite-chat judge, on the infiniagent tab - an ordinary chat model
+  // asked one question, so it belongs here with the rest of them.
+  [F.infini_provider, F.infini_model],
 ];
 
 // Offer providerSel's known models as autocomplete on modelSel - which is a
@@ -9047,24 +10221,39 @@ async function loadSettings() {
   checkCronExtra();
   drawList(listBoxes.safety_whitelist, known.safety_whitelist);
   drawList(listBoxes.safety_blacklist, known.safety_blacklist);
+  drawList(listBoxes.terminal_whitelist, known.terminal_whitelist);
   drawList(listBoxes.market_repos, known.market_repos);
   // Blank is a real saved value here - it means "use the default" - so the box
   // stays empty and the default shows through as its placeholder.
   F.compaction_prompt.value = known.compaction_prompt || "";
   F.compaction_prompt.placeholder = defaults.compaction_prompt || "";
+  // The infiniagent tab. Its prompt behaves exactly as the compaction one
+  // above: blank is saved as blank and means "the shipped prompt", which shows
+  // through as the placeholder.
+  F.infini_provider.value = known.infini_provider;
+  populateModels(F.infini_provider, F.infini_model, known.infini_model);
+  F.infini_turns.value = known.infini_turns;
+  F.infini_temperature.value = known.infini_temperature;
+  drawInfiniNumbers();
+  F.infini_prompt.value = known.infini_prompt || "";
+  F.infini_prompt.placeholder = defaults.infini_prompt || "";
   setVoiceKey(known.voice_key);
   F.wake_provider.value = known.wake_provider || "oww";
   drawWakeModels(known.wake_model || "");
   drawList(listBoxes.wake_words, known.wake_words);
   F.wake_threshold.value = known.wake_threshold;
   F.wake_auto.checked = !!known.wake_auto;
-  F.wake_captions.checked = !!known.wake_captions;
+  F.voice_captions.checked = !!known.voice_captions;
   F.wake_silence_ms.value = known.wake_silence_ms;
   drawWakeProvider();
   applyTheme(known.theme);
   accentValue = known.accent || "";
   applyAccent(accentValue);
   syncAccentBoxes();
+  // The five model fields are drawn as buttons over their (hidden) select and
+  // input - see installModelPickers - so whatever was just loaded into those
+  // has to be repainted onto the face of them.
+  paintModelFields();
 }
 
 // The two boxes follow the colour that is actually live, so "the theme's own"
@@ -9606,6 +10795,44 @@ function drawRepeats() {
 }
 F.max_repeats.addEventListener("input", drawRepeats);
 
+// The two numbers on the infiniagent tab, live under their sliders.
+function drawInfiniNumbers() {
+  infiniTurnsValue.textContent = Number(F.infini_turns.value);
+  infiniTempValue.textContent = Number(F.infini_temperature.value).toFixed(1);
+}
+F.infini_turns.addEventListener("input", drawInfiniNumbers);
+F.infini_temperature.addEventListener("input", drawInfiniNumbers);
+
+// The last thing the judge was sent and the last thing it said, read-only.
+// Fetched when the tab is opened rather than polled: it changes once per turn
+// of one chat, and this tab exists to be READ while the prompt is being tuned,
+// not to be watched. Nothing here is editable - the transcript is built by
+// infini.py from the history, so the only way to change it is to change the
+// prompt or the turn count above.
+async function loadInfiniLast() {
+  const said = document.getElementById("infini-last");
+  const box = document.getElementById("infini-last-text");
+  let info;
+  try {
+    info = await (await fetch("/infini?chat=" + encodeURIComponent(currentChat || ""))).json();
+  } catch (e) {
+    said.textContent = "could not ask the server.";
+    return;
+  }
+  const last = info.last || {};
+  if (!last.at) {
+    said.textContent = "nothing judged yet since the server started - turn the "
+      + "\"infinite\" toggle in the corner of a chat on, and send a message.";
+    box.value = "";
+    return;
+  }
+  said.textContent = last.chat + " - " + new Date(last.at * 1000).toLocaleString()
+    + " - " + last.verdict + (last.why ? ": " + last.why : "")
+    + (last.forked ? " - forked " + last.forked : "");
+  box.value = "--- sent to the judge ---\n" + (last.transcript || "")
+    + "\n\n--- what it said ---\n" + (last.reply || "");
+}
+
 // The number beside a settings slider, in the same words the chat dropdown uses
 // - so the defaults and a chat's own setting all read identically. A list rather
 // than a function each, so a third default threshold is a line here.
@@ -9702,11 +10929,18 @@ document.getElementById("set-save").addEventListener("click", async () => {
     cron_safety_extra: F.cron_safety_extra.value.trim(),
     safety_whitelist: readList(listBoxes.safety_whitelist),
     safety_blacklist: readList(listBoxes.safety_blacklist),
+    terminal_whitelist: readList(listBoxes.terminal_whitelist),
     market_repos: readList(listBoxes.market_repos),
     // Not defaulted back to the known value like safety_prompt above: an empty
     // box is how the compaction tab says "use the shipped prompt", and
     // compaction.py reads a blank setting as exactly that.
     compaction_prompt: F.compaction_prompt.value.trim(),
+    infini_provider: F.infini_provider.value,
+    infini_model: F.infini_model.value.trim(),
+    infini_turns: Number(F.infini_turns.value),
+    infini_temperature: Number(F.infini_temperature.value),
+    // Blank means the shipped prompt, same as the compaction box above.
+    infini_prompt: F.infini_prompt.value.trim(),
     voice_key: voiceKey,
     voice_provider: F.voice_provider.value,
     voice_model: F.voice_model.value.trim(),
@@ -9732,7 +10966,7 @@ document.getElementById("set-save").addEventListener("click", async () => {
     wake_words: readList(listBoxes.wake_words),
     wake_threshold: Number(F.wake_threshold.value),
     wake_auto: F.wake_auto.checked,
-    wake_captions: F.wake_captions.checked,
+    voice_captions: F.voice_captions.checked,
     wake_silence_ms: Number(F.wake_silence_ms.value),
   };
   const r = await fetch("/settings", { method: "POST", body: JSON.stringify(body) });
@@ -9743,6 +10977,7 @@ document.getElementById("set-save").addEventListener("click", async () => {
   // showed them would be quietly lying about what is now in force.
   drawList(listBoxes.safety_whitelist, known.safety_whitelist);
   drawList(listBoxes.safety_blacklist, known.safety_blacklist);
+  drawList(listBoxes.terminal_whitelist, known.terminal_whitelist);
   drawList(listBoxes.market_repos, known.market_repos);
   F.safety_threshold.value = known.safety_threshold;
   F.cron_safety_threshold.value = known.cron_safety_threshold;
@@ -9752,6 +10987,11 @@ document.getElementById("set-save").addEventListener("click", async () => {
   setSpeakSpeed(known.speak_speed);
   F.max_repeats.value = known.max_repeats;
   drawRepeats();
+  // Same reason as the sliders above: a number the server refused must not be
+  // left sitting on the slider as though it were in force.
+  F.infini_turns.value = known.infini_turns;
+  F.infini_temperature.value = known.infini_temperature;
+  drawInfiniNumbers();
   drawThresholdOuts();
   checkPromptShape();
   checkCronExtra();
@@ -9874,6 +11114,33 @@ let modelPending = null;
 // and the search re-ranks.
 let modelChoices = [];
 
+// The pairs picked most recently, newest first, straight from the server -
+// which is what makes them the same five on the laptop, on this machine and
+// in the terminal, rather than five this browser happens to remember. Drawn
+// at the top of the panel whenever nothing is being searched for; a search
+// drops them, because then the query is the ordering.
+let modelRecent = [];
+
+// Every provider that can be pointed at a particular company's endpoint
+// (OpenRouter, and anything else pointed at it), and which pairs have
+// actually been pointed somewhere: {provider: {model: slug}}. Both ride along
+// with the settings, so a row can say "@ deepinfra" without a request of its
+// own.
+let routeProviders = [];
+let modelRoutes = {};
+
+// Every provider name the settings offer, whether or not it has models listed
+// yet - what the "use what I typed on ..." rows at the bottom of a search
+// offer, so a model id newer than any catalogue is still one click away.
+let modelProviders = [];
+
+// Which control the open panel is choosing FOR: the box beside the input, or
+// one of the settings page's model fields. Null while it is shut. Everything
+// below asks the target what is currently chosen and hands it back a pick -
+// which is the whole of the difference between the two, and why one panel can
+// serve both.
+let mqTarget = null;
+
 // Which row the arrow keys are on, as an index into what is currently drawn.
 // -1 while nothing is highlighted (a fresh open, or a query that matched
 // nothing), so Enter has nothing to pick until you point at something.
@@ -9885,7 +11152,11 @@ let mqCursor = -1;
 function paintModelLabel(provider, model) {
   const full = provider + " / " + model;
   mqLabel.textContent = full;
-  modelQuick.title = full + " - the model this chat runs on";
+  // The box has no room for an endpoint beside an id this long, so which
+  // company serves it goes in the tooltip - where the full name already is.
+  const via = routeOf(provider, model);
+  modelQuick.title = full + (via ? " on " + via : "")
+    + " - the model this chat runs on";
   remeasureModelLabel();
 }
 
@@ -9950,6 +11221,11 @@ async function loadModelQuick(pending) {
     for (const p of s.providers) {
       for (const m of s.models[p] || []) modelChoices.push({ provider: p, model: m });
     }
+    modelProviders = s.providers || [];
+    modelRecent = s.recent || [];
+    routeProviders = s.routes || [];
+    modelRoutes = s.model_routes || {};
+    paintModelFields();
     if (!modelPanel.hidden) drawModelList();
   } catch (e) { /* leave whatever was already there */ }
 }
@@ -9976,44 +11252,101 @@ function filterModels(query) {
     .map((x) => x.c);
 }
 
+// What the open panel is currently pointed at - the loaded chat's model, or
+// the value in the settings field being edited. Null when nothing is chosen
+// yet, which is drawn as no ticked row rather than as a guess.
+function currentPick() {
+  return mqTarget ? mqTarget.live() : lastModel;
+}
+
+// The endpoint a pair has been pinned to, or "" for the router's own choice.
+function routeOf(provider, model) {
+  return (modelRoutes[provider] || {})[model] || "";
+}
+
 function drawModelList() {
-  const shown = filterModels(mqSearch.value);
-  const live = lastModel ? lastModel.provider + "\t" + lastModel.model : null;
+  const query = mqSearch.value;
+  const shown = filterModels(query);
+  const live = currentPick();
+  const liveKey = live ? live.provider + "\t" + live.model : null;
   mqList.innerHTML = "";
-  if (!shown.length) {
-    const none = document.createElement("div");
-    none.className = "mq-none";
-    none.textContent = "no model matches that";
-    mqList.appendChild(none);
-    mqCursor = -1;
-    return;
-  }
-  shown.forEach((c, i) => {
+  mqCursor = -1;
+
+  const heading = (text) => {
+    const h = document.createElement("div");
+    h.className = "mq-group";
+    h.textContent = text;
+    mqList.appendChild(h);
+  };
+
+  // One row. `free` marks a pair nothing has listed - a model id typed into
+  // the search box - which reads as an instruction rather than as a choice
+  // off a list, and so says so.
+  const row = (c, free) => {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "mq-item";
     b.setAttribute("role", "option");
-    const value = c.provider + "\t" + c.model;
-    if (value === live) {
+    if (c.provider + "\t" + c.model === liveKey) {
       b.classList.add("on");
       b.setAttribute("aria-selected", "true");
     }
     const who = document.createElement("span");
     who.className = "who";
-    who.textContent = c.provider + " /";
+    who.textContent = free ? "use on " + c.provider + ":" : c.provider + " /";
     const what = document.createElement("span");
     what.className = "what";
     what.textContent = c.model;
     b.append(who, what);
-    b.addEventListener("click", () => pickModel(c.provider, c.model));
+    const via = routeOf(c.provider, c.model);
+    if (via) {
+      const tag = document.createElement("span");
+      tag.className = "via";
+      tag.textContent = via;
+      tag.title = c.model + " is pinned to " + via + " on " + c.provider;
+      b.appendChild(tag);
+    }
+    b.addEventListener("click", () => choosePick(c.provider, c.model));
     mqList.appendChild(b);
-  });
+  };
+
+  // Nothing typed: the five most recently picked first, then everything. A
+  // recent pair is drawn twice, in its own group and again in the full list,
+  // because the full list is still the catalogue and a gap in it would be the
+  // stranger thing to read.
+  const recent = query.trim() ? [] : modelRecent.filter(
+    (c) => modelChoices.some((x) => x.provider === c.provider && x.model === c.model));
+  if (recent.length) {
+    heading("recent");
+    recent.forEach((c) => row(c));
+    heading("all");
+  }
+  shown.forEach((c) => row(c));
+
+  if (!shown.length) {
+    // A query that matches nothing is usually a model id that no catalogue
+    // lists - a brand new one, or a local build - and typing one in has always
+    // worked here. So the panel offers to use it, on whichever provider, and
+    // stays a list of things to click rather than becoming a dead end.
+    const typed = query.trim();
+    if (typed) {
+      heading("not in any list - use it anyway");
+      for (const name of modelProviders) row({ provider: name, model: typed }, true);
+    } else {
+      const none = document.createElement("div");
+      none.className = "mq-none";
+      none.textContent = "no model matches that";
+      mqList.appendChild(none);
+    }
+  }
+
   // A search has one obvious answer at the top, so Enter should take it
   // without an arrow press first. With no query there is no such answer, and
   // the live model is what the eye is already on.
-  mqCursor = mqSearch.value.trim() ? 0 : shown.findIndex(
-    (c) => c.provider + "\t" + c.model === live);
+  const rows = [...mqList.querySelectorAll(".mq-item")];
+  mqCursor = query.trim() ? 0 : rows.findIndex((r) => r.classList.contains("on"));
   paintModelCursor(false);
+  drawRoutePicker();
 }
 
 // The highlight, and (when the keys moved it) the scroll that keeps it in view.
@@ -10034,36 +11367,82 @@ function moveModelCursor(step) {
   paintModelCursor(true);
 }
 
-// Above the button, not below it: this sits at the bottom of the window, where
-// there is no room under it. Viewport coordinates, because the panel is fixed.
+// Above the anchor where there is room under it, below where there isn't: the
+// box beside the input sits at the bottom of the window and the settings
+// fields sit near the top, and the panel has to hang the other way for each.
+// Viewport coordinates, because the panel is fixed.
 function placeModelPanel() {
-  const box = modelQuick.getBoundingClientRect();
-  modelPanel.style.bottom = Math.max(8, window.innerHeight - box.top + 6) + "px";
+  const anchor = mqTarget ? mqTarget.anchor : modelQuick;
+  const box = anchor.getBoundingClientRect();
+  const below = window.innerHeight - box.bottom;
+  modelPanel.style.left = "";
   modelPanel.style.right = Math.max(8, window.innerWidth - box.right) + "px";
+  // Whichever side has more room, and then told how much room that is: the
+  // list inside is the only part that gives, so a panel that would run off the
+  // top comes back as a shorter list rather than as a search box you cannot
+  // see. The floor is there because below some height it is not a list any
+  // more, and a panel overlapping its own button beats an empty one.
+  const room = Math.max(below, box.top) - 14;
+  modelPanel.style.maxHeight = Math.max(220, room) + "px";
+  if (below > box.top) {
+    modelPanel.style.top = Math.min(window.innerHeight - 40, box.bottom + 6) + "px";
+    modelPanel.style.bottom = "auto";
+  } else {
+    modelPanel.style.bottom = Math.max(8, window.innerHeight - box.top + 6) + "px";
+    modelPanel.style.top = "auto";
+  }
 }
 
 function closeModelPanel() {
   modelPanel.hidden = true;
+  if (mqTarget) mqTarget.anchor.setAttribute("aria-expanded", "false");
   modelQuick.setAttribute("aria-expanded", "false");
+  mqTarget = null;
 }
 
-function openModelPanel() {
+// `target` says what the pick is FOR - see mqTarget. Called with nothing it
+// means the chat, which is what the box beside the input has always meant.
+function openModelPanel(target) {
+  mqTarget = target || chatTarget;
   // A fresh query each time. A search left over from the last open would be
   // hiding most of the list before a key has been touched.
   mqSearch.value = "";
+  mqRoutePair = null;
   modelPanel.hidden = false;
-  modelQuick.setAttribute("aria-expanded", "true");
+  mqTarget.anchor.setAttribute("aria-expanded", "true");
   placeModelPanel();
   drawModelList();
   mqSearch.focus();
   // The list may be stale - a provider or model could have been added in the
-  // settings since this page last pulled them - so refresh behind the draw.
+  // settings since this page last pulled them, and the recents move whenever
+  // anything anywhere picks a model - so refresh behind the draw.
   loadModelQuick();
 }
 
-modelQuick.addEventListener("click", () => {
-  if (modelPanel.hidden) openModelPanel(); else closeModelPanel();
-});
+// Clicking the anchor that opened it shuts it again; clicking a different one
+// moves the panel there rather than closing and making you click twice.
+function toggleModelPanel(target) {
+  if (!modelPanel.hidden && mqTarget && mqTarget.anchor === target.anchor) {
+    closeModelPanel();
+  } else {
+    openModelPanel(target);
+  }
+}
+
+// A row was clicked, or Enter was pressed on one. Where that lands is the
+// target's business - the chat tests the model and pins itself to it, a
+// settings field just fills in.
+function choosePick(provider, model) {
+  (mqTarget || chatTarget).choose(provider, model);
+}
+
+// The box beside the input: picking here switches the loaded chat, through the
+// same /model the typed command takes.
+const chatTarget = {
+  anchor: modelQuick,
+  live: () => lastModel,
+  choose: (provider, model) => pickModel(provider, model),
+};
 
 mqSearch.addEventListener("input", drawModelList);
 
@@ -10082,7 +11461,10 @@ mqSearch.addEventListener("keydown", (e) => {
 // the button came back.
 document.addEventListener("pointerdown", (e) => {
   if (modelPanel.hidden) return;
-  if (e.target.closest("#model-panel") || e.target.closest("#model-quick")) return;
+  // Every button that opens this panel is left alone here, so the click that
+  // follows can toggle it - closing on the press and reopening on the release
+  // would make clicking the open button do nothing at all.
+  if (e.target.closest("#model-panel") || e.target.closest(".mq-anchor")) return;
   closeModelPanel();
 });
 document.addEventListener("keydown", (e) => {
@@ -10090,9 +11472,15 @@ document.addEventListener("keydown", (e) => {
   // Escape with this open means "shut this", not "shut the settings page
   // behind it too" - the same reason the safety panel stops here.
   e.stopImmediatePropagation();
+  const anchor = mqTarget ? mqTarget.anchor : modelQuick;
   closeModelPanel();
-  modelQuick.focus();
+  anchor.focus();
 });
+// The settings box scrolls, and a fixed panel anchored to a field in it would
+// otherwise sit still while the field it points at slid away.
+document.addEventListener("scroll", () => {
+  if (!modelPanel.hidden) placeModelPanel();
+}, true);
 window.addEventListener("resize", () => {
   if (!modelPanel.hidden) placeModelPanel();
   // The box's cap changes at the narrow breakpoints, and with it how much of
@@ -10155,6 +11543,261 @@ async function pickModel(provider, model) {
   }
   await pollStatus();
 }
+
+modelQuick.addEventListener("click", () => toggleModelPanel(chatTarget));
+
+// ---- the same picker, on the settings page ---------------------------------
+// The models tab used to be a provider dropdown beside a free-text box, with
+// the provider's models spelled out underneath to click. That is three
+// controls saying one thing, and none of them searchable - which is fine at
+// six models and useless at two hundred, which is what one OpenRouter key is.
+//
+// So each pair below becomes one button that opens the panel above: the same
+// list, the same search, the same five recents, the same endpoint box. The
+// select and the input are still there underneath, hidden - they are what
+// loadSettings fills and what the save button reads, and keeping them means
+// none of that had to change to put a different face on it. Typing an id by
+// hand still works too: a search that matches nothing offers to use what you
+// typed, on whichever provider (see drawModelList).
+
+// [providerSel, modelSel] -> the button showing what they hold.
+const modelFieldButtons = new Map();
+
+function paintPickButton(button, provider, model) {
+  button.innerHTML = "";
+  if (!provider && !model) {
+    const none = document.createElement("span");
+    none.className = "who";
+    none.textContent = "pick a model";
+    button.appendChild(none);
+  } else {
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = provider + " /";
+    const what = document.createElement("span");
+    what.className = "what";
+    what.textContent = model || "(none)";
+    button.append(who, what);
+    const via = routeOf(provider, model);
+    if (via) {
+      const tag = document.createElement("span");
+      tag.className = "via";
+      tag.textContent = via;
+      tag.title = model + " is pinned to " + via + " on " + provider;
+      button.appendChild(tag);
+    }
+  }
+  const caret = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  caret.setAttribute("class", "mq-caret");
+  caret.setAttribute("viewBox", "0 0 10 10");
+  caret.setAttribute("fill", "none");
+  caret.setAttribute("stroke", "currentColor");
+  caret.setAttribute("stroke-width", "1.6");
+  caret.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", "M2 4l3 3 3-3");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  caret.appendChild(path);
+  button.appendChild(caret);
+  button.title = (provider ? provider + " / " + model : "pick a model")
+    + " - click to search every model";
+}
+
+// Every settings field's button redrawn from what its hidden pair now holds.
+// Called after the settings load, after a pick, and whenever the routes map
+// changes underneath - all three are "the button is showing something that is
+// no longer what is set".
+function paintModelFields() {
+  for (const [button, pair] of modelFieldButtons) {
+    paintPickButton(button, pair[0].value, pair[1].value);
+  }
+}
+
+function installModelPickers() {
+  for (const [providerSel, modelSel] of PAIRS) {
+    const row = providerSel.closest(".row");
+    if (!row) continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "model-pick mq-anchor";
+    button.setAttribute("aria-haspopup", "listbox");
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-controls", "model-panel");
+    row.parentNode.insertBefore(button, row);
+    // Still in the DOM and still the value - just not the way you change it.
+    row.style.display = "none";
+    const hint = document.getElementById(modelSel.id + "-hint");
+    if (hint) hint.style.display = "none";
+    modelFieldButtons.set(button, [providerSel, modelSel]);
+
+    const target = {
+      anchor: button,
+      live: () => (providerSel.value && modelSel.value
+        ? { provider: providerSel.value, model: modelSel.value } : null),
+      choose: (provider, model) => {
+        closeModelPanel();
+        // A provider added since this page last loaded the settings has no
+        // option to select, and assigning one that isn't there silently
+        // leaves the select blank - which would save the model against no
+        // provider at all. So the option is made rather than assumed.
+        if (![...providerSel.options].some((o) => o.value === provider)) {
+          const o = document.createElement("option");
+          o.value = o.textContent = provider;
+          providerSel.appendChild(o);
+        }
+        providerSel.value = provider;
+        // Through populateModels rather than by hand, so the datalist behind
+        // the hidden box lists THIS provider's models - it is still what a
+        // paste into that box autocompletes against.
+        populateModels(providerSel, modelSel, model);
+        modelSel.value = model;
+        modelSel.dispatchEvent(new Event("change", { bubbles: true }));
+        paintPickButton(button, provider, model);
+      },
+    };
+    button.addEventListener("click", () => toggleModelPanel(target));
+    paintPickButton(button, providerSel.value, modelSel.value);
+  }
+}
+installModelPickers();
+
+// ---- which company actually serves the model -------------------------------
+// A router (OpenRouter) forwards the same model id to any of a dozen companies,
+// and they are not interchangeable: different quantisations, context limits,
+// prices and outages. This is the box that says which one - typed in as the
+// router's own slug ("baidu/fp8"), or clicked from the list it can be asked
+// for. Blank means what it has always meant: let the router choose.
+//
+// It applies to the PAIR, not to whoever opened the panel. Say deepseek-v3.1
+// on openrouter runs on baidu and it runs there in this chat, in a subagent
+// and in a cron job at 4am - one answer to one question, rather than the same
+// question asked again in every place a model can be chosen.
+
+const mqRoute = document.getElementById("mq-route");
+const mqRouteLabel = document.getElementById("mq-route-label");
+const mqRouteInput = document.getElementById("mq-route-input");
+const mqRouteList = document.getElementById("mq-route-list");
+const mqRouteNote = document.getElementById("mq-route-note");
+
+// Which pair the box is currently showing, as "provider\tmodel" - so redrawing
+// the list on every keystroke doesn't throw away what is being typed into it,
+// and doesn't re-ask the router for suggestions it already has.
+let mqRoutePair = null;
+
+function drawRoutePicker() {
+  const pick = currentPick();
+  const on = !!(pick && routeProviders.includes(pick.provider));
+  mqRoute.hidden = !on;
+  if (!on) { mqRoutePair = null; return; }
+  const key = pick.provider + "\t" + pick.model;
+  if (key === mqRoutePair) return;
+  mqRoutePair = key;
+  mqRouteLabel.textContent = "which company serves " + pick.model;
+  mqRouteInput.value = routeOf(pick.provider, pick.model);
+  mqRouteList.innerHTML = "";
+  mqRouteNote.textContent = "empty lets " + pick.provider
+    + " choose. Any slug it knows works, typed in as it writes it - baidu/fp8.";
+  loadRouteOptions(pick.provider, pick.model);
+}
+
+// The suggestions, asked of the router itself. A failure is silent on purpose:
+// what it costs is the chips, and the box underneath still takes anything.
+async function loadRouteOptions(provider, model) {
+  const key = provider + "\t" + model;
+  let data;
+  try {
+    const r = await fetch("/model/routes?provider=" + encodeURIComponent(provider)
+      + "&model=" + encodeURIComponent(model));
+    if (!r.ok) return;
+    data = await r.json();
+  } catch (e) { return; }
+  // The panel has moved on to another model while this was in flight.
+  if (mqRoutePair !== key) return;
+  drawRouteOptions(data.endpoints || []);
+}
+
+// Which chip is the one in the box, after the box changed. Its own function
+// because a save must not cost another round trip to the router just to move
+// a highlight - the list it drew is still the right list.
+function markRouteChips() {
+  const chosen = mqRouteInput.value.trim();
+  for (const b of mqRouteList.querySelectorAll("button")) {
+    b.classList.toggle("on", (b.dataset.route || "") === chosen);
+  }
+}
+
+function drawRouteOptions(endpoints) {
+  mqRouteList.innerHTML = "";
+  const chosen = mqRouteInput.value.trim();
+  const chip = (id, text, note) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = text;
+    b.dataset.route = id;
+    if (note) b.title = note;
+    if (id === chosen) b.classList.add("on");
+    b.addEventListener("click", () => {
+      mqRouteInput.value = id;
+      saveRoute();
+    });
+    mqRouteList.appendChild(b);
+  };
+  chip("", "auto", "let the router choose, which is the default");
+  for (const e of endpoints) chip(e.id, e.label, e.id + (e.note ? " - " + e.note : ""));
+  if (!endpoints.length) {
+    mqRouteNote.textContent += " (nothing came back when this model's endpoints "
+      + "were asked for - type the slug in if you know it.)";
+  }
+}
+
+// Written the moment it is settled - there is no save button on this panel,
+// and one more thing to remember to press is exactly what a one-box setting
+// does not need.
+async function saveRoute() {
+  if (!mqRoutePair) return;
+  const [provider, model] = mqRoutePair.split("\t");
+  const route = mqRouteInput.value.trim();
+  if (route === routeOf(provider, model)) return;
+  try {
+    const r = await fetch("/model/route", {
+      method: "POST",
+      body: JSON.stringify({ provider: provider, model: model, route: route }),
+    });
+    if (!r.ok) {
+      mqRouteNote.textContent = "could not save that - the server answered " + r.status + ".";
+      return;
+    }
+    const saved = await r.json();
+    if (!modelRoutes[provider]) modelRoutes[provider] = {};
+    if (saved.route) modelRoutes[provider][model] = saved.route;
+    else delete modelRoutes[provider][model];
+    // The badge on every row and button that mentions this pair. The list is
+    // redrawn for those, and the endpoint box below it is left exactly as it
+    // is - drawRoutePicker sees the same pair it is already showing and keeps
+    // out of the way, which is what stops this wiping what was just typed.
+    markRouteChips();
+    if (!modelPanel.hidden) drawModelList();
+    paintModelFields();
+    paintModelLabelRoute();
+    mqRouteNote.textContent = saved.route
+      ? model + " now runs on " + saved.route + " - here, in subagents and in cron jobs."
+      : provider + " chooses again for " + model + ".";
+  } catch (e) {
+    mqRouteNote.textContent = "that did not get through (" + e + ").";
+  }
+}
+
+// The corner box's tooltip, after the endpoint under it changed - see
+// paintModelLabel, which is where the wording lives.
+function paintModelLabelRoute() {
+  if (lastModel) paintModelLabel(lastModel.provider, lastModel.model);
+}
+
+mqRouteInput.addEventListener("change", saveRoute);
+mqRouteInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); saveRoute(); }
+});
 
 // ---- the chat's workspace picker -------------------------------------------
 // Which workspace THIS chat's file tools and terminal work in - a folder here,
@@ -10265,6 +11908,76 @@ wsQuick.addEventListener("change", async () => {
     drawWorkspaceBar();
   }
 });
+
+// ---- the chat's infinite-chat toggle ----------------------------------------
+// On, a small checking model reads the last few turns after every turn ends
+// and says whether the subject has really changed; when it has, this chat
+// forks and this window follows (see scripts/infini.py).
+//
+// Per chat, like the model, the workspace and the safety number - and there is
+// deliberately no global on/off, so this button is the only way in or out of
+// the mode. Two colours and nothing between them: red off, light blue on. It
+// is the one per-chat setting that can move you into a different chat without
+// asking, which is exactly why it is a button in the corner rather than a line
+// inside a dropdown somebody has to open.
+
+const infiniBtn = document.getElementById("infini-btn");
+const infiniNameOut = document.getElementById("infini-name");
+// What the server last said, so a redraw doesn't have to ask again.
+let infiniOn = false;
+
+function drawInfiniteButton() {
+  infiniBtn.classList.toggle("on", infiniOn);
+  infiniBtn.setAttribute("aria-checked", infiniOn ? "true" : "false");
+  infiniNameOut.textContent = infiniOn ? "on" : "off";
+  infiniBtn.title = infiniOn
+    ? "infinite chat is ON - when the subject changes, this chat splits and "
+      + "you are moved to the new one. Nothing is taken out of this chat."
+    : "infinite chat is off - this chat never splits itself.";
+}
+drawInfiniteButton();
+
+// Never throws: a server that can't be reached leaves the button showing
+// whatever it was showing, which is the last thing known to be true.
+async function loadInfinite() {
+  try {
+    const r = await fetch("/infini?chat=" + encodeURIComponent(currentChat || ""));
+    if (!r.ok) return;
+    const info = await r.json();
+    infiniOn = !!info.on;
+    drawInfiniteButton();
+  } catch (e) { /* server away - leave the button alone */ }
+}
+
+// requireChat, like the safety number and the workspace: turning the mode on
+// is setting a chat up, and it needs a real id to be written against.
+infiniBtn.addEventListener("click", async () => {
+  const wanted = !infiniOn;
+  // Drawn straight away so the control never feels laggy, but locked while
+  // the save is out - a second click landing mid-request would race it.
+  infiniOn = wanted;
+  drawInfiniteButton();
+  infiniBtn.classList.add("saving");
+  try {
+    const r = await fetch("/infini?chat=" + encodeURIComponent(requireChat()), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on: wanted }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    // From the answer, not from what was sent: the button must show what is
+    // actually saved, never what was merely asked for.
+    // The button changing colour IS the confirmation - there is nothing else
+    // to say about a two-state control that has just visibly changed state.
+    infiniOn = !!(await r.json()).on;
+  } catch (e) {
+    infiniOn = !wanted;
+    line("error", "could not change infinite chat: " + e);
+  }
+  infiniBtn.classList.remove("saving");
+  drawInfiniteButton();
+});
+
 
 // ---- the chat's safety number -----------------------------------------------
 // One number, 0 to 10: the highest danger rating a tool call can be given by
@@ -13740,6 +15453,9 @@ for (const tab of document.querySelectorAll(".set-tab")) {
     // the opposite and waits to be asked: that one is somebody else's server.
     if (tab.dataset.tab === "tools") loadInventory();
     if (tab.dataset.tab === "cron") loadCron();
+    // Re-read every time it is opened, for the same reason the usage tab is:
+    // it is a record of what has happened since you last looked.
+    if (tab.dataset.tab === "infiniagent") loadInfiniLast();
     // Re-read on every open rather than cached: the ledger has grown by
     // everything that happened since you last looked, and reading it is one
     // local file. No timer though - see the /usage route on why.
@@ -13874,7 +15590,7 @@ if (window.visualViewport) {
 
   // The wave worth waiting for. A window that has just opened has no chat yet,
   // so refresh() draws it empty without asking the server anything at all.
-  await Promise.all([refresh(), pollStatus(), loadSafety(),
+  await Promise.all([refresh(), pollStatus(), loadSafety(), loadInfinite(),
                      loadModelQuick(settings)]);
 
   loadChatWorkspaces();

@@ -776,11 +776,12 @@ def run_turn(turns, sync, text, chat_id, provider_name, model, system,
                     on_reasoning(data["text"])
 
             elif kind == "calltext":
-                # The call, shown the way main._stream's show_call shows one on
-                # every other provider - because the page has no drawing for a
-                # call at all: its "toolcall" event only SEALS the bubble
-                # (index.html), and the call is only ever seen because it was
-                # written in as text.
+                # The call, shown the way main._stream's show_call shows one
+                # on every other provider - for the terminal, which draws a
+                # call out of the text stream it is holding (cli.py's Stream).
+                # The web UI does not need it and does not show it: it draws
+                # the call as its own row off the "toolcall" event instead
+                # (index.html), the moment that event lands.
                 #
                 # Deliberately NOT added to `pending`: that is the model's
                 # prose, and the call belongs in tool_calls, not in the turn's
@@ -855,7 +856,16 @@ def run_turn(turns, sync, text, chat_id, provider_name, model, system,
                 }))
                 sync()
                 if on_tool_call:
-                    on_tool_call(said + shown if said else shown)
+                    # JUST the call, never the prose in front of it. The prose
+                    # has already gone out through on_text as it was written,
+                    # and it goes out again through on_message below - what
+                    # this callback is for is the call itself, which the web UI
+                    # parses for the tool's name and its headline argument (see
+                    # callPreview in index.html). Prefixing the prose made that
+                    # parse read the first bracket of a sentence as the call's
+                    # arguments, so a row drawn from it showed a fragment of
+                    # the model's commentary where the filename should be.
+                    on_tool_call(shown, name, data["tool_use_id"])
                 if on_message and said:
                     on_message(said, "call")
 
@@ -874,7 +884,8 @@ def run_turn(turns, sync, text, chat_id, provider_name, model, system,
                     safe, reason, checked = verdict
                     on_safety(safe, reason, checked=checked)
                 if on_tool_result:
-                    on_tool_result(data["text"], calls.get(data["tool_use_id"]), took)
+                    on_tool_result(data["text"], calls.get(data["tool_use_id"]),
+                                   took, data["tool_use_id"])
 
             elif kind == "error":
                 raise RuntimeError(data["error"])

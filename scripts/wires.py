@@ -437,6 +437,129 @@ def parse_models(spec, payload):
     return sorted(out) if listing.get("filter_chat") else out
 
 
+# --- which endpoint of a model to use ---------------------------------------
+#
+# A router - OpenRouter is the one everybody uses - serves the SAME model id
+# from a dozen different companies, and they are not the same thing to run on:
+# they quantise differently, cap the context differently, charge differently
+# and go down at different times. So a wire may say how to ask which endpoints
+# a model has, and how to name one in a request:
+#
+#     "routes": {
+#       "endpoint": "/models/$model/endpoints",
+#       "list": "data.endpoints",
+#       "id": "tag",
+#       "label": "provider_name",
+#       "send": {"provider": {"order": ["$route"], "allow_fallbacks": false}}
+#     }
+#
+# `id` is what gets SENT (OpenRouter's provider slug, "deepinfra/fp4"), `label`
+# what a person reads ("DeepInfra"), and "send" is merged into the body of any
+# turn whose model has a route chosen for it - and only then, so a wire with
+# this block behaves exactly as before until somebody picks an endpoint.
+#
+# A wire without the block simply cannot route, which is every ordinary
+# provider: asking OpenAI which companies serve gpt-5 is not a question.
+
+
+def routes_spec(spec):
+    """This wire's "routes" block, or {} - the one place anything asks whether
+    a wire can be pointed at a particular endpoint at all."""
+    block = spec.get("routes")
+    return block if isinstance(block, dict) else {}
+
+
+def routes_request(spec, ctx):
+    """(url, headers) for "which endpoints serve this model", or (None, None).
+
+    models_request's sibling, and the same reasoning: a catalogue endpoint
+    authenticates the way the chat endpoint does. $model is filled in from ctx,
+    since this question is asked about one model at a time."""
+    block = routes_spec(spec)
+    if not block.get("endpoint"):
+        return None, None
+    sub = {**spec, "endpoint": block["endpoint"],
+           "headers": block.get("headers", spec.get("headers")),
+           "body": {}}
+    url, headers, _ = build(sub, ctx)
+    return url, headers
+
+
+def _dig(payload, path):
+    """The value at a dotted path ("data.endpoints"), or None. One level is the
+    ordinary case; OpenRouter nests its endpoints one deeper than its models,
+    and a path costs less than a second parser."""
+    node = payload
+    for step in str(path or "").split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(step)
+    return node
+
+
+# What an endpoint entry may say about itself beyond its name. Read by key
+# where it exists and skipped where it does not, because these are what a
+# person actually chooses between - not decoration.
+_ROUTE_NOTES = (("quantization", "{}"),
+                ("context_length", "{:,} ctx"),
+                ("uptime_last_30m", "{:.0f}% up"))
+
+
+def parse_routes(spec, payload):
+    """The endpoints of one model, per the spec's "routes" block, as
+    [{"id", "label", "note"}] - id being what a request names, label what the
+    list shows, note the few facts worth choosing on (quantisation, context,
+    price, uptime).
+
+    Anything shaped unexpectedly yields nothing rather than raising, exactly as
+    parse_models does: the caller treats an empty list as "this provider does
+    not route", which leaves the box a person can still type a slug into."""
+    block = routes_spec(spec)
+    entries = _dig(payload, block.get("list") or "data")
+    if not isinstance(entries, list):
+        return []
+    id_key = block.get("id") or "id"
+    label_key = block.get("label") or id_key
+    out = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        value = entry.get(id_key)
+        if not isinstance(value, str) or not value:
+            continue
+        notes = []
+        for key, shape in _ROUTE_NOTES:
+            fact = entry.get(key)
+            if isinstance(fact, (int, float)) and not isinstance(fact, bool):
+                notes.append(shape.format(fact))
+            elif isinstance(fact, str) and fact:
+                notes.append(fact)
+        price = entry.get("pricing")
+        if isinstance(price, dict):
+            try:
+                notes.append("${:g}/${:g} per M".format(
+                    float(price.get("prompt") or 0) * 1e6,
+                    float(price.get("completion") or 0) * 1e6))
+            except (TypeError, ValueError):
+                pass
+        out.append({"id": value,
+                    "label": str(entry.get(label_key) or value),
+                    "note": " \u00b7 ".join(notes)})
+    return out
+
+
+def route_body(spec, route):
+    """What to merge into a turn's body to send it to `route`, or {}.
+
+    The shape is the wire's own (OpenRouter's provider.order pair), rendered
+    from the spec rather than written here, so a router with a different shape
+    for the same idea is a JSON edit."""
+    if not route:
+        return {}
+    block = routes_spec(spec)
+    rendered = render(block.get("send") or {}, {"route": route})
+    return rendered if isinstance(rendered, dict) else {}
+
 # --- the settings form, and validating an edit ------------------------------
 
 def fields(spec):
@@ -508,7 +631,8 @@ def problems(spec):
     # is the one that costs an afternoon, because it fails as a 401 that looks
     # exactly like a wrong key.
     everywhere = json.dumps([spec.get(k) for k in
-                             ("endpoint", "body", "headers", "auth", "models")])
+                             ("endpoint", "body", "headers", "auth", "models",
+                              "routes")])
     for m in _PLACEHOLDER.finditer(everywhere):
         name = m.group("setting") and "setting" or m.group("name")
         if name not in _KNOWN:
@@ -529,7 +653,7 @@ def problems(spec):
 # renderer itself needs no list, it just finds nothing and omits the key, which
 # is a silently keyless request and exactly the failure worth catching early.
 _KNOWN = ("model", "messages", "system", "temperature", "tools", "stop",
-          "max_tokens", "want_usage", "key", "setting")
+          "max_tokens", "want_usage", "key", "setting", "route")
 
 
 # --- writing the overlay ----------------------------------------------------

@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -39,6 +40,151 @@ LMSTUDIO_URL = os.environ.get("LMSTUDIO_URL", "http://localhost:1234/v1")
 # provider ends generation itself once it decides to call something), so what
 # is left here is only that hallucinated-continuation guard.
 STOP = ["\nTool result:", "\nUser:"]
+
+# --- Reply text that is not reply text -------------------------------------
+#
+# Two things arrive on the content channel that are not the model's answer,
+# and both of them used to be shown to the user verbatim as though they were.
+#
+# THINKING WRITTEN INLINE. A reasoning model is supposed to put its working on
+# its own channel (reasoning_content / reasoning, read below), and most do.
+# Plenty do not: llama.cpp, Ollama, vLLM and several proxies hand the raw
+# generation straight through, tags and all, so the working arrives inside
+# `content` wrapped in <think>...</think> - which reached the page as an
+# ordinary paragraph, in the middle of the reply, with no way to tell it apart
+# from the answer. _ThinkSplit below pulls it back out and sends it where the
+# rest of the thinking goes, so ONE code path draws thinking whether the model
+# separated it or not.
+#
+# The spellings are the ones that actually turn up. DeepSeek's DSML build uses
+# a fullwidth vertical bar (U+FF5C) inside its tags rather than an ASCII pipe,
+# which is why that character is matched explicitly rather than by \W.
+# The slash may sit either side of the leading bar - </think> is the ordinary
+# spelling, <|/DSML|think|> is DeepSeek's - so it is matched as its own group
+# and the group is what says whether a tag opens or closes.
+_THINK_TAGS = "think|thinking|thought|reason|reasoning"
+_THINK_TAG = re.compile(r"<\s*[|｜]?\s*(/?)\s*[|｜]?\s*"
+                        r"(?:DSML\s*[|｜]\s*)?(?:" + _THINK_TAGS
+                        + r")\s*[|｜]?\s*(/?)\s*>", re.I)
+
+# A TOOL CALL THE WIRE FAILED TO PARSE. Measured on OpenRouter's DeepSeek-v4
+# builds: the model writes its call in DeepSeek's own DSML markup, the endpoint
+# strips the opening of that markup while turning it into a structured call,
+# and every so often it strips the opening, keeps the closing, and produces no
+# structured call at all. What reaches here is a reply whose whole visible text
+# is markup rubbish -
+#
+#     ","command":""}</|DSML|parameter>\n</|DSML|invoke>\n</|DSML|tool_calls>
+#
+# - with tool_call left empty. Shown as the answer (which is what happened
+# before this), the user sees that; the turn is over, and the tool the model
+# meant to run never ran. There is not enough left to rebuild the call from -
+# the name went with the opening - so this is only ever DETECTED here, and
+# main._parse_calls turns the detection into "say that again", the same as any
+# other malformed call.
+_CALL_MARKUP = re.compile(r"</?[|｜]?\s*(?:DSML[|｜])?\s*"
+                          r"(?:tool_calls?|invoke|parameter|antml)\b[^>]*>", re.I)
+
+
+def looks_like_stray_markup(text):
+    """Whether `text` is a mangled tool call rather than a reply - a reply made
+    of tag remnants and nothing else.
+
+    Deliberately strict about "and nothing else": a model quoting XML back at
+    someone, or explaining this very bug, writes tags inside a sentence, and
+    that is a real answer. So markup is only read as a failed call when taking
+    it out leaves nothing a person would call prose - and a bare fragment of
+    JSON arguments ({"command":"") is not prose, which is the usual remainder."""
+    if not text or not _CALL_MARKUP.search(text):
+        return False
+    rest = _CALL_MARKUP.sub("", text)
+    # What is left of a mangled call is the tail of its own arguments. Strip
+    # the punctuation those are made of; anything still standing is real text.
+    rest = re.sub(r"[\s{}\[\]\"\',:]+", "", rest)
+    return len(rest) < 24
+
+
+def strip_call_markup(text):
+    """`text` with tool-call tag remnants taken out. Used on the way to the
+    page so a leaked closing tag is not shown, never on the way to a provider -
+    history keeps what the model actually wrote."""
+    return _CALL_MARKUP.sub("", text)
+
+
+class _ThinkSplit:
+    """Splits a streamed content channel into reply text and inline thinking.
+
+    Fed one delta at a time; answers with the part of it that is reply text,
+    and calls `on_think` with the part that was inside a thinking tag. Both may
+    be empty, and either may be split across as many deltas as the model likes -
+    the tags themselves regularly arrive in pieces ("<th", "ink>"), which is
+    why the tail of every delta is held back rather than being tested on its
+    own and passed straight through.
+
+    Held back is at most `_HOLD` characters, and only when the tail could still
+    become a tag: a delta ending in ordinary prose is never delayed, so this
+    costs nothing on the models that already separate their thinking properly.
+    close() gives back whatever is still held when the stream ends, so a reply
+    that stops inside a half-written tag still shows what it had."""
+
+    # The longest tag this can be part-way through, plus room to spare.
+    _HOLD = 24
+
+    def __init__(self, on_think=None):
+        self.on_think = on_think
+        self._hold = ""
+        self._inside = False
+        self.saw_tag = False
+
+    def feed(self, piece):
+        buf = self._hold + (piece or "")
+        self._hold = ""
+        out = []
+        while buf:
+            found = _THINK_TAG.search(buf)
+            if found:
+                shuts = bool(found.group(1) or found.group(2))
+                # A tag that agrees with where we already are is not a
+                # boundary: a stray </think> outside a block, or a second
+                # <think> inside one, would otherwise flip the stream over and
+                # send the whole rest of the answer to the thinking block.
+                if shuts == self._inside:
+                    self.saw_tag = True
+                    head, buf = buf[:found.start()], buf[found.end():]
+                    self._emit(head, out)
+                    self._inside = not self._inside
+                    continue
+                # Drop the contradictory tag and carry on as we were.
+                head, buf = buf[:found.start()], buf[found.end():]
+                self._emit(head, out)
+                continue
+            # No whole tag in what is left. Hold back only as much of the tail
+            # as could still be the front of one, and release the rest.
+            keep = min(self._HOLD, len(buf))
+            head, self._hold = buf[:len(buf) - keep], buf[len(buf) - keep:]
+            if "<" not in self._hold:
+                head, self._hold = head + self._hold, ""
+            self._emit(head, out)
+            break
+        return "".join(out)
+
+    def close(self):
+        """The end of the stream: give back whatever was still held, as the
+        side it was being read as."""
+        rest, self._hold = self._hold, ""
+        out = []
+        self._emit(rest, out)
+        return "".join(out)
+
+    def _emit(self, text, out):
+        if not text:
+            return
+        if self._inside:
+            if self.on_think:
+                self.on_think(text)
+        else:
+            out.append(text)
+
 
 # How long claude-subscription waits for the next piece of a reply before
 # giving up. Per chunk, not per reply: a long answer that keeps arriving is
@@ -224,7 +370,7 @@ def _error_text(err):
     return str(err)
 
 
-def _sse(r):
+def _sse(r, note=None):
     """The JSON payload of each `data:` line of a Server-Sent Events response.
 
     OpenAI, DeepSeek, Anthropic and Gemini all stream as SSE, so they share this.
@@ -276,6 +422,13 @@ def _sse(r):
     truncated but real, so the stream simply ends and the turn keeps what it
     got: re-sending there would repeat everything already on screen, and
     raising would throw away a paragraph the user can see.
+
+    That second case is RECORDED, in `note` if a caller passed a dict for it.
+    Ending quietly is right for the text; ending quietly and saying nothing was
+    not. A reply cut off mid-word is indistinguishable from a finished one once
+    it is on the page, and the turn loop would carry on as though the model had
+    said its piece - so the fact is written down here, and main.py turns it into
+    something the user and the model can both see.
     """
     _check(r)
     sent = False
@@ -307,6 +460,8 @@ def _sse(r):
             # reads it as the provider's fault.
             turnctx.check()
             if sent:
+                if note is not None:
+                    note["truncated"] = type(e).__name__
                 return  # a short reply beats no reply - see the docstring
             raise Dropped(type(e).__name__ + ": " + str(e))
         except Exception:
@@ -380,12 +535,24 @@ def _compat(messages):
     the next real one, which this same merge absorbs regardless of provider."""
     system = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
     turns = []
+    # Which tool each pending tool_call_id was, but ONLY while the assistant
+    # turn above made more than one call. A batch's results are folded into a
+    # single user turn by the merge at the bottom of this loop, and unlabelled
+    # they arrive as "Tool result: ...\nTool result: ..." with nothing saying
+    # which call produced which - so a model that read two files at once has
+    # to pair them by position and gets no second chance if it pairs them
+    # wrong. One call needs no label and does not get one: that is every
+    # transcript written before batching existed, and its wording is what the
+    # system prompt teaches.
+    named = {}
     for m in messages:
         role = m.get("role")
         if role == "system":
             continue
         if role == "tool":
-            mapped_role, content = "user", "Tool result: " + (m.get("content") or "")
+            which = named.get(m.get("tool_call_id"))
+            marker = "Tool result (" + which + "): " if which else "Tool result: "
+            mapped_role, content = "user", marker + (m.get("content") or "")
         elif role == "assistant":
             content = m.get("content") or ""
             if m.get("tool_calls"):
@@ -396,6 +563,13 @@ def _compat(messages):
                         fn = call.get("function", {})
                         content += fn.get("name", "") + "(" + fn.get("arguments", "") + ")"
             mapped_role = "assistant"
+            calls = m.get("tool_calls") or []
+            named = {}
+            if len(calls) > 1:
+                for call in calls:
+                    name = (call.get("function") or {}).get("name")
+                    if call.get("id") and name:
+                        named[call["id"]] = name
         else:
             mapped_role, content = "user", m.get("content") or ""
         if turns and turns[-1]["role"] == mapped_role:
@@ -415,10 +589,11 @@ def _plain_messages(prompt):
     return ([{"role": "system", "content": system}] if system else []) + turns
 
 
-# Message keys the OpenAI wire actually knows. Uniagent's own bookkeeping key
-# raw_call (see _compat) is not one of them, and an unrecognised key on a
-# message is a 400, so the native path copies messages through this filter
-# rather than sending a stored turn verbatim.
+# Message keys the OpenAI wire actually knows. Uniagent's own bookkeeping keys
+# raw_call and raw_calls (see _compat, and main.run for the second) are not
+# among them, and an unrecognised key on a message is a 400, so the native path
+# copies messages through this filter rather than sending a stored turn
+# verbatim.
 _NATIVE_KEYS = ("role", "content", "tool_calls", "tool_call_id", "name")
 
 # DeepSeek's thinking models refuse to replay an assistant turn that made a
@@ -774,6 +949,91 @@ def _dialect_turns(dialect, prompt, tools, spec):
     return "", messages
 
 
+# ---------------------------------------------------------------------------
+# Several tool calls in one response
+#
+# A model may decide to call more than one tool before it stops generating -
+# read three files, search two things - and every wire below can carry that.
+# What arrives is one call PER SLOT: OpenAI numbers its fragments with an
+# `index`, Anthropic and Bedrock open a separate content block per call,
+# Gemini sends whole functionCall parts one after another.
+#
+# The `tool_call` dict a caller passes in is the collector for all of them.
+# Slot 0 IS that dict - {"id","name","arguments"} written straight onto it,
+# exactly where a single call has always been written - and slots 1..n live in
+# tool_call["more"]. Keeping the first call in place is what makes this change
+# invisible to everything that only ever expected one: main._parse_calls reads
+# the whole list through calls_in(), and nothing else had to move.
+#
+# Readers never touch the layout themselves; they ask _slot() for the dict to
+# write into and it grows the list as needed.
+
+
+def _slot(tool_call, index=0):
+    """The dict parallel call `index` accumulates into, created if new."""
+    if index <= 0:
+        return tool_call
+    more = tool_call.setdefault("more", [])
+    while len(more) < index:
+        more.append({})
+    return more[index - 1]
+
+
+def calls_in(tool_call):
+    """Every finished call in a collector, in order - a list of
+    {"id","name","arguments"} dicts, empty if nothing was called.
+
+    A slot with no name is one a reader opened and the stream then ended
+    before it said what the call was; it is dropped rather than handed on as
+    a nameless call, which is the same thing an empty collector means.
+
+    The one place the layout above is read, so the layout is _slot()'s
+    business and nobody else's."""
+    if not tool_call:
+        return []
+    found = []
+    for slot in [tool_call] + list(tool_call.get("more") or []):
+        if slot.get("name"):
+            found.append({"id": slot.get("id"), "name": slot["name"],
+                          "arguments": slot.get("arguments", "")})
+    return found
+
+
+class _Show:
+    """on_call_delta for a response that may write several calls.
+
+    A single call was shown as "name(" + arguments + ")" with the closing
+    bracket put on after the stream ended. With more than one there is a
+    second question - when does the PREVIOUS one get its bracket - and the
+    answer is "when the next one opens", which is what this exists to track.
+
+    Calls are assumed to be written one after another, which is what all four
+    wires actually do. A wire that genuinely interleaved two calls' arguments
+    would show them interleaved; what gets PARSED is unaffected either way,
+    since that comes off the collector rather than off this text."""
+
+    def __init__(self, on_call_delta):
+        self.emit = on_call_delta
+        self.open_slot = None
+
+    def opened(self, index, name):
+        if not self.emit:
+            return
+        if self.open_slot is not None:
+            self.emit(")\n")
+        self.open_slot = index
+        self.emit((name or "") + "(")
+
+    def arg(self, text):
+        if self.emit and text:
+            self.emit(text)
+
+    def done(self):
+        if self.emit and self.open_slot is not None:
+            self.emit(")")
+            self.open_slot = None
+
+
 def _read_openai(r, usage=None, tool_call=None, reasoning=None, on_call_delta=None):
     """The OpenAI/DeepSeek streamed response, yielding the reply text.
 
@@ -794,7 +1054,31 @@ def _read_openai(r, usage=None, tool_call=None, reasoning=None, on_call_delta=No
     said = False   # any reply text at all - the difference between the cases below
     thought = ""   # this turn's reasoning, kept only in case nothing else arrives
     cut = False    # the endpoint said the reply stopped at a token limit
-    for event in _sse(r):
+
+    # Thinking the model wrote INLINE, inside the content it was supposed to
+    # keep it out of. Pulled off the reply here and sent down the same channel
+    # as the reasoning field below, so everything downstream - the page's
+    # thinking block, the turn's stored reasoning_content, the clock - sees one
+    # kind of thinking and not two. See _ThinkSplit.
+    def inline(part):
+        nonlocal thought
+        thought += part
+        _thought(reasoning, part)
+
+    split = _ThinkSplit(on_think=inline)
+
+    # Whether the connection died part-way through. _sse hands back what it had
+    # rather than raising once any of the reply is out (see its docstring), so
+    # without this the turn simply ends early and nothing anywhere knows the
+    # difference between "the model finished" and "the wire dropped mid-word".
+    note = usage if usage is not None else {}
+
+    # Brackets and separators for whatever this response turns out to write -
+    # see _Show. Made whether or not anything is watching; with no callback it
+    # is inert.
+    show = _Show(on_call_delta)
+
+    for event in _sse(r, note):
         if usage is not None and event.get("usage"):
             u = event["usage"]
             usage["input_tokens"] = u.get("prompt_tokens")
@@ -827,7 +1111,7 @@ def _read_openai(r, usage=None, tool_call=None, reasoning=None, on_call_delta=No
             if choice.get("finish_reason") == "length":
                 cut = True
             delta = choice.get("delta", {})
-            text = delta.get("content")
+            text = split.feed(delta.get("content"))
             if text:
                 said = True
                 yield text
@@ -851,13 +1135,18 @@ def _read_openai(r, usage=None, tool_call=None, reasoning=None, on_call_delta=No
                 # first fragment for that index), function.arguments arrives
                 # piecemeal and is concatenated into one JSON-text string,
                 # same shape _read_anthropic builds from its own
-                # input_json_delta fragments. index != 0 is a second parallel
-                # call - ignored, one call per turn.
+                # input_json_delta fragments.
+                #
+                # `index` is the wire's own numbering of PARALLEL calls, and
+                # it is what _slot() keys on. Every fragment with an index
+                # other than 0 used to be dropped here on the way past, which
+                # did not stop a model making three calls - it only stopped
+                # two of them ever running, while the model was told the whole
+                # turn had been carried out.
                 for frag in choice.get("delta", {}).get("tool_calls") or []:
-                    if frag.get("index", 0) != 0:
-                        continue
+                    slot = _slot(tool_call, frag.get("index", 0))
                     if frag.get("id"):
-                        tool_call["id"] = frag["id"]
+                        slot["id"] = frag["id"]
                     fn = frag.get("function") or {}
                     # on_call_delta gets the same fragments as readable text as
                     # they land - "name(", then the arguments piecemeal - so a
@@ -866,19 +1155,33 @@ def _read_openai(r, usage=None, tool_call=None, reasoning=None, on_call_delta=No
                     # ends, since none of this is yielded as reply text. The
                     # closing ")" goes on after the loop.
                     if fn.get("name"):
-                        tool_call["name"] = fn["name"]
-                        if on_call_delta:
-                            on_call_delta(fn["name"] + "(")
+                        slot["name"] = fn["name"]
+                        show.opened(frag.get("index", 0), fn["name"])
                     if fn.get("arguments"):
-                        tool_call["arguments"] = tool_call.get("arguments", "") + fn["arguments"]
-                        if on_call_delta:
-                            on_call_delta(fn["arguments"])
+                        slot["arguments"] = slot.get("arguments", "") + fn["arguments"]
+                        show.arg(fn["arguments"])
+    # Anything the splitter was still holding when the stream ended - the last
+    # few characters of the reply, kept back only in case they turned out to be
+    # the front of a tag. Flushed before any of the decisions below, which all
+    # depend on whether a reply arrived.
+    rest = split.close()
+    if rest:
+        said = True
+        yield rest
+
     # Closed off once the stream is done, so what was watched being written
     # ends up as the same text the turn is stored and redrawn with - see
-    # main.py's _parse_call.
-    called = bool(tool_call and tool_call.get("name"))
-    if on_call_delta and called:
-        on_call_delta(")")
+    # main.py's _parse_calls.
+    called = bool(calls_in(tool_call))
+    show.done()
+
+    # The endpoint stopped this reply at a token limit and the reply had
+    # already started. Nothing below fires for that case - it is only the
+    # empty-reply version, further down, that raises - so a reply that got most
+    # of the way and was then cut used to end mid-word with nothing said about
+    # it. Recorded the same way a dropped connection is; main.py says so once.
+    if cut and (said or called):
+        note.setdefault("truncated", "length")
 
     # A turn that made a tool call is complete with no prose at all - the call
     # IS the turn - so nothing below applies to it.
@@ -950,6 +1253,15 @@ def _anthropic_usage(u):
 
 def _read_anthropic(r, usage=None, tool_call=None, reasoning=None, on_call_delta=None):
     """Anthropic's streamed response, yielding the reply text."""
+    show = _Show(on_call_delta)
+    # Anthropic numbers ALL of a message's content blocks in one sequence -
+    # text, thinking and tool_use alike - so a block's own index is not the
+    # ordinal of a call. This maps the block index to the slot its call
+    # accumulates into, and is what pairs an input_json_delta with the
+    # tool_use it belongs to: several calls arrive as several blocks, and
+    # without the pairing every fragment landed on whichever call was written
+    # onto tool_call last.
+    slot_of = {}
     for event in _sse(r):
         etype = event.get("type")
         # Real counts, not an estimate: message_start carries the input side
@@ -972,11 +1284,13 @@ def _read_anthropic(r, usage=None, tool_call=None, reasoning=None, on_call_delta
         if tool_call is not None and etype == "content_block_start":
             block = event.get("content_block", {})
             if block.get("type") == "tool_use":
-                tool_call["id"] = block.get("id")
-                tool_call["name"] = block.get("name")
-                tool_call["arguments"] = ""
-                if on_call_delta:
-                    on_call_delta((block.get("name") or "") + "(")
+                index = len(slot_of)
+                slot_of[event.get("index")] = index
+                slot = _slot(tool_call, index)
+                slot["id"] = block.get("id")
+                slot["name"] = block.get("name")
+                slot["arguments"] = ""
+                show.opened(index, block.get("name"))
         if etype == "content_block_delta":
             delta = event.get("delta", {})
             text = delta.get("text")
@@ -991,16 +1305,17 @@ def _read_anthropic(r, usage=None, tool_call=None, reasoning=None, on_call_delta
                 _thought(reasoning, delta["thinking"])
             elif tool_call is not None:
                 partial = delta.get("partial_json")
-                if partial:
-                    tool_call["arguments"] = tool_call.get("arguments", "") + partial
-                    if on_call_delta:
-                        on_call_delta(partial)
-    if on_call_delta and tool_call and tool_call.get("name"):
-        on_call_delta(")")
+                index = slot_of.get(event.get("index"))
+                if partial and index is not None:
+                    slot = _slot(tool_call, index)
+                    slot["arguments"] = slot.get("arguments", "") + partial
+                    show.arg(partial)
+    show.done()
 
 
 def _read_gemini(r, usage=None, tool_call=None, reasoning=None, on_call_delta=None):
     """Gemini's streamed response, yielding the reply text."""
+    calls = [0]   # how many functionCall parts have arrived, so far
     for event in _sse(r):
         if usage is not None:
             u = event.get("usageMetadata")
@@ -1050,13 +1365,22 @@ def _read_gemini(r, usage=None, tool_call=None, reasoning=None, on_call_delta=No
                 # Uniagent's own id, because Gemini doesn't issue one (see
                 # _gemini_contents) - main.py needs something to pair the
                 # stored call with its result.
+                #
+                # Gemini puts several calls in a response as several
+                # functionCall parts, one after another. They are taken in the
+                # order they arrive; the guard here used to be "not
+                # tool_call.get('name')", which kept the first and threw the
+                # rest away.
                 fn = part.get("functionCall")
-                if fn and tool_call is not None and not tool_call.get("name"):
-                    tool_call["id"] = "call_" + uuid.uuid4().hex[:8]
-                    tool_call["name"] = fn.get("name")
-                    tool_call["arguments"] = json.dumps(fn.get("args") or {})
+                if fn and tool_call is not None:
+                    slot = _slot(tool_call, calls[0])
+                    calls[0] += 1
+                    slot["id"] = "call_" + uuid.uuid4().hex[:8]
+                    slot["name"] = fn.get("name")
+                    slot["arguments"] = json.dumps(fn.get("args") or {})
                     if on_call_delta:
-                        on_call_delta(tool_call["name"] + "(" + tool_call["arguments"] + ")")
+                        on_call_delta((slot["name"] or "") + "("
+                                      + slot["arguments"] + ")\n")
 
 
 READERS = {
@@ -1165,6 +1489,194 @@ def _openai_style(url, headers, body, usage=None, tools=None, tool_call=None,
                               on_call_delta=on_call_delta)
 
 
+# ---- prompt caching ---------------------------------------------------------
+# Every provider worth caching against does the same thing: it keeps the front
+# of a prompt it has already processed, and charges a tenth of the price for
+# the part of the next prompt that matches it byte for byte. What differs is
+# only WHO ASKS.
+#
+#   automatic  the endpoint caches by itself and reports what it hit. Nothing
+#              to send. OpenAI, DeepSeek, Grok, Gemini - and so most of what
+#              OpenRouter forwards to.
+#   explicit   nothing is cached unless the request marks where the reusable
+#              part ends. Anthropic, and Anthropic through OpenRouter, which
+#              passes the marks along.
+#   none       no cache, or none it will admit to - a local llama.cpp, the
+#              Claude CLI. Say nothing rather than guess.
+#
+# The minimum is not a detail: a prefix shorter than it caches nothing at all,
+# silently, marks or no marks. And it is NOT monotonic across model
+# generations - 512 on the newest Anthropic models, 4096 on Opus 4.6 - so it
+# is worth reading off the model rather than assumed.
+CACHE_NONE = {"mode": "none"}
+
+# What OpenRouter's own upstreams do, by the vendor prefix its model ids carry
+# ("anthropic/claude-opus-5"). This is the only place the vendor half of an
+# OpenRouter id means anything, and it means it because caching is the
+# upstream's behaviour, not the router's.
+_OR_EXPLICIT = ("anthropic/",)
+
+# Anthropic's minimum cacheable prefix, by model. Keyed on a substring of the
+# id so it works for the bare id and for OpenRouter's "anthropic/..." spelling
+# alike, longest match first.
+_ANTHROPIC_MIN = (
+    ("claude-opus-4-6", 4096),
+    ("claude-opus-4-5", 4096),
+    ("claude-haiku-4-5", 4096),
+    ("claude-opus-4-7", 2048),
+    ("claude-opus-5", 512),
+    ("claude-fable-5", 512),
+    ("claude-mythos-5", 512),
+)
+_ANTHROPIC_MIN_DEFAULT = 1024
+
+
+def _anthropic_min(model):
+    for needle, floor in _ANTHROPIC_MIN:
+        if needle in model:
+            return floor
+    return _ANTHROPIC_MIN_DEFAULT
+
+
+# The endpoints whose caching behaviour is actually known, by host. Keyed on
+# the HOST and not on the wire, because the wire is not the answer: an
+# OpenRouter card is normally a plain "openai" wire pointed at openrouter.ai,
+# and so is a llama.cpp on localhost - the same wire, one caching and one not.
+# The host is what says which service is really on the other end.
+_CACHE_HOSTS = {
+    "openrouter.ai": "openrouter",
+    "api.openai.com": "openai",
+    "api.deepseek.com": "deepseek",
+    "generativelanguage.googleapis.com": "gemini",
+    "api.anthropic.com": "anthropic",
+}
+
+
+def _cache_service(name):
+    """Which of the known services `name` actually talks to, or "" when it is
+    not one of them. The wire is asked first for the wires that ARE a service
+    (a card genuinely on the anthropic wire), then the host.
+
+    "" is the honest answer for a local server, a proxy, or anything new: no
+    claim is made about a cache nobody here knows the rules for."""
+    wire = wire_of(name)
+    if wire in ("openrouter", "anthropic", "deepseek", "gemini"):
+        return wire
+    p = custom_provider(name)
+    url = custom_base_url(p) if p else wire_default_url(wire)
+    try:
+        host = (urlparse(url or "").hostname or "").lower()
+    except ValueError:
+        return ""
+    for known, service in _CACHE_HOSTS.items():
+        if host == known or host.endswith("." + known):
+            return service
+    return ""
+
+
+def cache_spec(name, model):
+    """How `name`'s endpoint caches `model`, as
+    {"mode", "min_tokens", "ttl_seconds", "marks"}.
+
+    "marks" is whether this code has to put cache_control breakpoints in the
+    request itself (mode "explicit") - the one thing that changes what gets
+    SENT rather than only what gets reported.
+
+    Deliberately conservative outside the services actually known: anything
+    else gets CACHE_NONE, so nothing is ever warned about a cache that may not
+    exist. A wrong "this will be cached" is worse than no answer, because the
+    number it puts on screen is one somebody would plan around - and the case
+    that makes this matter is a local llama.cpp, which sits on the same wire
+    as OpenAI and caches nothing."""
+    service = _cache_service(name)
+    if service == "openrouter":
+        # The router does not cache; whoever it forwards to does. So the id's
+        # vendor half is the question ("anthropic/claude-opus-5"), and an id
+        # with no vendor in it is something we cannot answer for.
+        if any(model.startswith(v) for v in _OR_EXPLICIT):
+            return {"mode": "explicit", "min_tokens": _anthropic_min(model),
+                    "ttl_seconds": 300, "marks": True}
+        if "/" not in model:
+            return dict(CACHE_NONE)
+        return {"mode": "automatic", "min_tokens": 1024,
+                "ttl_seconds": 300, "marks": False}
+    if service == "anthropic":
+        return {"mode": "explicit", "min_tokens": _anthropic_min(model),
+                "ttl_seconds": 300, "marks": True}
+    if service in ("openai", "deepseek", "gemini"):
+        return {"mode": "automatic", "min_tokens": 1024,
+                "ttl_seconds": 300, "marks": False}
+    return dict(CACHE_NONE)
+
+
+# Where the breakpoints go, and how many. Two is the useful number and four is
+# the limit: one at the end of the system message, which covers the tool
+# schemas too (they render ahead of it), and one at the end of the newest turn,
+# which covers the whole conversation so far. Anything more is breakpoints
+# spent on boundaries that move every turn anyway.
+def _mark_openai_blocks(messages, spec):
+    """`messages` with cache_control on the system message and on the last
+    turn, in the shape OpenRouter forwards to Anthropic: a message's plain
+    string content becomes a one-element list of parts, and the mark rides on
+    the part.
+
+    A copy - the caller's list and its dicts are left alone, because they are
+    the turn's own working history and a mark written into that would be
+    stored in the chat file and replayed for ever.
+
+    Only turns whose content is a plain string are marked. A tool call has no
+    text block to hang a mark on, and one whose content is already a list came
+    from somewhere that knows more about its shape than this does."""
+    if not spec.get("marks") or not messages:
+        return messages
+    out = [dict(m) for m in messages]
+    at = []
+    for i, m in enumerate(out):
+        if m.get("role") == "system":
+            at.append(i)
+            break
+    for i in range(len(out) - 1, -1, -1):
+        if isinstance(out[i].get("content"), str) and out[i]["content"]:
+            if i not in at:
+                at.append(i)
+            break
+    for i in at:
+        text = out[i].get("content")
+        if not isinstance(text, str) or not text:
+            continue
+        out[i]["content"] = [{"type": "text", "text": text,
+                              "cache_control": {"type": "ephemeral"}}]
+    return out
+
+
+def wire_segments(name, model, prompt, tools=None):
+    """Every distinct piece of THIS request, in the order the endpoint reads
+    it, as strings - the tool schemas first, then one string per message.
+
+    Not for sending: for comparing. Caching is a prefix match on the exact
+    bytes, so the only way to say honestly whether the next request will hit
+    the cache is to render what it would send and diff it against what was
+    sent last time. Anything less - digesting the turns list before the
+    dialect has had its way with it - misses the changes the dialect itself
+    makes, and those are real: a tool call whose result has gone missing is
+    replayed as prose rather than as a call, and that rewrites a message
+    sitting in the middle of the prefix.
+
+    Rendered through the same _dialect_turns every real request goes through,
+    for exactly that reason."""
+    spec = wires.spec_for(wire_of(name)) or {}
+    dialect = spec.get("dialect") or "openai"
+    system, messages = _dialect_turns(dialect, prompt, tools, spec)
+    parts = []
+    if tools:
+        parts.append(json.dumps(tools, sort_keys=True, ensure_ascii=False))
+    if system:
+        parts.append(str(system))
+    for m in messages:
+        parts.append(json.dumps(m, sort_keys=True, ensure_ascii=False))
+    return parts
+
+
 def _spec_wire(wire):
     """The provider function for a wire described in wires.json.
 
@@ -1178,7 +1690,7 @@ def _spec_wire(wire):
     copy held by a provider object that was built when the server started."""
     def call(model, prompt, temperature=TEMPERATURE, usage=None, tools=None,
              tool_call=None, reasoning=None, on_call_delta=None,
-             base_url="", key="", setup=None):
+             base_url="", key="", setup=None, provider_name=""):
         spec = wires.spec_for(wire)
         if not spec:
             raise RuntimeError("no wire called " + wire + " - it was removed "
@@ -1191,6 +1703,12 @@ def _spec_wire(wire):
                                + ", ".join(READERS) + ".")
 
         system, messages = _dialect_turns(dialect, prompt, tools, spec)
+        # Ask for caching, where asking is what it takes. The openai dialect
+        # carries the system message inside `messages`, so both breakpoints go
+        # in there; nothing is marked at all on a wire that caches by itself,
+        # which is most of them.
+        if dialect == "openai":
+            messages = _mark_openai_blocks(messages, cache_spec(provider_name, model))
         url, headers, body = wires.build(spec, {
             "model": model,
             "messages": messages,
@@ -1208,6 +1726,18 @@ def _spec_wire(wire):
             "base_url": base_url,
             "setting": setup or {},
         })
+
+        # A router serving this model from several companies, and a choice of
+        # which one recorded against the pair (see set_model_route). Merged in
+        # rather than templated into the body above, so a wire that CAN route
+        # still sends exactly what it always sent for every model nobody has
+        # picked an endpoint for - which is nearly all of them.
+        route = model_route(provider_name, model) if provider_name else ""
+        if route:
+            extra = wires.route_body({**spec, "routes": routes_spec_for(provider_name)},
+                                     route)
+            body = {**body, **extra}
+
         yield from _read_retrying(reader, url, headers, body, usage=usage,
                                   tool_call=tool_call, reasoning=reasoning,
                                   on_call_delta=on_call_delta)
@@ -1248,7 +1778,7 @@ def _bedrock_client(service, base_url=None, setup=None):
 
 def _bedrock(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool_call=None,
              reasoning=None, on_call_delta=None,
-             base_url=None, key=None, setup=None):
+             base_url=None, key=None, setup=None, provider_name=""):
     # base_url/key are here so this is callable exactly like every other wire
     # (see _wire_call). Bedrock has no URL to point at and no key to send - it
     # signs with the AWS credentials on this machine - so a provider's base URL
@@ -1318,6 +1848,12 @@ def _bedrock(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, too
                               for t in plain]
         r = client.converse_stream(**kwargs)
 
+    show = _Show(on_call_delta)
+    # contentBlockIndex numbers every block in the message, text included, so
+    # it is not the ordinal of a call - same arrangement, and same reason, as
+    # _read_anthropic's map of the identical wire.
+    slot_of = {}
+
     for event in r["stream"]:
         # converse_stream sends one "metadata" event, usually last, carrying
         # the real token counts - separate from the contentBlockDelta events
@@ -1342,11 +1878,13 @@ def _bedrock(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, too
         # lands in tool_call for main.py, whichever provider answered.
         start = event.get("contentBlockStart", {}).get("start", {}).get("toolUse")
         if start and tool_call is not None:
-            tool_call["id"] = start.get("toolUseId")
-            tool_call["name"] = start.get("name")
-            tool_call["arguments"] = ""
-            if on_call_delta:
-                on_call_delta((start.get("name") or "") + "(")
+            index = len(slot_of)
+            slot_of[event.get("contentBlockIndex")] = index
+            slot = _slot(tool_call, index)
+            slot["id"] = start.get("toolUseId")
+            slot["name"] = start.get("name")
+            slot["arguments"] = ""
+            show.opened(index, start.get("name"))
         delta = event.get("contentBlockDelta", {}).get("delta", {})
         text = delta.get("text")
         if text:
@@ -1359,10 +1897,11 @@ def _bedrock(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, too
         use = delta.get("toolUse")
         if use and tool_call is not None:
             partial = use.get("input")
-            if partial:
-                tool_call["arguments"] = tool_call.get("arguments", "") + partial
-                if on_call_delta:
-                    on_call_delta(partial)
+            index = slot_of.get(event.get("contentBlockIndex"))
+            if partial and index is not None:
+                slot = _slot(tool_call, index)
+                slot["arguments"] = slot.get("arguments", "") + partial
+                show.arg(partial)
 
     # Bedrock's qwen builds send a MALFORMED input fragment: the opening `{"`
     # is missing, so read_file's arguments arrive as
@@ -1370,27 +1909,32 @@ def _bedrock(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, too
     # instead of {"path": "README.md"}. Measured off the raw converse_stream
     # events on qwen.qwen3-32b-v1:0 - the event itself is broken, nothing here
     # dropped it. Unrepaired it is a dead end rather than a bad turn: the
-    # arguments don't parse, main.py's _parse_call asks for the call again,
+    # arguments don't parse, main.py's _parse_calls asks for the call again,
     # and the model re-emits the identical broken fragment until the stuck-loop
     # breaker gives up.
     #
     # So: only when the accumulated text doesn't parse, and only when putting
     # those two characters back makes it parse, is it repaired. Anything else
-    # is left exactly as it arrived for _parse_call to reject in the normal
+    # is left exactly as it arrived for _parse_calls to reject in the normal
     # way - a genuinely garbled call must still read as one.
-    if tool_call and tool_call.get("arguments"):
+    #
+    # Every call in the response is checked, not just the first: the fault is
+    # per-fragment, so a response carrying three calls can have any of them
+    # arrive broken.
+    for slot in [tool_call] + list((tool_call or {}).get("more") or []):
+        if not (slot and slot.get("arguments")):
+            continue
         try:
-            json.loads(tool_call["arguments"])
+            json.loads(slot["arguments"])
         except json.JSONDecodeError:
-            patched = '{"' + tool_call["arguments"]
+            patched = '{"' + slot["arguments"]
             try:
                 json.loads(patched)
-                tool_call["arguments"] = patched
+                slot["arguments"] = patched
             except json.JSONDecodeError:
                 pass
 
-    if on_call_delta and tool_call and tool_call.get("name"):
-        on_call_delta(")")
+    show.done()
 
 
 # What each kind of Agent SDK failure means in terms of something you can
@@ -1427,7 +1971,7 @@ def _claude_cli(setup=None):
 
 def _claude_subscription(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool_call=None,
                          reasoning=None, on_call_delta=None,
-                         base_url=None, key=None, setup=None):
+                         base_url=None, key=None, setup=None, provider_name=""):
     """base_url/key are accepted and ignored, so this is callable exactly like
     every other wire (see _wire_call). This one drives the Claude Code CLI,
     which owns its own login - there is no endpoint to point it at and no key
@@ -1629,7 +2173,8 @@ def _claude_error(e):
 
 
 def _piper(model, prompt, temperature=TEMPERATURE, usage=None, tools=None, tool_call=None,
-           reasoning=None, on_call_delta=None, base_url=None, key=None, setup=None):
+           reasoning=None, on_call_delta=None, base_url=None, key=None, setup=None,
+           provider_name=""):
     """Piper is a text-to-speech engine, not a chat model - it has no way to
     answer a prompt. This exists so a piper provider is a real, selectable
     provider (it shows up on the voice tab and can be picked as the speaker)
@@ -2227,10 +2772,16 @@ def _custom_call(p):
     that grew a field had to be added to a frozenset in this file too, or its
     boxes silently did nothing. Now a wire declares its fields in wires.json
     and they arrive, which is the whole of adding one - and $setting:NAME in a
-    body template is how a spec wire reads them back."""
+    body template is how a spec wire reads them back.
+
+    `provider_name` goes over for the same reason, and is the one thing here
+    that is about the CARD rather than about the endpoint: which endpoint a
+    router should send a model to is recorded per provider and model (see
+    set_model_route), and the wire cannot look that up without knowing whose
+    request it is building."""
     return functools.partial(wire_call(p["wire"]),
                              base_url=custom_base_url(p), key=custom_key(p),
-                             setup=resolved_setup(p))
+                             setup=resolved_setup(p), provider_name=p["name"])
 
 
 def providers():
@@ -2400,6 +2951,174 @@ def remember_model(name, model):
     if model not in models:
         models[model] = {}
         CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def note_pick(name, model):
+    """Stamp `model` on provider `name` as the one just CHOSEN, so it can float
+    to the top of the picker next time - see recent_models().
+
+    A pick, not a use. Every list, dropdown and command that switches a model
+    calls this; a turn merely running on a model does not, and that is
+    deliberate. Recency is meant to answer "what have I been reaching for
+    lately", and a cron job quietly running the same model at 4am all week
+    would otherwise own the top of the list without anyone having chosen it
+    once.
+
+    Creates the entry if this is a model nothing has recorded yet, and touches
+    nothing else about it - remember_model()'s rule, for its reason: what a
+    model's config says was set deliberately, and picking it is not an edit."""
+    key = _models_key(name)
+    data = _custom()
+    models = data.setdefault(key, {})
+    cfg = models.get(model)
+    models[model] = {**(cfg if isinstance(cfg, dict) else {}), "used": int(time.time())}
+    try:
+        CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass        # a pick that could not be remembered is not a failed pick
+
+
+def recent_models(limit=5, names=None):
+    """The models most recently picked, newest first, as [{"provider",
+    "model"}] - the head of every model list on the page.
+
+    Only providers that still exist are offered, and each pair only once: a
+    model recorded under a provider's old name and again under its id is one
+    model, and a provider that has been deleted is not somewhere you can go
+    back to. Nothing is invented for a fresh install - no picks, no list, and
+    the picker simply opens on the full catalogue as it always did."""
+    usable = list(names if names is not None else available())
+    seen = {}
+    for name in usable:
+        for model, cfg in _custom_models(name).items():
+            when = cfg.get("used") if isinstance(cfg, dict) else None
+            if isinstance(when, int) and when > 0:
+                key = (name, model)
+                seen[key] = max(when, seen.get(key, 0))
+    newest = sorted(seen.items(), key=lambda kv: kv[1], reverse=True)
+    return [{"provider": n, "model": m} for (n, m), _ in newest[:max(0, limit)]]
+
+
+# --- which endpoint of a model to run on ------------------------------------
+#
+# A router serves one model id from several companies at once (see the "routes"
+# block in wires.json). Which of them a model runs on is recorded next to that
+# model's other config, so it is chosen once and holds everywhere that pair is
+# used - this chat, a subagent, a cron job at 4am - rather than being a fourth
+# thing to remember to set per place. "" is the default and means "let the
+# router choose", which is what every model does until somebody says otherwise.
+
+# One model's endpoint list, cached for as long as the model catalogues are:
+# (provider name, model) -> (fetched_at, [endpoints]). It is a round trip to
+# the router, and the answer changes about as often as a price does.
+_routes_cache = {}
+
+
+def routes_spec_for(name):
+    """The "routes" block that applies to provider `name`, or {}.
+
+    Its wire's, normally. Falling back to OpenRouter's for a provider POINTED
+    AT OPENROUTER on some other wire, which is the ordinary way people set it
+    up: the openai wire speaks openrouter.ai perfectly well, so that is what
+    most openrouter cards are on, and refusing to route them on a technicality
+    would be refusing the one provider this feature exists for. What a card
+    points at is what it is."""
+    p = custom_provider(name)
+    if not p:
+        return {}
+    block = wires.routes_spec(wires.spec_for(p["wire"]))
+    if block:
+        return block
+    host = urlparse(custom_base_url(p) or "").hostname or ""
+    if host == "openrouter.ai" or host.endswith(".openrouter.ai"):
+        return wires.routes_spec(wires.spec_for("openrouter"))
+    return {}
+
+
+def routes_supported(name):
+    """Whether provider `name` can be pointed at a particular endpoint at all -
+    what the picker asks before offering an endpoint box for it."""
+    return bool(routes_spec_for(name))
+
+
+def model_route(name, model):
+    """The endpoint provider `name` sends `model` to, or "" for the router's
+    own choice."""
+    value = model_config(name, model).get("route")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def set_model_route(name, model, route):
+    """Record which endpoint `model` runs on, or clear it with "".
+
+    Written the same way and to the same place as everything else a model
+    carries, so a route survives a rename (it is filed under the provider's
+    id) and reaches every chat, subagent and job on that pair at once."""
+    route = (route or "").strip()
+    key = _models_key(name)
+    data = _custom()
+    models = data.setdefault(key, {})
+    cfg = models.get(model)
+    cfg = dict(cfg) if isinstance(cfg, dict) else {}
+    if route:
+        cfg["route"] = route
+    else:
+        cfg.pop("route", None)
+    models[model] = cfg
+    CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return route
+
+
+def model_routes(names=None):
+    """{provider: {model: endpoint}} for every pair that has been given one -
+    read straight off models_custom.json, with nothing asked of anybody.
+
+    The page draws the chosen endpoint beside a model everywhere it lists one,
+    so this rides along with the settings rather than being a request per row.
+    Providers with no routed models are left out entirely, which on almost
+    every install is all of them."""
+    out = {}
+    for name in (names if names is not None else available()):
+        chosen = {model: cfg["route"]
+                  for model, cfg in _custom_models(name).items()
+                  if isinstance(cfg, dict) and isinstance(cfg.get("route"), str)
+                  and cfg["route"].strip()}
+        if chosen:
+            out[name] = chosen
+    return out
+
+
+def route_options(name, model):
+    """Every endpoint provider `name` serves `model` from, as
+    [{"id", "label", "note"}] - the suggestions under the endpoint box.
+
+    [] for a provider that does not route, for a model the router has never
+    heard of, and for a router that cannot be reached right now. All three are
+    the same thing to the caller: no suggestions to offer, and a box that is
+    still free text - the slug you want is on the model's page on the router's
+    own site, and typing it in has to keep working when this fetch does not."""
+    block = routes_spec_for(name)
+    p = custom_provider(name)
+    if not block or not p or not model:
+        return []
+    now = time.time()
+    cached = _routes_cache.get((name, model))
+    if cached and now - cached[0] <= _LIVE_TTL:
+        return cached[1]
+    spec = {**wires.spec_for(p["wire"]), "routes": block}
+    ctx = {"model": model, "key": custom_key(p), "base_url": custom_base_url(p),
+           "setting": resolved_setup(p)}
+    found = []
+    try:
+        url, headers = wires.routes_request(spec, ctx)
+        if url:
+            r = requests.get(url, headers=headers, timeout=8)
+            _check(r)
+            found = wires.parse_routes(spec, r.json())
+    except Exception:
+        found = []
+    _routes_cache[(name, model)] = (now, found)
+    return found
 
 
 def model_config(name, model):
@@ -3444,6 +4163,59 @@ def available():
             if p["key"] or p["base_url"] or _wire_ready(p)]
 
 
+# Wires that cannot hold a conversation, whatever credentials they have. piper
+# is a text-to-speech engine and _piper raises rather than answering, so a
+# piper provider is real and selectable on the voice tab but must never be
+# offered as the thing a chat, a cron job or a subagent RUNS on. A wire spec
+# can say "chat": false to join this without any code change here.
+_NO_CHAT_WIRES = frozenset({"piper"})
+
+
+def can_chat(wire):
+    """Whether `wire` can answer a prompt at all - the counterpart of
+    wants_key/base_url_label, read off the spec the same way."""
+    if wire in _NO_CHAT_WIRES:
+        return False
+    return template_for(wire).get("chat", True) is not False
+
+
+def chat_providers():
+    """available(), minus the providers that cannot answer a prompt.
+
+    What a cron job or a subagent may actually be run ON. available() is
+    deliberately the wider list - a TTS card is a real, fully configured
+    provider and belongs in the voice tab's dropdown - but naming one as the
+    provider for a scheduled run is a guaranteed failure at request time, so
+    it is never offered as a choice or accepted as one."""
+    return [name for name in available()
+            if can_chat(wire_for(name))]
+
+
+def unusable_reason(name):
+    """Why `name` cannot be the provider something RUNS on, as a sentence, or
+    None if it can.
+
+    Two different failures used to share one message ("it needs an API key this
+    machine doesn't have"), which was simply false for the second: a piper card
+    is fully configured and still cannot answer a prompt. cron and subagent
+    both reject providers, so the wording lives here rather than in two copies
+    that would drift."""
+    if not name or not str(name).strip():
+        return None
+    name = str(name).strip().lower()
+    if name in chat_providers():
+        return None
+    if name in available():
+        # The wire is worth naming only when it isn't just the name again -
+        # "'piper' is a piper provider" tells nobody anything.
+        wire = wire_for(name)
+        kind = ("a " + wire + " provider") if wire != name else "set up"
+        return ("'" + name + "' is " + kind + " and cannot hold a conversation, "
+                "so nothing can be run on it. Retry with one of these:")
+    return ("'" + name + "' is not available - it needs an API key/credentials "
+            "this machine doesn't have. Retry with one of these:")
+
+
 def options_text():
     """The providers usable right now, as a short block for a tool's
     instructions or a rejection message. The one place this is spelled out for
@@ -3454,9 +4226,13 @@ def options_text():
     (against this list); the model is a free string passed straight through,
     so the model picks any model that provider offers from its own knowledge
     rather than from a hardcoded list that can never be complete. Each
-    provider's default is shown for the case where it doesn't care which."""
+    provider's default is shown for the case where it doesn't care which.
+
+    chat_providers() rather than available(): every caller is offering a
+    provider to RUN something on, so listing one that cannot answer a prompt
+    would be inviting the exact rejection this text exists to prevent."""
     lines = []
-    for name in available():
+    for name in chat_providers():
         default = next(iter(floor_models(name)), None)
         suffix = " (default: " + default + ")" if default else ""
         lines.append("  " + name + suffix)
@@ -4031,9 +4807,15 @@ def stream_response(prompt, provider=PROVIDER, model=MODEL, temperature=TEMPERAT
     only anthropic/openai/deepseek/local actually use it; every other
     provider function accepts and ignores it, to keep one shared signature.
     `tool_call`, if given, must be a dict - mutated in place with the
-    provider's own structured tool call ({"id", "name", "arguments"}) as it
-    streams in, the same way `usage` is. Both are None by default, which is
-    exactly today's behaviour: no tools sent, no native call parsed.
+    provider's own structured tool calls as they stream in, the same way
+    `usage` is. Both are None by default, which is exactly today's behaviour:
+    no tools sent, no native call parsed.
+
+    A response may carry SEVERAL calls, and the dict is the collector for all
+    of them: the first is written straight onto it as {"id","name",
+    "arguments"} - where a single call has always been - and any others go
+    into tool_call["more"]. Read them back with calls_in(), which is the only
+    thing that should know that layout.
 
     `reasoning`, if given, must be a dict too - it collects a thinking model's
     reasoning_content under "content" as it streams. That text is never part
