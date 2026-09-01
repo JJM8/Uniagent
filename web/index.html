@@ -3426,19 +3426,29 @@
      settings is built from: these are seven of the same thing, and seven
      labelled boxes with a heading each would be a page of chrome around seven
      words. */
+  /* No top margin: .tab-panel is a flex column with an 18px gap, which is
+     already the space above this. The rule and its padding are what mark it
+     off as a group. */
   .set-group {
-    margin: 18px 0 6px;
-    padding-top: 14px;
+    padding-top: 16px;
     border-top: 1px solid var(--border);
   }
   .set-group > h4 {
-    margin: 0 0 3px;
+    margin: 0 0 4px;
     color: var(--text);
     font-size: 12px;
     font-weight: 600;
     letter-spacing: 0.3px;
   }
-  .set-group > .note { display: block; margin-bottom: 10px; }
+  /* .note is otherwise only styled inside a .field, and this one is not in one. */
+  .set-group > .note {
+    display: block;
+    margin-bottom: 12px;
+    color: var(--dim);
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  .set-group > .field { margin-top: 14px; }
   .switch {
     display: flex;
     align-items: baseline;
@@ -3903,7 +3913,7 @@
             <span>gaps in the conversation<span class="why">the "3h later" rule between two messages</span></span>
           </label>
 
-          <div class="field" style="margin-top: 12px;">
+          <div class="field">
             <label for="s-ui-tools">tool calls</label>
             <div class="row">
               <select id="s-ui-tools">
