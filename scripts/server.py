@@ -3671,25 +3671,12 @@ class Handler(BaseHTTPRequestHandler):
         # button on the page posts this exact string, so the button and the
         # typed line are one code path - the same arrangement /stop has.
         if text.strip().lower() == main.CONTINUE:
-            # Asked before the rewind, which takes the marker holding the
-            # answer off the history: which model the failed request went to,
-            # against the one this chat runs on now. The retry uses the current
-            # pair either way (main.turn re-reads it every turn) - this is so
-            # that a continue landing on a different provider than the one that
-            # just failed says so, rather than being a silent switch.
-            switch = main.model_switch(c)
             why = main.continue_from(c)
             if why is not None:
                 self._send(json.dumps({"type": "system", "text": why}),
                            "application/json")
                 return
             _run_turn(None, target=c)
-            # To every window, not just the one that pressed: the turn about to
-            # stream in belongs to all of them, and the model it is answering on
-            # is not the one the transcript above it failed on.
-            note = main.switch_note(switch)
-            if note:
-                _broadcast({"type": "system", "chat": c.route, "text": note})
             # No "user" broadcast goes with this one and none is wanted: the
             # window that asked takes the marker line off its own transcript
             # when it sees "started", and every other window redraws from the
