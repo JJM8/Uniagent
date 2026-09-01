@@ -155,17 +155,17 @@ def _scan_files():
     catalogue rather than from disk (see load_tools), so they cannot be part
     of anything keyed on file mtimes.
 
-    The scan fills LOCAL lists and only assigns them to TOOLS/BROKEN once it
-    is finished. That matters because the server is threaded (one thread per
-    turn), so two turns can be in here at the same time. Filling the globals
-    as we went meant `TOOLS = []` rebound the name mid-scan while the other
-    thread was still appending - and since `TOOLS.append` looks the global up
-    afresh on every call, that thread's remaining tools landed in the OTHER
-    thread's list. Both passes ended up in one list, every tool twice, and a
-    native turn sent two schemas under the same name: the provider rejects
-    that outright with 400 "Tool names must be unique." Assigning finished
-    lists in one step means a reader sees the whole old list or the whole new
-    one, never a half-merged one."""
+    Builds LOCAL lists and returns them finished. That matters because the
+    server is threaded (one thread per turn), so two turns can be in here at
+    the same time. Filling the globals as we went meant `TOOLS = []` rebound
+    the name mid-scan while the other thread was still appending - and since
+    `TOOLS.append` looks the global up afresh on every call, that thread's
+    remaining tools landed in the OTHER thread's list. Both passes ended up in
+    one list, every tool twice, and a native turn sent two schemas under the
+    same name: the provider rejects that outright with 400 "Tool names must be
+    unique." Handing back a finished pair, for load_tools() to publish in one
+    assignment, means a reader sees the whole old list or the whole new one,
+    never a half-merged one."""
     importlib.invalidate_caches()  # so brand new files are noticed
     tools = []
     broken = []
@@ -215,6 +215,122 @@ def _scan_files():
     tools.extend(s for s in find_skills() if s["name"] not in taken)
 
     return tools, broken
+
+
+# How long the tool snapshot is trusted before the folder is fingerprinted
+# again. The same second filecache uses, for the same reason: far shorter than
+# a turn, so "a tool the agent just wrote shows up in the very next turn" -
+# which is the whole point of scanning at all - still holds.
+TOOLS_RECHECK = 1.0
+
+_snap_lock = threading.Lock()
+# The file-based half of the tool list, and the fingerprint it was built from.
+# `checked` is when that fingerprint was last taken, which is what the recheck
+# window is measured against.
+_snapshot = {"fingerprint": None, "tools": [], "broken": [], "checked": 0.0}
+
+
+def _fingerprint():
+    """(path, mtime_ns, size) for every file _scan_files() reads, as a tuple.
+
+    mtime_ns and size together rather than mtime alone: two writes inside one
+    filesystem timestamp tick are rare, and one that also lands on the same
+    byte count is not a case worth re-importing every tool to catch.
+
+    A file that vanishes simply stops appearing here, so a deleted or disabled
+    tool moves the fingerprint exactly as an edited one does."""
+    marks = []
+    for d in tool_dirs():
+        try:
+            entries = sorted(d.glob("*.py"))
+        except OSError:
+            continue
+        for path in entries:
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            marks.append((str(path), st.st_mtime_ns, st.st_size))
+    try:
+        skills = sorted(SKILLS_DIR.rglob("SKILL.md"))
+    except OSError:
+        skills = []
+    for path in skills:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        marks.append((str(path), st.st_mtime_ns, st.st_size))
+    return tuple(marks)
+
+
+def refresh_tools(force=False):
+    """Re-fingerprint tools/ and skills/, and rescan only if something moved.
+
+    Returns True when the snapshot was actually rebuilt. Safe to call from
+    anywhere; the background refresher calls it on its own thread, which is
+    what keeps even the fingerprint off the request path."""
+    fingerprint = _fingerprint()
+    with _snap_lock:
+        unchanged = fingerprint == _snapshot["fingerprint"]
+        _snapshot["checked"] = time.monotonic()
+        if unchanged and not force:
+            return False
+    # The scan itself runs OUTSIDE the lock. It imports arbitrary tool code,
+    # which can take as long as it likes and must never be able to block a
+    # reader that only wants the list as it currently stands.
+    tools, broken = _scan_files()
+    with _snap_lock:
+        _snapshot["fingerprint"] = fingerprint
+        _snapshot["tools"] = tools
+        _snapshot["broken"] = broken
+    return True
+
+
+def load_tools(force=False):
+    """Publish TOOLS/BROKEN for this turn, rescanning the folder only when a
+    file in it has actually changed.
+
+    This used to re-import every .py in tools/ on every call, and it is called
+    three times per pass of the tool loop - so the same sixteen modules were
+    read off disk and re-executed six times to answer one message, which
+    measured at roughly 750ms of a message's ~960ms of preparation. Two of
+    those modules call provider.chat_providers() at import, which is what made
+    them cost 200ms of every 250ms scan.
+
+    The promise that made it rescan - a tool the agent writes mid-task is
+    usable on the very next turn - is kept by the fingerprint instead: any
+    edit, addition, deletion or disable moves it, and the rescan follows.
+    `force` skips the window for the tools panel's own refresh button, which
+    exists precisely to ask for a re-read on demand.
+
+    The MCP half is rebuilt on EVERY call regardless. Those tools come from a
+    live catalogue rather than from disk (a server that drops out simply stops
+    contributing), so nothing keyed on file mtimes could ever notice them
+    changing - and at 0.4ms they are not worth trying to cache."""
+    global TOOLS, BROKEN
+    with _snap_lock:
+        due = force or (time.monotonic() - _snapshot["checked"]) >= TOOLS_RECHECK
+    if due:
+        refresh_tools(force)
+    with _snap_lock:
+        tools = list(_snapshot["tools"])
+        broken = list(_snapshot["broken"])
+
+    # Reading the cache only, never dialling - see flattened(). A failure here
+    # is reported like a broken tool file instead of being raised: MCP going
+    # wrong must not cost the model the twenty tools that have nothing to do
+    # with it.
+    if mcp_client is not None:
+        try:
+            taken = {t["name"] for t in tools}
+            tools.extend(e for e in mcp_client.flattened() if e["name"] not in taken)
+        except Exception as e:
+            broken.append("MCP tools - " + type(e).__name__ + ": " + str(e))
+
+    # Published only now that both lists are complete.
+    TOOLS = tools
+    BROKEN = broken
 
 
 def parallel_safe(name):
