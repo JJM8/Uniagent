@@ -3075,7 +3075,7 @@ def set_model_route(name, model, route):
         cfg.pop("route", None)
     models[model] = cfg
     CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        filecache.forget(CUSTOM_FILE)
+    filecache.forget(CUSTOM_FILE)
     return route
 
 
