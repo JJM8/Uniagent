@@ -6180,20 +6180,8 @@ function showContinue() {
   const btn = document.createElement("button");
   btn.id = "continue-btn";
   btn.type = "button";
-  // Where the retry is going, when that is not where the failure went. The
-  // corner is the answer - the turn re-reads the chat's model as it starts, so
-  // a model picked since the failure is the one this runs on - and the button
-  // is where anyone reads it, so it is the button that has to say so rather
-  // than the model changing silently under an unchanged label.
-  const now = lastModel;
-  const moved = now && continuableModel
-                && (now.provider !== continuableModel.provider
-                    || now.model !== continuableModel.model);
-  btn.textContent = moved ? "\u21bb continue on " + now.model : "\u21bb continue";
-  btn.title = moved
-    ? "this failed on " + continuableModel.provider + " / " + continuableModel.model
-      + " - carry on using " + now.provider + " / " + now.model + " (/continue)"
-    : "carry on from where this turn stopped (/continue)";
+  btn.textContent = "\u21bb continue";
+  btn.title = "carry on from where this turn stopped (/continue)";
   btn.addEventListener("click", pressContinue);
   continuable.appendChild(btn);
 }
