@@ -6162,6 +6162,18 @@ const TURN_ERROR_TEXT = "Error: the turn failed - ";
 // can put a marker on screen in the first place.
 let continuable = null;
 
+// The {provider, model} that marker's request actually failed on, when the
+// marker carries one - main.append_error() writes the pair onto the turn.
+// null for a stop, and for every failure written before it did that, which is
+// why nothing below treats its absence as more than "don't mention it".
+//
+// It is what lets the button say the retry is going somewhere else: after an
+// overload the next move is usually to pick another model in the corner, and a
+// continue that then silently runs on it reads as the same request failing or
+// succeeding for no visible reason. The server decides where the turn actually
+// goes (main.turn re-reads the chat's model as it starts) - this only says so.
+let continuableModel = null;
+
 // Mirrors main._is_marker, deliberately: an assistant turn, no tool call, one
 // of the two texts. The page and the server have to agree on what "can be
 // continued" means, or the button offers something the server then refuses.

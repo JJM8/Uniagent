@@ -1645,10 +1645,14 @@ def once(text):
     # watching the answer arrive and watching nothing until a line ends.
     console.on = sys.stdout.isatty()
     if text.strip().lower() == main.CONTINUE:
+        switch = main.model_switch(main.current)
         why = main.continue_from(main.current)
         if why is not None:
             console.commit(md.render(why))
             return 1
+        note = main.switch_note(switch)
+        if note:
+            console.commit(md.render(note))
         text = None  # run the turn over the history as it stands
     result = command_processor.process(text) if text is not None else None
     if result is not None:
