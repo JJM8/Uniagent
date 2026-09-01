@@ -3412,10 +3412,18 @@
   /* The rows themselves, indented under the line that stands for them so an
      open fold still reads as one thing rather than as the transcript again. */
   .fold-body {
-    margin: 2px 0 4px 11px;
-    padding-left: 10px;
+    /* A flex column with a gap, like #messages itself: what is in here is the
+       transcript of the run, and the waits and the thinking folded in with the
+       calls need the same air between them that they have outside. */
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 3px 0 4px 11px;
+    padding-left: 11px;
     border-left: 2px solid var(--border);
   }
+  /* [hidden] loses to display:flex above, exactly as .field's does. */
+  .fold-body[hidden] { display: none; }
   /* Something in there is still out. Same breathing icon and same counting
      figure a single pending row uses, for the same reason: folded or not, a
      forty-second call has to look like forty seconds of something happening. */
