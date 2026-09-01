@@ -2729,6 +2729,7 @@ def _fold_models_onto_id(old_name, provider_id):
     if changed:
         data[provider_id] = current
         CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        filecache.forget(CUSTOM_FILE)
 
 
 def _clean_config(config):
@@ -2902,10 +2903,13 @@ def _custom():
 
     Keyed by provider ID, not name - see _models_key(). Older files are keyed
     by name and still read, because _models_key() falls back to the name."""
+    # Through filecache: this is reached several times per turn (model_config
+    # and default_injection both land here, once per pass), and it used to
+    # open and parse the file on each one.
     try:
-        data = json.loads(CUSTOM_FILE.read_text(encoding="utf-8"))
+        data = json.loads(filecache.text(CUSTOM_FILE, default="{}"))
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
         return {}
 
 
@@ -2954,6 +2958,7 @@ def remember_model(name, model):
     if model not in models:
         models[model] = {}
         CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        filecache.forget(CUSTOM_FILE)
 
 
 def note_pick(name, model):
@@ -2977,6 +2982,7 @@ def note_pick(name, model):
     models[model] = {**(cfg if isinstance(cfg, dict) else {}), "used": int(time.time())}
     try:
         CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        filecache.forget(CUSTOM_FILE)
     except OSError:
         pass        # a pick that could not be remembered is not a failed pick
 
@@ -3069,6 +3075,7 @@ def set_model_route(name, model, route):
         cfg.pop("route", None)
     models[model] = cfg
     CUSTOM_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        filecache.forget(CUSTOM_FILE)
     return route
 
 
