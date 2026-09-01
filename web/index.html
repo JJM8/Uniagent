@@ -3856,6 +3856,61 @@
             <button id="s-accent-reset" type="button" class="ghost">the theme's own</button>
           </div>
         </div>
+
+        <!-- What the transcript shows. Everything here is drawn either way and
+             these decide what is painted (see the data-ui-* rules at the end of
+             the stylesheet), so a switch moves the conversation behind this
+             overlay the moment it is ticked - which is the only way to judge
+             one of these, since the question is always "does the page read
+             better without it". -->
+        <div class="set-group">
+          <h4>what the chat shows</h4>
+          <span class="note">Every one of these moves the conversation behind
+            this window as you tick it. Nothing is thrown away - a duration you
+            hide is still measured, a call you fold is still there to open -
+            so none of it costs anything to change your mind about.</span>
+
+          <label class="switch">
+            <input type="checkbox" id="s-ui-timing">
+            <span>how long things took<span class="why">the 3.7s under a reply, and on every tool row</span></span>
+          </label>
+          <label class="switch" id="s-ui-tokrate-row">
+            <input type="checkbox" id="s-ui-tokrate">
+            <span>tokens per second<span class="why">the speed beside a duration</span></span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="s-ui-stamps">
+            <span>the time a message was sent<span class="why">the clock stamp under a bubble</span></span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="s-ui-waiting">
+            <span>the wait before the first token<span class="why">worth keeping on a local model, noise on a fast one</span></span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="s-ui-thinking">
+            <span>the model's own thinking<span class="why">its reasoning block above the reply</span></span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="s-ui-gaps">
+            <span>gaps in the conversation<span class="why">the "3h later" rule between two messages</span></span>
+          </label>
+
+          <div class="field" style="margin-top: 12px;">
+            <label for="s-ui-tools">tool calls</label>
+            <div class="row">
+              <select id="s-ui-tools">
+                <option value="full">every call, its own row</option>
+                <option value="quiet">folded into one "working…" line</option>
+              </select>
+            </div>
+            <div class="note">Folded, a run of calls made back to back is one
+              line saying how many there were - "working…" while they are still
+              running - that opens to the rows themselves on a click. A turn
+              that made nine calls is then one line of transcript instead of
+              nine, with nothing lost: the calls, their arguments, their output
+              and the safety verdict on each are all still one click away.</div>
+          </div>
+        </div>
       </div>
 
       <!-- voice -->
