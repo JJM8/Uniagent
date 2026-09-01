@@ -4003,6 +4003,13 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
     # Recorded before the chat is even taken, so a stop landing in the gap
     # before run() has built its turns list can still say what was asked.
     ctx.text = text
+    # And the pair it is about to run on, for the same reason: a turn that dies
+    # on the provider is filed with the model it died on (see append_error), so
+    # /continue can tell afterwards that the model has been changed since - see
+    # model_switch(). Taken here rather than read back off the chat later
+    # because the chat's model can be changed while the failing request is
+    # still in flight, which is exactly what someone does when one hangs.
+    ctx.provider, ctx.model = prov, mod
     # Wait for whatever is running in this chat. A second message sent while a
     # turn is still going starts THIS function on its own thread right away and
     # parks here; a /stop on the turn ahead releases the slot immediately, so
