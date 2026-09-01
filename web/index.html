@@ -1709,9 +1709,15 @@
     font-size: 10px;
     opacity: 0.55;
   }
-  /* Nothing to show once everything on it is hidden - without this the row
-     still claims its 4px of margin under every single message. */
+  /* Nothing to show - either the row was made for a piece that turned out not
+     to exist, or every piece on it has been switched off. Without this it
+     still claims its 4px of margin under every single message. "cut off" is
+     the exception: it is never hidden, because a reply the wire truncated has
+     to say so whatever else is turned off. */
   .msg-time:empty { display: none; }
+  html[data-ui-stamps="off"][data-ui-timing="off"] .msg-time:not(:has(.msg-cut)) {
+    display: none;
+  }
   /* The timing half of that line: "12.1s - 26 tok/s" after the clock time.
      Dotted underline because it is the one thing under a bubble that has more
      behind it - the phase breakdown is on the title, so hovering (or a long
@@ -5945,8 +5951,16 @@ function bumpFold(fold) {
     // restart the count from zero each time, and what is being counted is how
     // long this run has been going, not the newest call in it.
     if (!fold.dataset.since) {
-      fold.dataset.since = String(Date.now());
-      startTick(took, humanMs);
+      fold.dataset.since = "1";
+      // From when the OLDEST call still out went out, read off the counters
+      // those rows are already running. Zero would be a lie on a redraw: a
+      // window rebuilt on a chat whose tool has been running four minutes
+      // would show the fold starting from scratch while the row inside it
+      // said four minutes, which is worse than either number alone.
+      const from = rows
+        .map(r => (ticking.find(t => t.el === r.querySelector(".tool-took")) || {}).from)
+        .filter(v => typeof v === "number");
+      startTick(took, humanMs, from.length ? Date.now() - Math.min(...from) : 0);
     }
     return;
   }
