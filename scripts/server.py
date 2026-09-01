@@ -4587,7 +4587,9 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             self._send("could not save: " + str(e), code=500)
             return
-        tool_processor.load_tools()  # so the response already reflects loaded or broken
+        # force: the file was written a line ago, so the recheck window has to
+        # be skipped or the reply would describe the folder as it was before.
+        tool_processor.load_tools(force=True)  # so the response already reflects loaded or broken
         self._send(json.dumps(_tools()), "application/json")
         # This page already has the new list (it's the reply above); the signal
         # is for every OTHER open page. The tool list is injected too, so the

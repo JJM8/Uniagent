@@ -445,9 +445,11 @@ def inventory():
     decided by `enabled`, so the two never need to be told apart by string.
 
     load_tools() is run first so a broken tool is reported as broken here even
-    on a server that has not taken a turn yet - it is the same scan every turn
-    does anyway."""
-    load_tools()
+    on a server that has not taken a turn yet. force, because this is the
+    listing behind the tools panel and its refresh button: it exists to show
+    what is on disk RIGHT NOW, including a file dropped in from outside this
+    process a moment ago."""
+    load_tools(force=True)
     reasons = _broken_reasons()
     items = []
 
@@ -938,8 +940,12 @@ def _run(call, chat_id=None, workspace_id=None):
     turnctx.check()
     t = _find(call["tool"])
     if t is None:
-        # Might be one the agent just wrote, so re-read the folder and retry.
-        load_tools()
+        # Might be one the agent just wrote seconds ago, so re-read the folder
+        # and retry. force, because "the tool is missing" is exactly the case
+        # the recheck window would get wrong: the file may have appeared since
+        # the last fingerprint, and waiting out the window here would fail a
+        # call for a tool that is sitting right there on disk.
+        load_tools(force=True)
         t = _find(call["tool"])
     if t is None and call["tool"].startswith(getattr(mcp_client, "NAME_PREFIX", "mcp__")):
         # An MCP tool that was attached earlier in this conversation and isn't
