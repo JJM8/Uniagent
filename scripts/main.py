@@ -4,6 +4,7 @@
 
 import inspect
 import json
+import queue
 import re
 import shutil
 import sys
@@ -2782,6 +2783,56 @@ def _looping(text):
     return unit if tail.endswith(unit * _LOOP_TIMES) else None
 
 
+# The cache ledger is written on a thread of its own, in submission order.
+#
+# It used to run inline, immediately in front of the request - and it is not
+# cheap: rendering the request as it goes on the wire and tokenising the whole
+# prompt measured at 763ms on the first call of a process (building the
+# tokenizer) and 489ms on a large chat. Every millisecond of that sat between
+# the user pressing enter and the model being asked, for a number nobody is
+# waiting on: this is accounting for the token panel, which is why it has
+# always been wrapped in a bare except.
+#
+# One worker, not a pool, and a queue rather than a thread per call: each
+# record says what the NEXT request will find already cached, so they have to
+# land in the order they were made. A pool would let two passes of the same
+# chat race and file the later one first.
+_ledger_q = queue.Queue()
+_ledger_worker = None
+_ledger_lock = threading.Lock()
+
+
+def _ledger_loop():
+    while True:
+        job = _ledger_q.get()
+        try:
+            chat_id, provider_name, model, messages, tools = job
+            segments = provider.wire_segments(provider_name, model, messages, tools)
+            counted = tokens.measure(provider_name, model, segments)
+            cache_ledger.record(chat_id, chat_dir(chat_id),
+                                model_key(provider_name, model),
+                                segments, counted["each"])
+        except Exception:
+            pass    # accounting must never cost anybody a turn - as before
+        finally:
+            _ledger_q.task_done()
+
+
+def _ledger_later(chat_id, provider_name, model, messages, tools):
+    """Queue this request's cache accounting instead of doing it here.
+
+    `messages` and `tools` are handed over as they stand. Both are built fresh
+    for this pass and only read from here on - by the worker below and by the
+    request itself - so there is nothing for the two to race over."""
+    global _ledger_worker
+    with _ledger_lock:
+        if _ledger_worker is None or not _ledger_worker.is_alive():
+            _ledger_worker = threading.Thread(target=_ledger_loop, daemon=True,
+                                              name="cache-ledger")
+            _ledger_worker.start()
+    _ledger_q.put((chat_id, provider_name, model, messages, tools))
+
+
 def _stream(messages, provider_name, model, temperature, on_text, should_stop=None, usage=None,
             chat_id=None, native_call=None, reasoning=None, phases=None, on_request=None,
             on_thought=None, on_reclassify=None, on_call_delta=None):
@@ -2912,14 +2963,7 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
     # directly in front of the request, and there is no failure in it worth
     # costing somebody a turn.
     if chat_id:
-        try:
-            segments = provider.wire_segments(provider_name, model, messages, tools)
-            counted = tokens.measure(provider_name, model, segments)
-            cache_ledger.record(chat_id, chat_dir(chat_id),
-                                model_key(provider_name, model),
-                                segments, counted["each"])
-        except Exception:
-            pass
+        _ledger_later(chat_id, provider_name, model, messages, tools)
 
     # The clock rides in on the reasoning channel rather than as another
     # argument to provider.stream_response, because that channel already
