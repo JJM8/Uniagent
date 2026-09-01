@@ -2263,6 +2263,16 @@ def context_text():
     was split up, so the model can still tell files apart once system_text()
     joins every part back into one message. Re-read whenever a file changes,
     so editing a prompt takes effect on the next turn - no restart."""
+    # The mtime key below is what decides whether anything actually changed,
+    # and building it costs a listing plus a stat per file. That is cheap once
+    # and wasteful on every call into every turn, so it is rebuilt at most
+    # once a second - see filecache.due(). Everything after this point is
+    # unchanged, so a file that HAS changed is still picked up exactly as it
+    # was, just on the next check rather than this instant.
+    with _context_lock:
+        if _context_cache["key"] is not None and not filecache.due("context_text"):
+            return _context_cache["value"]
+
     files = context_files()
     try:
         key = tuple((str(p), p.stat().st_mtime_ns) for p in files)
@@ -2309,6 +2319,13 @@ def memories_text():
     until read_skill actually gets called. Keeps individual memories cheap to
     have many of, while still letting the model spot one is relevant and go
     read it in full with read_file/ask_file."""
+    # Rebuilt at most once a second, same as context_text() above and for the
+    # same reason: the mtime key costs a stat per memory file, and there are
+    # far more of these than there are context files.
+    with _memories_lock:
+        if _memories_cache["key"] is not None and not filecache.due("memories_text"):
+            return _memories_cache["text"]
+
     files = memory_files()
     try:
         key = tuple((str(p), p.stat().st_mtime_ns) for p in files)

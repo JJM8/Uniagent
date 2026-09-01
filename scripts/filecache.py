@@ -139,6 +139,26 @@ def signature():
         return _generation
 
 
+_due_at = {}
+
+
+def due(key, ttl=RECHECK):
+    """True at most once every `ttl` seconds for `key`, False in between.
+
+    The timer half of this module, for caches whose freshness CHECK is itself
+    the expensive part. context_text() and memories_text() each key themselves
+    on the mtimes of every file they read, which is correct and which costs a
+    stat per file per call - about 25 of them, on the way into every turn, for
+    folders that change a few times a day. They keep their mtime key; this
+    just decides how often it is worth rebuilding it."""
+    now = time.monotonic()
+    with _lock:
+        if now - _due_at.get(key, 0.0) < ttl:
+            return False
+        _due_at[key] = now
+        return True
+
+
 def forget(path=None):
     """Drop what is held for `path` - or everything, with no argument - so the
     very next read goes to disk.
@@ -151,8 +171,10 @@ def forget(path=None):
     with _lock:
         if path is None:
             _held.clear()
+            _due_at.clear()
         else:
             _held.pop(path, None)
+            _due_at.clear()
         _generation += 1
 
 
