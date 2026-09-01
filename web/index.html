@@ -3380,6 +3380,11 @@
     border: none;
     padding: 0;
     font-size: 14px;
+    /* .msg is pre-wrap, because a message is text the model wrote and its line
+       breaks are its own. This is not text - it is a row and a list of rows -
+       and inheriting pre-wrap would turn the whitespace between them into
+       blank lines. The rows inside that DO want it set it themselves. */
+    white-space: normal;
   }
   .fold-row {
     display: flex;
