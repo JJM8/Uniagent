@@ -3449,29 +3449,27 @@
     line-height: 1.45;
   }
   .set-group > .field { margin-top: 14px; }
-  .switch {
+  /* One row: the page's own sliding .switch (see the cron tab, which is where
+     it is built in script) with what it does written beside it. The pill is
+     reused rather than reinvented so a toggle looks like a toggle everywhere
+     in this app - and because it is a real checkbox underneath, which is what
+     keeps the keyboard and a screen reader working. */
+  .switch-row {
     display: flex;
-    align-items: baseline;
-    gap: 9px;
-    padding: 5px 0;
+    align-items: flex-start;
+    gap: 11px;
+    padding: 6px 0;
     cursor: pointer;
   }
-  .switch input {
-    flex: 0 0 auto;
-    width: 15px; height: 15px;
-    margin: 0;
-    accent-color: var(--accent);
-    cursor: pointer;
-  }
-  .switch > span { color: var(--text); font-size: 13px; }
-  /* What the setting actually does, on the same line, so the list stays seven
-     rows tall instead of fourteen. */
-  .switch > span .why { color: var(--dim); font-size: 11px; margin-left: 6px; }
-  /* A switch that cannot mean anything right now - tok/s with the durations
-     already off. Dimmed and unclickable rather than hidden: a row that
-     vanishes when you tick the one above it is a worse surprise than one that
-     visibly greys. */
-  .switch.moot { opacity: 0.45; pointer-events: none; }
+  .switch-what { color: var(--text); font-size: 13px; line-height: 1.45; }
+  /* What the setting actually does, under its name - the same shape as the
+     label-and-note pair every .field on this page is built from. */
+  .switch-what .why { display: block; color: var(--dim); font-size: 11px; }
+  /* A switch that cannot mean anything right now - tokens per second with the
+     durations already gone. Dimmed and unclickable rather than hidden: a row
+     that vanishes when you tick the one above it is a worse surprise than one
+     that visibly greys out. */
+  .switch-row.moot { opacity: 0.4; pointer-events: none; }
 
 </style>
 </head>
@@ -3888,29 +3886,29 @@
             hide is still measured, a call you fold is still there to open -
             so none of it costs anything to change your mind about.</span>
 
-          <label class="switch">
-            <input type="checkbox" id="s-ui-timing">
-            <span>how long things took<span class="why">the 3.7s under a reply, and on every tool row</span></span>
+          <label class="switch-row">
+            <span class="switch"><input type="checkbox" id="s-ui-timing"><span class="track"></span></span>
+            <span class="switch-what">how long things took<span class="why">the 3.7s under a reply, and the figure on every tool row</span></span>
           </label>
-          <label class="switch" id="s-ui-tokrate-row">
-            <input type="checkbox" id="s-ui-tokrate">
-            <span>tokens per second<span class="why">the speed beside a duration</span></span>
+          <label class="switch-row" id="s-ui-tokrate-row">
+            <span class="switch"><input type="checkbox" id="s-ui-tokrate"><span class="track"></span></span>
+            <span class="switch-what">tokens per second<span class="why">the speed beside a duration - about the model, where the duration beside it is about the turn</span></span>
           </label>
-          <label class="switch">
-            <input type="checkbox" id="s-ui-stamps">
-            <span>the time a message was sent<span class="why">the clock stamp under a bubble</span></span>
+          <label class="switch-row">
+            <span class="switch"><input type="checkbox" id="s-ui-stamps"><span class="track"></span></span>
+            <span class="switch-what">the time a message was sent<span class="why">the clock stamp under a bubble</span></span>
           </label>
-          <label class="switch">
-            <input type="checkbox" id="s-ui-waiting">
-            <span>the wait before the first token<span class="why">worth keeping on a local model, noise on a fast one</span></span>
+          <label class="switch-row">
+            <span class="switch"><input type="checkbox" id="s-ui-waiting"><span class="track"></span></span>
+            <span class="switch-what">the wait before the first token<span class="why">worth watching on a local model, noise on a fast hosted one</span></span>
           </label>
-          <label class="switch">
-            <input type="checkbox" id="s-ui-thinking">
-            <span>the model's own thinking<span class="why">its reasoning block above the reply</span></span>
+          <label class="switch-row">
+            <span class="switch"><input type="checkbox" id="s-ui-thinking"><span class="track"></span></span>
+            <span class="switch-what">the model's own thinking<span class="why">its reasoning block above the reply</span></span>
           </label>
-          <label class="switch">
-            <input type="checkbox" id="s-ui-gaps">
-            <span>gaps in the conversation<span class="why">the "3h later" rule between two messages</span></span>
+          <label class="switch-row">
+            <span class="switch"><input type="checkbox" id="s-ui-gaps"><span class="track"></span></span>
+            <span class="switch-what">gaps in the conversation<span class="why">the “3h 20m later” rule drawn between two messages</span></span>
           </label>
 
           <div class="field">
