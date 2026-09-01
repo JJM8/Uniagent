@@ -5891,6 +5891,24 @@ function callPreview(raw) {
 // a different shape of tree and not the same tree with pieces switched off -
 // which is why this is the one part of the appearance tab that is code rather
 // than a rule in the stylesheet.
+//
+// WHAT COUNTS AS ONE RUN is the whole of the design here, and the obvious
+// answer is the wrong one. Two calls are never actually adjacent: every pass
+// of a turn opens with the wait for the model and the thinking it does before
+// committing to the next call, so a rule of "consecutive tool rows" would find
+// runs of one, every time, and fold nothing at all.
+//
+// So a run STARTS at a tool row and swallows the machinery between it and the
+// next one - the waits and the thinking that lead from one call into the
+// following one. It ENDS at the last tool row: the wait and the thinking after
+// that belong to the model composing its answer, not to the calls, and stay
+// outside where they can be watched. Prose ends a run outright - the model
+// saying something mid-turn is a thing you came to read.
+//
+// The waits and the thinking are not hidden by this, only moved inside the
+// line that stands for the run. They have switches of their own on the same
+// tab for anyone who wants them gone.
+const FOLD_BETWEEN = ".msg.waited, .msg.thinking";
 
 function quietTools() { return chatUi.ui_tools === "quiet"; }
 
@@ -5954,9 +5972,19 @@ function bumpFold(fold) {
   const rows = foldRows(fold);
   const label = fold.querySelector(":scope > .fold-row > .fold-label");
   const took = fold.querySelector(":scope > .fold-row > .fold-took");
-  // A fold whose rows have all been taken back out - which is what switching
-  // the setting off does - has nothing left to stand for.
-  if (!rows.length) { stopTick(took); fold.remove(); return; }
+  // A fold with no calls left in it has nothing to stand for. Whatever else
+  // was riding along inside goes back out where it was rather than being
+  // thrown away with the line - a wait is still a wait once the run it
+  // belonged to is gone.
+  if (!rows.length) {
+    stopTick(took);
+    const body = fold.querySelector(":scope > .fold-body");
+    while (body.firstChild && fold.parentElement) {
+      fold.parentElement.insertBefore(body.firstChild, fold);
+    }
+    fold.remove();
+    return;
+  }
 
   const live = rows.some(r => r.classList.contains("tool-pending"));
   if (live) {
@@ -5992,17 +6020,31 @@ function bumpFold(fold) {
 }
 
 // Where a freshly built tool row goes. Straight into the box when calls are
-// drawn in full; into the fold at the end of it when they are folded, opening
-// a new one if the thing above is not a fold - which is what makes a run of
-// calls one line and a call after some prose the start of a new run.
+// drawn in full; into the run above it when they are folded.
+//
+// Finding that run means looking PAST the wait and the thinking that were
+// drawn since the last call, which is what this walks back over - and, having
+// found it, taking them in with the new row, since they are the machinery
+// between two calls and belong to the run rather than to the transcript. With
+// no fold behind them they stay where they are and a new run opens after them:
+// they were the lead-in to the first call, not the join between two.
 function placeTool(wrap, box) {
   if (!quietTools()) { box.appendChild(wrap); return; }
-  let fold = box.lastElementChild;
-  if (!fold || !fold.classList.contains("tool-fold")) {
+  const between = [];
+  let at = box.lastElementChild;
+  while (at && at.matches(FOLD_BETWEEN)) {
+    between.unshift(at);
+    at = at.previousElementSibling;
+  }
+  let fold = at && at.classList.contains("tool-fold") ? at : null;
+  if (!fold) {
     fold = newFold();
     box.appendChild(fold);
+    between.length = 0;
   }
-  fold.querySelector(":scope > .fold-body").appendChild(wrap);
+  const body = fold.querySelector(":scope > .fold-body");
+  for (const el of between) body.appendChild(el);
+  body.appendChild(wrap);
   bumpFold(fold);
 }
 
@@ -6029,14 +6071,29 @@ function refoldTools(box) {
   }
   if (!quietTools()) return;
 
+  // The same rule placeTool applies live, walked over a whole transcript. The
+  // children are snapshotted first because the loop moves them: an element
+  // going into a fold leaves box.children, and a live list would skip the one
+  // after it.
+  //
+  // `held` is the machinery seen since the last call. It only goes into the
+  // fold once ANOTHER call turns up to prove the run continued - which is what
+  // leaves the wait and the thinking before the final reply outside it.
   let fold = null;
+  let held = [];
   for (const el of Array.from(box.children)) {
-    // Anything that is not a tool row ends the run - which is the whole rule:
-    // a fold is the calls made back to back, and prose between two of them is
-    // the model saying something, which belongs in the transcript on its own.
-    if (!el.matches(".msg.tool")) { fold = null; continue; }
-    if (!fold) { fold = newFold(); box.insertBefore(fold, el); }
-    fold.querySelector(":scope > .fold-body").appendChild(el);
+    if (el.matches(".msg.tool")) {
+      if (!fold) { fold = newFold(); box.insertBefore(fold, el); held = []; }
+      const body = fold.querySelector(":scope > .fold-body");
+      for (const h of held) body.appendChild(h);
+      held = [];
+      body.appendChild(el);
+    } else if (fold && el.matches(FOLD_BETWEEN)) {
+      held.push(el);
+    } else {
+      fold = null;
+      held = [];
+    }
   }
   for (const f of box.querySelectorAll(":scope > .tool-fold")) bumpFold(f);
 }
