@@ -5303,6 +5303,19 @@ def serve():
     # means - so it aims at the one last spoken to. Everything arriving over
     # HTTP names its own chat and never comes through here.
     voice_input.start(lambda text: _inject_or_run(_voice_chat(), text))
+    # Everything a turn needs to read off disk before it can ask the model
+    # anything - .env, the wires files, settings.json, models_custom.json, the
+    # tool folder, the context and memory blocks - is kept in memory and
+    # re-checked HERE, on this thread, once a second. That is what takes the
+    # file I/O off the request path entirely rather than merely doing less of
+    # it: by the time a message arrives, the check has already happened.
+    #
+    # The hooks are the state that is derived from disk without being a file
+    # itself. Each re-checks cheaply and rebuilds only when something moved.
+    filecache.on_poll(tool_processor.refresh_tools)
+    filecache.on_poll(main.context_text)
+    filecache.on_poll(main.memories_text)
+    filecache.start()
     # The only thing left watching anything on a timer, and it watches with
     # stat() rather than by reading - see _watch_chats.
     threading.Thread(target=_watch_chats, daemon=True).start()
