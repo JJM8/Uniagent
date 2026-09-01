@@ -1694,11 +1694,24 @@
     color: var(--dim);
     font-size: 13px;
   }
+  /* The line under a bubble: the clock stamp, the write stream's duration and
+     speed, and "cut off" when the wire dropped. A flex row with a gap rather
+     than pieces strung together with "-" separators, because any of them can
+     be switched off on the appearance tab and a separator belonging to a piece
+     that isn't drawn would be left dangling. Whitespace separates them, so
+     hiding any one of them leaves the rest reading correctly. */
   .msg-time {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
     margin-top: 4px;
     font-size: 10px;
     opacity: 0.55;
   }
+  /* Nothing to show once everything on it is hidden - without this the row
+     still claims its 4px of margin under every single message. */
+  .msg-time:empty { display: none; }
   /* The timing half of that line: "12.1s - 26 tok/s" after the clock time.
      Dotted underline because it is the one thing under a bubble that has more
      behind it - the phase breakdown is on the title, so hovering (or a long
@@ -3309,6 +3322,139 @@
     #set-tabs { gap: 0; }
     .set-tab { font-size: 12px; padding: 10px 8px; }
   }
+
+  /* ==== what the transcript shows ==========================================
+     The appearance tab's seven switches, applied here rather than in the code
+     that draws the transcript. Everything is always built; these decide what
+     is painted - which is why turning one off redraws what is already on
+     screen instead of only what comes next, and why nothing has to be
+     re-fetched to change your mind.
+
+     The flags ride on <html> as data attributes (see applyChatUi). Only "off"
+     is ever selected on, so a page whose settings have not landed yet - or one
+     whose server has never heard of these - draws everything, exactly as it
+     did before any of this existed. */
+
+  /* How long a phase took. The duration itself, wherever it appears: under a
+     bubble, on a tool row, on the fold, and the tail of the thinking and
+     waiting lines - which keep their words and lose only the figure, so
+     "thought for 3.7s" becomes "thought" rather than a bare dangling "for". */
+  html[data-ui-timing="off"] .msg-took,
+  html[data-ui-timing="off"] .tool-took,
+  html[data-ui-timing="off"] .fold-took,
+  html[data-ui-timing="off"] .t-when { display: none; }
+
+  /* The speed half of a duration, on its own. */
+  html[data-ui-tokrate="off"] .t-rate { display: none; }
+
+  /* The clock time under a message. */
+  html[data-ui-stamps="off"] .msg-when { display: none; }
+
+  /* The wait before the first token. */
+  html[data-ui-waiting="off"] .msg.waited { display: none; }
+
+  /* The model's own reasoning. Hidden whole - head, body and all - rather than
+     folded, since folded is what it already is. */
+  html[data-ui-thinking="off"] .msg.thinking { display: none; }
+
+  /* The "3h 20m later" rule between two messages. */
+  html[data-ui-gaps="off"] .msg.gap { display: none; }
+
+  /* ---- tool calls, folded ------------------------------------------------
+     One line standing in for a whole run of calls: "working..." while they are
+     running, "3 tool calls" once they are done, opening to the rows
+     themselves. Built to read as the same object as a .tool-row - same height,
+     same chevron, same hover - because it is one, at one level up. */
+  .msg.tool-fold {
+    align-self: flex-start;
+    max-width: 95%;
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 14px;
+  }
+  .fold-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 3px 8px;
+    border-radius: 7px;
+    cursor: pointer;
+    user-select: none;
+    line-height: 1.5;
+  }
+  .fold-row:hover { background: var(--panel); }
+  .fold-ico {
+    flex: 0 0 auto; width: 14px; text-align: center;
+    color: var(--accent); opacity: 0.85;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  /* Dimmer and lighter than a .tool-name: this is a summary of what happened,
+     not the name of a thing that did. */
+  .fold-label { flex: 0 0 auto; color: var(--dim); }
+  .fold-took {
+    flex: 0 0 auto; color: var(--dim); opacity: 0.65;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px;
+  }
+  /* The rows themselves, indented under the line that stands for them so an
+     open fold still reads as one thing rather than as the transcript again. */
+  .fold-body {
+    margin: 2px 0 4px 11px;
+    padding-left: 10px;
+    border-left: 2px solid var(--border);
+  }
+  /* Something in there is still out. Same breathing icon and same counting
+     figure a single pending row uses, for the same reason: folded or not, a
+     forty-second call has to look like forty seconds of something happening. */
+  .tool-fold.fold-live .fold-ico { animation: tool-pulse 1.4s ease-in-out infinite; }
+  .tool-fold.fold-live .fold-label { color: var(--text); }
+  .tool-fold.fold-live .fold-took { opacity: 0.85; }
+  @media (prefers-reduced-motion: reduce) {
+    .tool-fold.fold-live .fold-ico { animation: none; opacity: 0.6; }
+  }
+
+  /* ---- the appearance tab's switches -------------------------------------
+     A list of one-line rows rather than the stacked .field blocks the rest of
+     settings is built from: these are seven of the same thing, and seven
+     labelled boxes with a heading each would be a page of chrome around seven
+     words. */
+  .set-group {
+    margin: 18px 0 6px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .set-group > h4 {
+    margin: 0 0 3px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+  }
+  .set-group > .note { display: block; margin-bottom: 10px; }
+  .switch {
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    padding: 5px 0;
+    cursor: pointer;
+  }
+  .switch input {
+    flex: 0 0 auto;
+    width: 15px; height: 15px;
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+  .switch > span { color: var(--text); font-size: 13px; }
+  /* What the setting actually does, on the same line, so the list stays seven
+     rows tall instead of fourteen. */
+  .switch > span .why { color: var(--dim); font-size: 11px; margin-left: 6px; }
+  /* A switch that cannot mean anything right now - tok/s with the durations
+     already off. Dimmed and unclickable rather than hidden: a row that
+     vanishes when you tick the one above it is a worse surprise than one that
+     visibly greys. */
+  .switch.moot { opacity: 0.45; pointer-events: none; }
+
 </style>
 </head>
 <body>
