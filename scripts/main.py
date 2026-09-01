@@ -3198,7 +3198,24 @@ def _say(text):
     return name + ": " + text + "\n"
 
 
-def append_error(c, msg):
+def ran_on(c):
+    """The (provider, model) the turn that just ended on THIS thread ran on.
+
+    The turn's own context is the authority while there is one: turn()
+    publishes the pair it resolved onto it, and that is the pair the request
+    was actually made with even if the chat has been pointed somewhere else
+    since - which is the ordinary thing to do while a request hangs. Anything
+    else (an error raised before the turn had a context, a caller with no turn
+    behind it at all) falls back to what the chat says now, which is the same
+    answer whenever nothing has changed."""
+    ctx = turnctx.current()
+    if ctx is not None and ctx.key == c.id and ctx.provider and ctx.model:
+        return ctx.provider, ctx.model
+    prov, mod, _ = c.models()
+    return prov, mod
+
+
+def append_error(c, msg, provider=None, model=None):
     """Record a failed turn's error INTO `c`'s history as a proper turn, not
     concatenated raw text onto the end of the JSON - history is a serialized
     turns list (see run()'s docstring), and string-appending onto that broke
@@ -3209,34 +3226,17 @@ def append_error(c, msg):
     strips system turns before anything reaches a provider, which would have
     hidden the error from the model right when it matters most.
 
-    The marker carries WHICH provider and model the failed request went to,
-    taken from the turn itself (see ran_on) unless the caller names them. Two
-    extra keys on the turn, invisible to everything that reads a history for
-    its conversation - _compat() rebuilds every turn from role and content
-    alone - and they are what makes "the model has been changed since this
-    failed" a question anything can answer afterwards: see model_switch(),
-    which is how /continue knows to say so, and how the continue button knows
-    to offer the retry on the model chosen NOW rather than the one that failed.
-
     Falls back to the old plain-text append only if `c.history` is already
     unparseable - a pre-JSON flat-text chat, where there's no structure to
     preserve anyway."""
     text = TURN_ERROR + msg
-    if provider is None or model is None:
-        provider, model = ran_on(c)
     try:
         turns = json.loads(c.history) if c.history else []
     except json.JSONDecodeError:
         c.history += text + "\n"
         c.save()
         return
-    marker = {"role": "assistant", "content": text}
-    # Only when both are known: half a pair says nothing, and no pair at all is
-    # already the normal case for every marker written before this existed.
-    if provider and model:
-        marker["provider"] = provider
-        marker["model"] = model
-    turns.append(marker)
+    turns.append({"role": "assistant", "content": text})
     c.history = json.dumps(turns, indent=2)
     c.save()
 
