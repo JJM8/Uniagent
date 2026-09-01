@@ -3209,17 +3209,34 @@ def append_error(c, msg):
     strips system turns before anything reaches a provider, which would have
     hidden the error from the model right when it matters most.
 
+    The marker carries WHICH provider and model the failed request went to,
+    taken from the turn itself (see ran_on) unless the caller names them. Two
+    extra keys on the turn, invisible to everything that reads a history for
+    its conversation - _compat() rebuilds every turn from role and content
+    alone - and they are what makes "the model has been changed since this
+    failed" a question anything can answer afterwards: see model_switch(),
+    which is how /continue knows to say so, and how the continue button knows
+    to offer the retry on the model chosen NOW rather than the one that failed.
+
     Falls back to the old plain-text append only if `c.history` is already
     unparseable - a pre-JSON flat-text chat, where there's no structure to
     preserve anyway."""
     text = TURN_ERROR + msg
+    if provider is None or model is None:
+        provider, model = ran_on(c)
     try:
         turns = json.loads(c.history) if c.history else []
     except json.JSONDecodeError:
         c.history += text + "\n"
         c.save()
         return
-    turns.append({"role": "assistant", "content": text})
+    marker = {"role": "assistant", "content": text}
+    # Only when both are known: half a pair says nothing, and no pair at all is
+    # already the normal case for every marker written before this existed.
+    if provider and model:
+        marker["provider"] = provider
+        marker["model"] = model
+    turns.append(marker)
     c.history = json.dumps(turns, indent=2)
     c.save()
 
