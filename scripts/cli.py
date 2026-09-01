@@ -1273,10 +1273,18 @@ class App:
             # answering (see main.CONTINUE), so it joins the queue the way a
             # message does - as None, which main.turn reads as "carry on from
             # where the last one stopped".
+            # Before the rewind, which takes the marker carrying it away: the
+            # model this picks up is the one the chat says now, which after a
+            # failure is very often not the one that failed. See
+            # main.model_switch().
+            switch = main.model_switch(main.current)
             why = main.continue_from(main.current)
             if why is not None:
                 self.console.commit(md.render(why) + [""])
                 return
+            note = main.switch_note(switch)
+            if note:
+                self.console.commit(md.render(note) + [""])
             with self.cv:
                 self.pending.append(None)
                 self.cv.notify_all()
@@ -1645,10 +1653,14 @@ def once(text):
     # watching the answer arrive and watching nothing until a line ends.
     console.on = sys.stdout.isatty()
     if text.strip().lower() == main.CONTINUE:
+        switch = main.model_switch(main.current)
         why = main.continue_from(main.current)
         if why is not None:
             console.commit(md.render(why))
             return 1
+        note = main.switch_note(switch)
+        if note:
+            console.commit(md.render(note))
         text = None  # run the turn over the history as it stands
     result = command_processor.process(text) if text is not None else None
     if result is not None:
