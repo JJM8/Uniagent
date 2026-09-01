@@ -5853,6 +5853,165 @@ function callPreview(raw) {
   return oneLine(inner);
 }
 
+// ---- tool calls, folded -------------------------------------------------
+// With "tool calls: folded" on the appearance tab, a RUN of calls - every one
+// the model made back to back, with no prose between them - is drawn as a
+// single line that opens to the rows themselves:
+//
+//   ⚙ working…            1.4s  ›     while any of them is still out
+//   ⚙ 3 tool calls        4.2s  ›     once they are all back
+//
+// The rows are not changed and nothing is left out: each one is the same
+// element toolLine builds either way, its arguments, its output and its safety
+// verdict all still on it, one click further in than before. A turn that made
+// nine calls is one line of transcript instead of nine.
+//
+// It is done by moving the rows rather than by hiding them, because a fold is
+// a different shape of tree and not the same tree with pieces switched off -
+// which is why this is the one part of the appearance tab that is code rather
+// than a rule in the stylesheet.
+
+function quietTools() { return chatUi.ui_tools === "quiet"; }
+
+// The line, empty. Not inserted anywhere - the caller decides where it goes,
+// since it is appended live in one place and spliced into an existing
+// transcript in the other.
+function newFold() {
+  const fold = document.createElement("div");
+  fold.className = "msg tool-fold";
+
+  const row = document.createElement("div");
+  row.className = "fold-row";
+
+  const ico = document.createElement("span");
+  ico.className = "fold-ico";
+  ico.textContent = "⚙";
+
+  const label = document.createElement("span");
+  label.className = "fold-label";
+
+  const gap = document.createElement("span");
+  gap.className = "tool-gap";
+
+  const took = document.createElement("span");
+  took.className = "fold-took";
+
+  const chev = document.createElement("span");
+  chev.className = "tool-chev";
+  chev.textContent = "›";
+
+  row.append(ico, label, gap, took, chev);
+
+  const body = document.createElement("div");
+  body.className = "fold-body";
+  body.hidden = true;
+
+  row.addEventListener("click", () => {
+    body.hidden = !body.hidden;
+    row.classList.toggle("open", !body.hidden);
+  });
+
+  fold.append(row, body);
+  return fold;
+}
+
+// The rows a fold stands for. `:scope >` rather than a bare descendant search
+// because a tool row's own drawer can hold anything at all.
+function foldRows(fold) {
+  return Array.from(fold.querySelectorAll(":scope > .fold-body > .msg.tool"));
+}
+
+// Redraw the line from what is now inside it. Called every time a row is added
+// to it and every time one settles, since both change what it should say.
+//
+// While anything is still out it counts, from when the first of them went out,
+// the same way a single pending row does - folded or not, a forty-second call
+// has to look like forty seconds of something happening. Once they are all
+// back it says how many there were and how long they took together.
+function bumpFold(fold) {
+  if (!fold) return;
+  const rows = foldRows(fold);
+  const label = fold.querySelector(":scope > .fold-row > .fold-label");
+  const took = fold.querySelector(":scope > .fold-row > .fold-took");
+  // A fold whose rows have all been taken back out - which is what switching
+  // the setting off does - has nothing left to stand for.
+  if (!rows.length) { stopTick(took); fold.remove(); return; }
+
+  const live = rows.some(r => r.classList.contains("tool-pending"));
+  if (live) {
+    fold.classList.add("fold-live");
+    label.textContent = "working…";
+    // Started once and left alone: re-arming it on every row that joins would
+    // restart the count from zero each time, and what is being counted is how
+    // long this run has been going, not the newest call in it.
+    if (!fold.dataset.since) {
+      fold.dataset.since = String(Date.now());
+      startTick(took, humanMs);
+    }
+    return;
+  }
+
+  fold.classList.remove("fold-live");
+  delete fold.dataset.since;
+  stopTick(took);
+  label.textContent = rows.length === 1 ? "1 tool call" : rows.length + " tool calls";
+  // The measured total, from the figures the rows themselves were given. A row
+  // whose call never came back contributes nothing rather than a guess, so a
+  // fold holding one says the truth about the others.
+  const total = rows.reduce((sum, r) => sum + (Number(r.dataset.ms) || 0), 0);
+  took.textContent = humanMs(total);
+}
+
+// Where a freshly built tool row goes. Straight into the box when calls are
+// drawn in full; into the fold at the end of it when they are folded, opening
+// a new one if the thing above is not a fold - which is what makes a run of
+// calls one line and a call after some prose the start of a new run.
+function placeTool(wrap, box) {
+  if (!quietTools()) { box.appendChild(wrap); return; }
+  let fold = box.lastElementChild;
+  if (!fold || !fold.classList.contains("tool-fold")) {
+    fold = newFold();
+    box.appendChild(fold);
+  }
+  fold.querySelector(":scope > .fold-body").appendChild(wrap);
+  bumpFold(fold);
+}
+
+// The fold a row is in, or null when calls are being drawn in full.
+function foldOf(wrap) {
+  return wrap && wrap.closest ? wrap.closest(".tool-fold") : null;
+}
+
+// Rebuild a transcript that is already on screen into the shape the setting
+// now asks for. This is what makes the switch on the appearance tab move the
+// conversation behind it instead of only the next one drawn.
+//
+// Always unwraps first and then regroups, rather than trying to work out what
+// changed: the rows come back out in the order they went in, so unwrapping is
+// exact, and regrouping from a flat box is the same walk in both directions.
+// Doing it in one pass would be faster and would have two ways to be wrong.
+function refoldTools(box) {
+  if (!box) return;
+  for (const fold of Array.from(box.querySelectorAll(":scope > .tool-fold"))) {
+    stopTick(fold.querySelector(":scope > .fold-row > .fold-took"));
+    const body = fold.querySelector(":scope > .fold-body");
+    while (body.firstChild) box.insertBefore(body.firstChild, fold);
+    fold.remove();
+  }
+  if (!quietTools()) return;
+
+  let fold = null;
+  for (const el of Array.from(box.children)) {
+    // Anything that is not a tool row ends the run - which is the whole rule:
+    // a fold is the calls made back to back, and prose between two of them is
+    // the model saying something, which belongs in the transcript on its own.
+    if (!el.matches(".msg.tool")) { fold = null; continue; }
+    if (!fold) { fold = newFold(); box.insertBefore(fold, el); }
+    fold.querySelector(":scope > .fold-body").appendChild(el);
+  }
+  for (const f of box.querySelectorAll(":scope > .tool-fold")) bumpFold(f);
+}
+
 // `timing` is how long the call took to run ({"ms": n}), from the turn or from
 // the live broadcast. It goes on the head rather than inside the box because
 // that is the question you have while the box is still shut: a turn that felt
@@ -5915,6 +6074,9 @@ function toolLine(text, box, name, timing, callText, id) {
   // measured number the moment the result lands.
   if (running) startTick(took, counter("running…"));
   else if (timing) took.textContent = humanMs(timing.ms);
+  // Kept on the row as well as painted on it, so a fold above can total up
+  // what its calls took without having to parse "4.2s" back into a number.
+  if (!running && timing && timing.ms) wrap.dataset.ms = String(timing.ms);
 
   const chev = document.createElement("span");
   chev.className = "tool-chev";
@@ -5945,7 +6107,7 @@ function toolLine(text, box, name, timing, callText, id) {
 
   wrap.append(row, out);
   const stick = nearBottom(box);
-  box.appendChild(wrap);
+  placeTool(wrap, box);
   if (box === messages) updateEmptyChat();
   if (stick) box.scrollTop = box.scrollHeight;
   // Returns the drawer element, whose .parentElement is the wrap - which is
@@ -5975,7 +6137,9 @@ function settleTool(wrap, text, name, timing) {
     // stopped counting has to say what it counted; blanking it would throw
     // away the one number anybody was watching for.
     const ran = stopTick(took);
-    took.textContent = humanMs(timing ? timing.ms : ran);
+    const ms = timing ? timing.ms : ran;
+    took.textContent = humanMs(ms);
+    if (ms) wrap.dataset.ms = String(ms);
   }
   // The result knows which tool it came from. Taken in preference to whatever
   // the row was drawn with, because a provider that names one and not the
@@ -5993,6 +6157,9 @@ function settleTool(wrap, text, name, timing) {
     res.classList.remove("tool-waiting");
     res.textContent = text;
   }
+  // The line standing for this row, if there is one: it said "working…" while
+  // this call was out and has to stop saying it now that this was the last.
+  bumpFold(foldOf(wrap));
   if (stick) box.scrollTop = box.scrollHeight;
   return wrap;
 }
@@ -6005,6 +6172,7 @@ function resumeTool(wrap, already = 0) {
   if (!wrap) return null;
   const took = wrap.querySelector(".tool-took");
   if (took) startTick(took, counter("running…"), already);
+  bumpFold(foldOf(wrap));
   return wrap;
 }
 
@@ -6023,6 +6191,9 @@ function abandonTool(wrap) {
     res.classList.add("tool-waiting");
     res.textContent = "no result - the turn ended while this call was still running";
   }
+  // Same reason as settleTool: a fold left counting on a turn that has ended
+  // would count forever.
+  bumpFold(foldOf(wrap));
   return wrap;
 }
 
