@@ -106,14 +106,6 @@ class TurnContext:
         self.partial = ""
         self.thinking = ""
         self.phases = None
-        # What this turn is running on, published for the same reason the rest
-        # of the working state is: whoever writes this turn's ending may not be
-        # this thread, and a turn that dies on the provider has to be filed with
-        # the pair it actually died on rather than whatever the chat says by
-        # then - the model can be changed while the doomed request is still in
-        # flight. See main.append_error() and main.model_switch().
-        self.provider = None
-        self.model = None
 
     @property
     def cancelled(self):
