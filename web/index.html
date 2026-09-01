@@ -11197,6 +11197,10 @@ function setModelQuickValue(provider, model) {
   lastModel = { provider, model };
   paintModelLabel(provider, model);
   if (!modelPanel.hidden) drawModelList();
+  // Picking a model with a failed turn on screen is the case the continue
+  // button's label exists for, and this is the moment it changes - the offer is
+  // already drawn, so nothing else would redraw it until the next render.
+  showContinue();
 }
 
 // Nothing is known about the loaded chat's model, so the box says nothing.
