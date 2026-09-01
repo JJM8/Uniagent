@@ -3683,15 +3683,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(json.dumps({"type": "system", "text": why}),
                            "application/json")
                 return
+            _run_turn(None, target=c)
             # To every window, not only the one that pressed: the turn about to
             # stream in belongs to all of them, and the model answering it is
-            # not the one the transcript above it failed on. Said before the
-            # turn starts, so it reads above the reply instead of landing in
-            # the middle of one.
+            # not the one the transcript above it failed on.
             note = main.switch_note(switch)
             if note:
                 _broadcast({"type": "system", "chat": c.route, "text": note})
-            _run_turn(None, target=c)
             # No "user" broadcast goes with this one and none is wanted: the
             # window that asked takes the marker line off its own transcript
             # when it sees "started", and every other window redraws from the
