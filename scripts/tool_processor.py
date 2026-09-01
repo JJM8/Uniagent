@@ -570,8 +570,10 @@ def set_enabled(kind, rel, enable):
                 except OSError:
                     pass
 
-    # So TOOLS/BROKEN reflect the move immediately rather than at the next turn.
-    load_tools()
+    # So TOOLS/BROKEN reflect the move immediately rather than at the next
+    # turn. force, because the file was moved a moment ago and this is the
+    # whole point of the call - the recheck window must not delay it.
+    load_tools(force=True)
     return True, (("enabled " if enable else "disabled ") + kind + " "
                   + Path(rel).stem)
 
