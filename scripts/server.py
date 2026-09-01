@@ -57,6 +57,7 @@ import claude_session
 import command_processor
 import compaction
 import cron
+import filecache
 import infini
 import main
 import market
