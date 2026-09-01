@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 import claude_session
+import filecache
 import provider
 import settings
 import timing
