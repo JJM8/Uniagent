@@ -199,15 +199,17 @@ def _key(name):
     the settings page can show and edit exactly what's actually in use, with
     nothing hiding in the shell environment. Raises a clear error if it's not
     set there, rather than crashing deeper in the request."""
-    try:
-        for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith(name + "="):
-                value = line.split("=", 1)[1].strip().strip("\"'")
-                if value:
-                    return value
-    except OSError:
-        pass
+    # Through filecache, not off disk: this is called on the way into every
+    # request, several times over, and each call used to read the whole file.
+    # The cache re-checks the mtime at most once a second, so an edit still
+    # lands on the next turn - by hand, from the settings page, or over
+    # Syncthing from another machine.
+    for line in filecache.text(ENV_FILE).splitlines():
+        line = line.strip()
+        if line.startswith(name + "="):
+            value = line.split("=", 1)[1].strip().strip("\"'")
+            if value:
+                return value
     raise RuntimeError(name + " is not set in " + str(ENV_FILE) + " - add it there, or on the settings page.")
 
 
@@ -4342,6 +4344,9 @@ def set_env(name, value):
             ENV_FILE.chmod(0o600)
         except OSError:
             pass
+    # This process just changed the file, so it must not wait out the cache's
+    # own re-check before seeing its own write - see filecache.forget().
+    filecache.forget(ENV_FILE)
 
 
 # --- Workspaces. Where a chat's file and terminal tools do their work, and
