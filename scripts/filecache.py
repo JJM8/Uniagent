@@ -134,9 +134,33 @@ def signature():
     For callers whose expensive work is built out of these files rather than
     being one of them: hold the signature you built at, compare, and rebuild
     only when it moves. Cheaper and sharper than each of them re-deriving
-    "has anything changed" from mtimes of its own."""
+    "has anything changed" from mtimes of its own.
+
+    Re-checks the held files itself, at most once a second, and that is not an
+    optimisation - it is what makes the whole arrangement correct. A memo that
+    returns early on an unchanged signature never calls text(), so without a
+    re-check here NOTHING would ever notice the file had changed and the memo
+    would be stale forever. The background refresher usually gets there first
+    and this finds nothing to do; in a process that has no refresher - the CLI,
+    the cron watcher - this IS the refresh."""
+    if due("__signature__"):
+        _recheck_files()
     with _lock:
         return _generation
+
+
+def _recheck_files():
+    """Re-stat every held file, without running the hooks.
+
+    Split out from poll() because signature() calls it, and the hooks are
+    things like context_text() that ask for the signature themselves - running
+    them from in here would recurse."""
+    for path in list(_held):
+        with _lock:
+            held = _held.get(path)
+            if held is not None:
+                held[0] = 0.0      # expire it, so text() below re-checks
+        text(path)
 
 
 _due_at = {}
@@ -199,12 +223,7 @@ def poll():
     the time a turn asks for any of this, the check has already happened and
     the answer is sitting in memory, so the request path does no file I/O at
     all rather than merely doing it once a second."""
-    for path in list(_held):
-        with _lock:
-            held = _held.get(path)
-            if held is not None:
-                held[0] = 0.0      # expire it, so text() below re-checks
-        text(path)
+    _recheck_files()
     for fn in list(_hooks):
         try:
             fn()
