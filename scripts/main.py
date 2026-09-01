@@ -3198,7 +3198,24 @@ def _say(text):
     return name + ": " + text + "\n"
 
 
-def append_error(c, msg):
+def ran_on(c):
+    """The (provider, model) the turn that just ended on THIS thread ran on.
+
+    The turn's own context is the authority while there is one: turn()
+    publishes the pair it resolved onto it, and that is the pair the request
+    was actually made with even if the chat has been pointed somewhere else
+    since - which is the ordinary thing to do while a request hangs. Anything
+    else (an error raised before the turn had a context, a caller with no turn
+    behind it at all) falls back to what the chat says now, which is the same
+    answer whenever nothing has changed."""
+    ctx = turnctx.current()
+    if ctx is not None and ctx.key == c.id and ctx.provider and ctx.model:
+        return ctx.provider, ctx.model
+    prov, mod, _ = c.models()
+    return prov, mod
+
+
+def append_error(c, msg, provider=None, model=None):
     """Record a failed turn's error INTO `c`'s history as a proper turn, not
     concatenated raw text onto the end of the JSON - history is a serialized
     turns list (see run()'s docstring), and string-appending onto that broke
