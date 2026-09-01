@@ -1708,6 +1708,14 @@ def continue_from(c):
     tail telling the model to wait for the user is swapped for the one telling
     it to go on, since the user asking to continue is that instruction arriving.
 
+    The turn this sets up runs on whatever the chat's model says NOW, not on
+    whatever the failed request went to: turn() re-reads the settings file at
+    the top of every turn, so a provider swapped in the corner after an
+    overload is the provider picked up here. Nothing in this function has to
+    arrange that - but the change is worth saying out loud, so callers ask
+    model_switch() BEFORE this and report its answer; the marker holding it is
+    one of the ones popped below.
+
     Refuses a chat that is mid-turn: the running turn holds the history in
     memory and rewrites the file after every step, so anything written here
     would be overwritten a moment later and the continue would silently do
@@ -1774,6 +1782,58 @@ def _is_marker(turn):
     if not isinstance(text, str):
         return False
     return text.strip() == STOPPED or text.startswith(TURN_ERROR)
+
+
+def model_switch(c):
+    """Whether the model has been changed since the failed turn `c` is sitting
+    on: (was_provider, was_model, now_provider, now_model), or None.
+
+    Ask BEFORE continue_from(), which takes the marker carrying the answer off
+    the history. The next turn already runs on whatever the chat says at the
+    moment it starts - turn() re-reads the settings file every time - so this
+    changes nothing about where the retry goes; it is what lets the retry SAY
+    where it is going. A request that dies on an overloaded provider, another
+    model picked in the corner, and then a continue, is the whole reason the
+    button exists: without this the turn quietly runs somewhere other than the
+    one that just failed, and nothing on the page or in the terminal accounts
+    for it.
+
+    None whenever there is nothing to say: a chat that isn't sitting on a
+    marker, a marker from before the pair was recorded (every failure written
+    before this existed), a stop rather than a failure, or a model that simply
+    hasn't changed."""
+    try:
+        turns = json.loads(c.history) if c.history else []
+    except json.JSONDecodeError:
+        return None
+    was = None
+    # The trailing markers only - the same tail continue_from() is about to
+    # wind off - so this answers for the turn that button would pick up, and
+    # never for some older failure further up the chat.
+    for turn in reversed(turns):
+        if not _is_marker(turn):
+            break
+        if turn.get("provider") and turn.get("model"):
+            was = (turn["provider"], turn["model"])
+            break
+    if was is None:
+        return None
+    # Fresh off the file, for the same reason the turn itself re-reads it: the
+    # pin the corner wrote a second ago is the whole point of asking.
+    c.reload_model()
+    prov, mod, _ = c.models()
+    if (prov, mod) == was:
+        return None
+    return was + (prov, mod)
+
+
+def switch_note(switch):
+    """model_switch()'s answer as one line to read, or "" for None - so the
+    page, the terminal and anything after them say the same thing about it."""
+    if not switch:
+        return ""
+    return ("continuing on " + switch[2] + " / " + switch[3]
+            + " - the turn that failed ran on " + switch[0] + " / " + switch[1] + ".")
 
 
 def request_stop(key):
@@ -3198,7 +3258,24 @@ def _say(text):
     return name + ": " + text + "\n"
 
 
-def append_error(c, msg):
+def ran_on(c):
+    """The (provider, model) the turn that just ended on THIS thread ran on.
+
+    The turn's own context is the authority while there is one: turn()
+    publishes the pair it resolved onto it, and that is the pair the request
+    was actually made with even if the chat has been pointed somewhere else
+    since - which is the ordinary thing to do while a request hangs. Anything
+    else (an error raised before the turn had a context, a caller with no turn
+    behind it at all) falls back to what the chat says now, which is the same
+    answer whenever nothing has changed."""
+    ctx = turnctx.current()
+    if ctx is not None and ctx.key == c.id and ctx.provider and ctx.model:
+        return ctx.provider, ctx.model
+    prov, mod, _ = c.models()
+    return prov, mod
+
+
+def append_error(c, msg, provider=None, model=None):
     """Record a failed turn's error INTO `c`'s history as a proper turn, not
     concatenated raw text onto the end of the JSON - history is a serialized
     turns list (see run()'s docstring), and string-appending onto that broke
