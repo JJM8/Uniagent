@@ -1776,6 +1776,58 @@ def _is_marker(turn):
     return text.strip() == STOPPED or text.startswith(TURN_ERROR)
 
 
+def model_switch(c):
+    """Whether the model has been changed since the failed turn `c` is sitting
+    on: (was_provider, was_model, now_provider, now_model), or None.
+
+    Ask BEFORE continue_from(), which takes the marker carrying the answer off
+    the history. The next turn already runs on whatever the chat says at the
+    moment it starts - turn() re-reads the settings file every time - so this
+    changes nothing about where the retry goes; it is what lets the retry SAY
+    where it is going. A request that dies on an overloaded provider, another
+    model picked in the corner, and then a continue, is the whole reason the
+    button exists: without this the turn quietly runs somewhere other than the
+    one that just failed, and nothing on the page or in the terminal accounts
+    for it.
+
+    None whenever there is nothing to say: a chat that isn't sitting on a
+    marker, a marker from before the pair was recorded (every failure written
+    before this existed), a stop rather than a failure, or a model that simply
+    hasn't changed."""
+    try:
+        turns = json.loads(c.history) if c.history else []
+    except json.JSONDecodeError:
+        return None
+    was = None
+    # The trailing markers only - the same tail continue_from() is about to
+    # wind off - so this answers for the turn that button would pick up, and
+    # never for some older failure further up the chat.
+    for turn in reversed(turns):
+        if not _is_marker(turn):
+            break
+        if turn.get("provider") and turn.get("model"):
+            was = (turn["provider"], turn["model"])
+            break
+    if was is None:
+        return None
+    # Fresh off the file, for the same reason the turn itself re-reads it: the
+    # pin the corner wrote a second ago is the whole point of asking.
+    c.reload_model()
+    prov, mod, _ = c.models()
+    if (prov, mod) == was:
+        return None
+    return was + (prov, mod)
+
+
+def switch_note(switch):
+    """model_switch()'s answer as one line to read, or "" for None - so the
+    page, the terminal and anything after them say the same thing about it."""
+    if not switch:
+        return ""
+    return ("continuing on " + switch[2] + " / " + switch[3]
+            + " - the turn that failed ran on " + switch[0] + " / " + switch[1] + ".")
+
+
 def request_stop(key):
     """Stop whatever is running under `key`, NOW - a chat's stem, or a
     subagent's thread tag.
