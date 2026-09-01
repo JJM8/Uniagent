@@ -6094,7 +6094,10 @@ function render(text, box = messages, vals = null, stamps = null, live = null,
   // the turn: a reply that merely quotes "[stopped by the user]" is a finished
   // reply. Before renderPending(), so the marker is still the box's last line.
   if (box === messages) {
-    continuable = isMarkerTurn(turns[turns.length - 1]) ? box.lastElementChild : null;
+    const marker = isMarkerTurn(turns[turns.length - 1]) ? turns[turns.length - 1] : null;
+    continuable = marker ? box.lastElementChild : null;
+    continuableModel = marker && marker.provider && marker.model
+      ? { provider: marker.provider, model: marker.model } : null;
     showContinue();
   }
 
@@ -6162,6 +6165,16 @@ const TURN_ERROR_TEXT = "Error: the turn failed - ";
 // can put a marker on screen in the first place.
 let continuable = null;
 
+// The {provider, model} that marker's request actually failed on, when the
+// marker carries one - main.append_error() writes the pair onto the turn.
+// null for a stop, and for every failure written before that existed, which
+// is why nothing below treats its absence as anything but "don't mention it".
+// It is what lets the button say the retry is going somewhere else: after an
+// overload the usual next move is to pick another model in the corner, and a
+// continue that then quietly runs on it reads as the same request failing or
+// succeeding for no visible reason.
+let continuableModel = null;
+
 // Mirrors main._is_marker, deliberately: an assistant turn, no tool call, one
 // of the two texts. The page and the server have to agree on what "can be
 // continued" means, or the button offers something the server then refuses.
@@ -6180,8 +6193,21 @@ function showContinue() {
   const btn = document.createElement("button");
   btn.id = "continue-btn";
   btn.type = "button";
-  btn.textContent = "\u21bb continue";
-  btn.title = "carry on from where this turn stopped (/continue)";
+  // Where the retry is actually going, when that is not where the failure
+  // went. The server decides this - the turn re-reads the chat's model as it
+  // starts (main.turn), so the corner is the answer, and the marker below is
+  // only what it used to be - but the button is where anyone reads it, so it
+  // is the button that has to be honest about it rather than the model
+  // silently changing under an unchanged label.
+  const now = lastModel;
+  const moved = now && continuableModel
+                && (now.provider !== continuableModel.provider
+                    || now.model !== continuableModel.model);
+  btn.textContent = moved ? "\u21bb continue on " + now.model : "\u21bb continue";
+  btn.title = moved
+    ? "this failed on " + continuableModel.provider + " / " + continuableModel.model
+      + " - carry on using " + now.provider + " / " + now.model + " (/continue)"
+    : "carry on from where this turn stopped (/continue)";
   btn.addEventListener("click", pressContinue);
   continuable.appendChild(btn);
 }
@@ -6210,6 +6236,7 @@ async function pressContinue() {
     line("system", "system: " + reply.text);
   }
   continuable = null;
+  continuableModel = null;
   showContinue();
 }
 
@@ -11192,6 +11219,10 @@ function setModelQuickValue(provider, model) {
   lastModel = { provider, model };
   paintModelLabel(provider, model);
   if (!modelPanel.hidden) drawModelList();
+  // Picking a model with a failed turn on screen is the case the continue
+  // button's label exists for, and this is the moment it changes - the offer
+  // is already drawn, so nothing else would redraw it until the next render.
+  showContinue();
 }
 
 // Nothing is known about the loaded chat's model, so the box says nothing.
