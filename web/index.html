@@ -5209,40 +5209,50 @@ function rateOf(ms, tok) {
   return tok * 1000 / ms;
 }
 
-// One stream as its own line: "3.7s · 40 tok/s", or just the duration when
-// there is no token count to divide - which is most turns that called a tool,
-// where the provider stops generating at the call and never sends its final
-// usage event. "" when that stream did not happen.
-function partOf(timing, key) {
-  if (!timing) return "";
+// One stream as its own pair of elements: "3.7s" and, beside it, "· 40 tok/s"
+// - or just the duration when there is no token count to divide, which is most
+// turns that called a tool, where the provider stops generating at the call
+// and never sends its final usage event. [] when that stream did not happen.
+//
+// Two elements rather than one string because they are two separate switches
+// on the appearance tab: how long you waited is a fact about this turn, how
+// fast it wrote is a fact about the model, and wanting the first without the
+// second is an ordinary thing to want. Splitting them here is what lets the
+// stylesheet answer that without any of this code knowing it was asked.
+function timingSpans(timing, key) {
+  if (!timing) return [];
   const shown = humanMs(timing[key]);
-  if (!shown) return "";
+  if (!shown) return [];
+  const dur = document.createElement("span");
+  dur.className = "t-dur";
+  dur.textContent = shown;
+  const out = [dur];
   const rate = rateOf(timing[key], timing[key + "_tok"]);
-  return shown + (rate ? " · " + Math.round(rate) + " tok/s" : "");
+  if (rate) {
+    const per = document.createElement("span");
+    per.className = "t-rate";
+    per.textContent = " · " + Math.round(rate) + " tok/s";
+    out.push(per);
+  }
+  return out;
 }
 
-// The wait, said the way the thinking line says thinking.
-function waitedWords(timing) {
-  const shown = humanMs((timing || {}).latency);
-  return shown ? "waited for " + shown : "";
-}
-
-// The thinking line once thinking is over. Falls back to the bare past tense
-// where there is no span to report: a thinking stream that arrived in one
-// piece has a span of zero - the time it took is in the latency, because
-// nothing came back until it was finished - and "thought" is then the whole of
-// what can honestly be said.
-function thoughtWords(timing) {
-  const shown = partOf(timing, "think");
-  return shown ? "thought for " + shown : "thought";
-}
-
-// The line under a message bubble - the WRITE stream and nothing else, because
-// that bubble IS the write stream. The wait is on its own line above it and
-// the thinking is on the thinking block, each with the numbers that belong to
-// it. This is the whole of the fix for a 30 tok/s model reporting 1000.
-function timingSummary(timing) {
-  return partOf(timing, "write");
+// "thought for 3.7s · 40 tok/s" onto `el`, with everything after the word in
+// one span of its own. That span is what the appearance tab hides, so a
+// transcript with the timings off reads "thought" and "waited" rather than
+// leaving a dangling "for" behind them.
+//
+// The bare word is also the honest answer where there is no span to report: a
+// thinking stream that arrived in one piece has a span of zero - the time it
+// took is in the latency, because nothing came back until it was finished.
+function phrase(el, word, timing, key) {
+  el.textContent = word;
+  const spans = timingSpans(timing, key);
+  if (!spans.length) return;
+  const when = document.createElement("span");
+  when.className = "t-when";
+  when.append(" for ", ...spans);
+  el.append(when);
 }
 
 // The whole response in one line, for the hover: every phase that happened, in
@@ -5320,7 +5330,11 @@ function paintTicks() {
 // space, because a zero-millisecond span deliberately formats as nothing at
 // all (see humanMs).
 function counter(word) {
-  return ms => (word + " " + humanMs(ms)).trim();
+  // The one place the switch is read rather than left to CSS: this text is
+  // repainted ten times a second, so it is cheaper to not write the figure
+  // than to write it and hide it - and the word has to survive on its own
+  // either way, which a hidden span could not manage inside one text node.
+  return ms => (chatUi.ui_timing ? (word + " " + humanMs(ms)).trim() : word);
 }
 
 // `already` is how long this thing has ALREADY been running when the counter
@@ -5382,7 +5396,6 @@ function markCut(wrap) {
   span.className = "msg-cut";
   span.textContent = "cut off";
   span.title = "the connection to the model dropped before this reply finished";
-  if (row.childNodes.length) row.append(" \u00b7 ");
   row.append(span);
 }
 
@@ -5390,17 +5403,18 @@ function attachTiming(wrap, timing) {
   const row = timeRow(wrap);
   const old = row.querySelector(".msg-took");
   if (old) { stopTick(old); old.remove(); }
-  const summary = timingSummary(timing);
-  if (!summary) {
-    if (!row.textContent) row.remove();
+  const spans = timingSpans(timing, "write");
+  if (!spans.length) {
+    if (!row.childNodes.length) row.remove();
     return;
   }
   const span = document.createElement("span");
   span.className = "msg-took";
-  span.textContent = summary;
+  span.append(...spans);
   const detail = timingDetail(timing);
   if (detail) span.title = detail;
-  if (row.childNodes.length) row.append(" · ");
+  // No separator to add: .msg-time is a flex row with a gap, precisely so that
+  // any one of its pieces can be switched off without leaving a "·" behind.
   row.append(span);
 }
 
@@ -5412,7 +5426,6 @@ function startElapsed(wrap, already = 0) {
   const span = document.createElement("span");
   span.className = "msg-took";
   span.title = "still writing";
-  if (row.childNodes.length) row.append(" · ");
   row.append(span);
   startTick(span, humanMs, already);
 }
@@ -5447,14 +5460,15 @@ function waitedLine(box = messages, already = 0) {
       if (!wrap.classList.contains("live")) return;
       const ran = stopTick(label);
       wrap.classList.remove("live");
-      label.textContent = waitedWords({ latency: ran }) || "waited";
+      phrase(label, "waited", { latency: ran }, "latency");
     },
     // The measured figure, which replaces the page's own. Removes the line
     // entirely if there turned out to be nothing to report.
     settle(timing) {
       this.freeze();
-      const words = waitedWords(timing);
-      if (words) label.textContent = words;
+      // Nothing measurable to report means there was nothing worth a line -
+      // the same test the words used to be, now asked of the elements.
+      if (timingSpans(timing, "latency").length) phrase(label, "waited", timing, "latency");
       else wrap.remove();
     },
   };
@@ -5536,13 +5550,13 @@ function thinkingLine(box = messages, already = 0) {
       this.sealed = true;
       const ran = stopTick(label);
       wrap.classList.remove("live");
-      label.textContent = thoughtWords({ think: ran });
+      phrase(label, "thought", { think: ran }, "think");
       body.hidden = true;
       draw();
     },
     settle(timing) {
       this.seal();
-      label.textContent = thoughtWords(timing);
+      phrase(label, "thought", timing, "think");
     },
   };
 }
@@ -5724,8 +5738,13 @@ function line(role, text, box = messages, stamp = "", full = "", at = null) {
   if (stamp) {
     const time = document.createElement("div");
     time.className = "msg-time";
-    time.textContent = stamp;
-    if (full) time.title = full;
+    // In a span of its own rather than as loose text on the row, so the
+    // appearance tab can take the clock away and leave the timing beside it.
+    const when = document.createElement("span");
+    when.className = "msg-when";
+    when.textContent = stamp;
+    if (full) when.title = full;
+    time.appendChild(when);
     wrap.appendChild(time);
   }
   const stick = nearBottom(box);
