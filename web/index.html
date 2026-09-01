@@ -10374,6 +10374,13 @@ const F = {
   verify_provider: document.getElementById("s-verify-provider"),
   verify_model: document.getElementById("s-verify-model"),
   theme: document.getElementById("s-theme"),
+  ui_timing: document.getElementById("s-ui-timing"),
+  ui_tokrate: document.getElementById("s-ui-tokrate"),
+  ui_stamps: document.getElementById("s-ui-stamps"),
+  ui_waiting: document.getElementById("s-ui-waiting"),
+  ui_thinking: document.getElementById("s-ui-thinking"),
+  ui_gaps: document.getElementById("s-ui-gaps"),
+  ui_tools: document.getElementById("s-ui-tools"),
   voice_provider: document.getElementById("s-voice-provider"),
   voice_model: document.getElementById("s-voice-model"),
   speak_provider: document.getElementById("s-speak-provider"),
@@ -10739,10 +10746,44 @@ async function loadSettings() {
   accentValue = known.accent || "";
   applyAccent(accentValue);
   syncAccentBoxes();
+  drawChatUi(known);
   // The five model fields are drawn as buttons over their (hidden) select and
   // input - see installModelPickers - so whatever was just loaded into those
   // has to be repainted onto the face of them.
   paintModelFields();
+}
+
+// ---- the appearance tab's switches ----------------------------------------
+// What the seven boxes are currently saying, in the shape /settings takes.
+// Read off the boxes rather than kept beside them: they ARE the setting while
+// the tab is open, which is what lets the preview below be the same code path
+// as the save.
+function readChatUi() {
+  const out = { ui_tools: F.ui_tools.value };
+  for (const key of UI_KEYS) out[key] = F[key].checked;
+  return out;
+}
+
+// Applied the instant anything is ticked, before any save. Judging one of
+// these means seeing the conversation without it - there is nothing else to
+// go on - so waiting for a round trip would make the tab useless. Saving is
+// still what makes it stick; this is only what makes it visible.
+function previewChatUi() {
+  applyChatUi(readChatUi());
+  // Tokens per second means nothing with the durations already gone, so its
+  // row greys out rather than sitting there as a switch that does nothing.
+  document.getElementById("s-ui-tokrate-row")
+          .classList.toggle("moot", !F.ui_timing.checked);
+}
+
+for (const key of UI_KEYS) F[key].addEventListener("change", previewChatUi);
+F.ui_tools.addEventListener("change", previewChatUi);
+
+// Put the saved answers on the boxes and make them true of the page.
+function drawChatUi(values) {
+  for (const key of UI_KEYS) F[key].checked = !values || values[key] !== false;
+  F.ui_tools.value = (values && values.ui_tools) === "quiet" ? "quiet" : "full";
+  previewChatUi();
 }
 
 // The two boxes follow the colour that is actually live, so "the theme's own"
@@ -11408,6 +11449,10 @@ document.getElementById("set-save").addEventListener("click", async () => {
     verify_model: F.verify_model.value,
     theme: F.theme.value,
     accent: accentValue,
+    // The appearance tab's seven switches. Already in force on the page - they
+    // preview as they are ticked - so this is what makes them survive a
+    // reload, and what carries them to every other window on the server.
+    ...readChatUi(),
     temperature: Number(F.temperature.value),
     max_repeats: Number(F.max_repeats.value),
     safety_validation: F.safety_validation.checked,
@@ -11491,6 +11536,7 @@ document.getElementById("set-save").addEventListener("click", async () => {
   accentValue = known.accent || "";
   applyAccent(accentValue);
   syncAccentBoxes();
+  drawChatUi(known);
   // Same reason as the sliders above, and one more of its own: the listener is
   // running right now off the settings it last saw, so a word or a timing
   // changed here has to reach it without waiting for a reload.
@@ -16079,6 +16125,9 @@ if (window.visualViewport) {
   settings.then((s) => {
     applyTheme(s.values.theme);
     applyAccent(s.values.accent || "");
+    // The authority, replacing the localStorage mirror the page opened on -
+    // and the thing that carries a switch flipped on another device over here.
+    applyChatUi(s.values);
   }).catch(() => { /* keep whatever localStorage gave us */ });
 
   // The wave worth waiting for. A window that has just opened has no chat yet,
