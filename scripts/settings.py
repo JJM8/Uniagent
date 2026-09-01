@@ -26,6 +26,11 @@ SETTINGS_FILE = Path(__file__).parent.parent / "settings.json"
 # take "not a colour" and leave the page with an unstyled accent.
 ACCENT_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+# The two shapes a run of tool calls can be drawn in. See "ui_tools" in
+# DEFAULTS: "full" is a row per call, "quiet" is one folded "working..." line
+# that opens to them.
+UI_TOOL_MODES = ("full", "quiet")
+
 # Settings that name a provider - validated against provider.available() below,
 # not just checked for type, so nothing can end up pointed at a provider with
 # no working credentials.
