@@ -443,6 +443,49 @@ commentary:
     # anything else is turned into the --accent-h/s/l variables by the page, so
     # one value moves every accent tone at once.
     "accent": "",
+    # ---- what the transcript shows ----------------------------------------
+    # UI only, all of it. The page keeps a running turn honest by drawing every
+    # phase of it - the wait, the thinking, each call, and how long each took -
+    # which is exactly what you want while you are watching one work and
+    # exactly what you do not want when you are reading one back. These seven
+    # are that choice, made once on the appearance tab and applied by CSS on
+    # <html>, so turning one off changes the transcript already on screen
+    # rather than only the next one drawn.
+    #
+    # All default to on: the page as it has always looked is what someone who
+    # has never opened this tab should get.
+    #
+    # How long a phase took - "3.7s" under a reply, and the figure on the
+    # right of every tool row. Off, the thinking and waiting lines keep their
+    # words ("thought", "waited") and lose only the number.
+    "ui_timing": True,
+    # The "- 40 tok/s" half of a duration. Separate from ui_timing because the
+    # two answer different questions: how long you waited is about this turn,
+    # how fast it wrote is about the model, and plenty of people want the first
+    # without the second. Meaningless with ui_timing off, and the tab greys it
+    # out there rather than pretending otherwise.
+    "ui_tokrate": True,
+    # The clock time under a message - "14:32".
+    "ui_stamps": True,
+    # The "waiting... / waited for" line above a reply. The one stretch of a
+    # turn with nothing to show for it; worth keeping on a local model, noise
+    # on a fast hosted one.
+    "ui_waiting": True,
+    # The model's own reasoning, in its block above the reply.
+    "ui_thinking": True,
+    # The "3h 20m later" rule drawn between two messages a long time apart.
+    "ui_gaps": True,
+    # Tool calls, in one of two shapes:
+    #
+    #   "full"   every call its own row, as it has always been.
+    #   "quiet"  a run of consecutive calls folded into ONE line - "working..."
+    #            while they are running, "3 tool calls" once they are done -
+    #            that opens to the rows themselves on a click.
+    #
+    # "quiet" is for reading a conversation rather than supervising one: the
+    # rows are all still there, one click away, but a turn that made nine calls
+    # is one line of transcript instead of nine.
+    "ui_tools": "full",
     # Hold this key in the web page to talk (the mic button next to the input
     # does the same thing, and is what you use on a phone). A KeyboardEvent
     # code - "F9", "ScrollLock", "KeyM"...
@@ -662,6 +705,10 @@ def _valid(key, value):
         # Same bool exclusion as the thresholds above, for the same reason.
         return (isinstance(value, int) and not isinstance(value, bool)
                 and REPEATS_RANGE[0] <= value <= REPEATS_RANGE[1])
+    if key == "ui_tools":
+        return value in UI_TOOL_MODES
+    if key == "theme":
+        return value in ("dark", "light")
     if key == "wake_provider":
         return value in ("oww", "stt")
     if key == "wake_threshold":
