@@ -15,6 +15,7 @@ import re
 import threading
 from pathlib import Path
 
+import filecache
 import provider
 
 SETTINGS_FILE = Path(__file__).parent.parent / "settings.json"
@@ -611,6 +612,13 @@ Reply with the words to be spoken and nothing else.""",
 
 _write_lock = threading.Lock()
 
+# load()'s answer, kept per `fallback` flag and stamped with the filecache
+# signature it was built at. Nothing here expires on a timer: the signature
+# moves the moment any file this is derived from is seen to change, including
+# one changed by the cron watcher or arriving over Syncthing, so the memo is
+# exactly as fresh as the files underneath it.
+_held = {}
+
 
 def _valid(key, value):
     """False if `value` must be refused for `key`: an unknown key, the wrong
@@ -756,10 +764,23 @@ def load(fallback=True):
     healing on the way into a write would quietly make a temporary fallback
     into the user's permanent choice - deleting a provider and then changing
     the temperature would silently move which provider you chat on."""
+    # Answered from memory when nothing underneath has changed. This is called
+    # on the way into every turn, and several times over - and the file itself
+    # was never the cost. Parsing settings.json is 0.4ms; the rest was _valid()
+    # re-deriving the whole provider list to check the keys that name one,
+    # which reached the wires files 126 times per call. See filecache.
+    stamp = filecache.signature()
+    held = _held.get(fallback)
+    if held is not None and held[0] == stamp:
+        # A copy, because callers mutate what they are given - save() builds
+        # its write on top of this very dict - and handing out the cached
+        # object would let one caller's edit become everybody's settings.
+        return dict(held[1])
+
     data = dict(DEFAULTS)
     try:
-        stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        stored = json.loads(filecache.text(SETTINGS_FILE, default="{}"))
+    except json.JSONDecodeError:
         stored = {}
     if isinstance(stored, dict):
         for key, value in stored.items():
@@ -768,7 +789,8 @@ def load(fallback=True):
     if fallback:
         _heal_providers(data)
     _heal_models(data)
-    return data
+    _held[fallback] = (stamp, data)
+    return dict(data)
 
 
 def get(key):
@@ -793,6 +815,9 @@ def save(updates):
                 data[key] = value
         _heal_models(data)
         SETTINGS_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        # Written by us, so don't wait for the cache to notice - forget()
+        # bumps the signature, which drops the memo above with it.
+        filecache.forget(SETTINGS_FILE)
         for key, provider_key in MODEL_PAIRS.items():
             now = (data.get(key), data.get(provider_key))
             if all(now) and now != before.get(key):
