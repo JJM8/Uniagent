@@ -31,6 +31,8 @@ import time
 from hashlib import sha256
 from pathlib import Path
 
+import filecache
+
 ENV_FILE = Path(__file__).parent.parent / ".env"
 ENV_NAME = "UNIAGENT_PASSWORD"
 
@@ -65,10 +67,11 @@ _fails = {}  # ip -> [consecutive failures, locked-until timestamp]
 
 
 def _read_env():
-    try:
-        return ENV_FILE.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
+    # Through filecache rather than off disk. Every authenticated request
+    # validates its cookie, which signs with the password, which lands here -
+    # so this was a full read of .env on every request the page makes, polls
+    # included, not just on turns.
+    return filecache.text(ENV_FILE).splitlines()
 
 
 def _generate():
@@ -80,6 +83,9 @@ def _generate():
     lines = _read_env()
     lines.append(ENV_NAME + "=" + value)
     ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Written by us - don't wait for the cache to re-check before the password
+    # we just generated can be read back.
+    filecache.forget(ENV_FILE)
     # The file already held every API key; now it holds the door key too.
     try:
         ENV_FILE.chmod(0o600)
@@ -96,10 +102,11 @@ def _generate():
 
 def password():
     """The current password, generating and saving one if .env hasn't got a
-    non-blank UNIAGENT_PASSWORD. Read fresh from the file every time rather
-    than cached, so editing .env and restarting is the whole update story - and
-    so a password changed by hand takes effect without a code path that could
-    still be holding the old one."""
+    non-blank UNIAGENT_PASSWORD. Never held in a variable of its own, so
+    editing .env is the whole update story and no code path can still be
+    holding the old one. The read goes through filecache, which re-checks the
+    file's mtime at most once a second - so a password changed by hand takes
+    effect a second later rather than instantly, and still without a restart."""
     for line in _read_env():
         line = line.strip()
         if line.startswith(ENV_NAME + "="):
