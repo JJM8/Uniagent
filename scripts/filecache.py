@@ -178,15 +178,63 @@ def forget(path=None):
         _generation += 1
 
 
-def poll():
-    """Re-check every held file now, off the request path.
+_hooks = []
 
-    The background refresher calls this on its own thread, which is what keeps
-    even the once-a-second stat from ever landing on a request: by the time a
-    turn asks, the check has already happened and the answer is in memory."""
+
+def on_poll(fn):
+    """Register something to be re-checked on the refresher's thread.
+
+    For state that is derived from disk but is not itself a file - the tool
+    snapshot, the context and memory blocks. Each is handed no arguments and
+    its return value is ignored; it is called for the refresh it does. An
+    exception in one is swallowed, because a refresher that dies takes every
+    other hook's freshness down with it."""
+    _hooks.append(fn)
+
+
+def poll():
+    """Re-check every held file and every registered hook, now.
+
+    Called by the refresher on its own thread, which is the whole point: by
+    the time a turn asks for any of this, the check has already happened and
+    the answer is sitting in memory, so the request path does no file I/O at
+    all rather than merely doing it once a second."""
     for path in list(_held):
         with _lock:
             held = _held.get(path)
             if held is not None:
                 held[0] = 0.0      # expire it, so text() below re-checks
         text(path)
+    for fn in list(_hooks):
+        try:
+            fn()
+        except Exception:
+            pass
+
+
+_refresher = None
+
+
+def start(interval=RECHECK):
+    """Begin re-checking in the background. Safe to call more than once.
+
+    A daemon thread, so it never holds the process open at exit. Deliberately
+    NOT started on import: the CLI and the cron watcher are short-lived enough
+    that the on-demand expiry is the whole story for them, and a background
+    thread in a one-shot process is just something else to shut down."""
+    global _refresher
+    if _refresher is not None and _refresher.is_alive():
+        return _refresher
+
+    def loop():
+        while True:
+            time.sleep(interval)
+            try:
+                poll()
+            except Exception:
+                pass    # a refresher that dies stops refreshing everything
+
+    _refresher = threading.Thread(target=loop, daemon=True,
+                                  name="filecache-refresher")
+    _refresher.start()
+    return _refresher
