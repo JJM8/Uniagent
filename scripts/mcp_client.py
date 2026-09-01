@@ -37,6 +37,8 @@ from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import filecache
+
 CONFIG_FILE = Path(__file__).parent.parent / "mcp.json"
 LOG_FILE = Path(__file__).parent.parent / "mcp_servers.log"
 
@@ -77,9 +79,14 @@ def _config():
     _claude_subscription's mcp_servers={}, strict_mcp_config=True), and
     Uniagent reaching into that file here would undo the same decision from
     the other side. Uniagent's servers are Uniagent's to declare."""
+    # Through filecache. This is reached from flattened(), which load_tools()
+    # calls on EVERY call - and load_tools() runs three times per pass of the
+    # tool loop, so this was three opens of mcp.json per message. A server
+    # added to the file still appears within a second, which is what the
+    # "added after startup still gets dialled" path below needs.
     try:
-        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        data = json.loads(filecache.text(CONFIG_FILE, default="{}"))
+    except json.JSONDecodeError:
         return {}
     servers = data.get("servers") if isinstance(data, dict) else None
     return servers if isinstance(servers, dict) else {}
