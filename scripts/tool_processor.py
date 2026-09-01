@@ -145,8 +145,15 @@ def tool_dirs():
     return dirs
 
 
-def load_tools():
-    """(Re)read every .py in tools/ and its subfolders. Safe to call again.
+def _scan_files():
+    """(Re)read every .py in tools/ and its subfolders, plus the skills, and
+    hand back (tools, broken). The expensive half of load_tools(), and the
+    half that only changes when a FILE does - which is what lets load_tools()
+    below skip it entirely most of the time.
+
+    Deliberately does NOT include the MCP tools. Those come from a live
+    catalogue rather than from disk (see load_tools), so they cannot be part
+    of anything keyed on file mtimes.
 
     The scan fills LOCAL lists and only assigns them to TOOLS/BROKEN once it
     is finished. That matters because the server is threaded (one thread per
@@ -159,7 +166,6 @@ def load_tools():
     that outright with 400 "Tool names must be unique." Assigning finished
     lists in one step means a reader sees the whole old list or the whole new
     one, never a half-merged one."""
-    global TOOLS, BROKEN
     importlib.invalidate_caches()  # so brand new files are noticed
     tools = []
     broken = []
@@ -208,27 +214,7 @@ def load_tools():
     taken = {t["name"] for t in tools}
     tools.extend(s for s in find_skills() if s["name"] not in taken)
 
-    # Then the MCP servers that mcp.json asked to be flattened, which arrive
-    # already in this shape - name, description, schema and a run() that calls
-    # the server. They come from a live catalogue rather than from disk, so
-    # they are the one kind of tool here whose membership can change without
-    # any file changing: a server that drops out simply stops contributing on
-    # the next turn, which is why this is rebuilt every turn like the rest.
-    #
-    # Reading the cache only, never dialling - see flattened(). A failure here
-    # is reported like a broken tool file instead of being raised: MCP going
-    # wrong must not cost the model the twenty tools that have nothing to do
-    # with it.
-    if mcp_client is not None:
-        try:
-            taken = {t["name"] for t in tools}
-            tools.extend(e for e in mcp_client.flattened() if e["name"] not in taken)
-        except Exception as e:
-            broken.append("MCP tools - " + type(e).__name__ + ": " + str(e))
-
-    # Published only now that both lists are complete.
-    TOOLS = tools
-    BROKEN = broken
+    return tools, broken
 
 
 def parallel_safe(name):
