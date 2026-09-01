@@ -1273,10 +1273,18 @@ class App:
             # answering (see main.CONTINUE), so it joins the queue the way a
             # message does - as None, which main.turn reads as "carry on from
             # where the last one stopped".
+            # Asked before the rewind, which takes the marker carrying it away:
+            # the model this picks up is the one the chat says now, which after
+            # a failure is very often not the one that failed. See
+            # main.model_switch().
+            switch = main.model_switch(main.current)
             why = main.continue_from(main.current)
             if why is not None:
                 self.console.commit(md.render(why) + [""])
                 return
+            note = main.switch_note(switch)
+            if note:
+                self.console.commit(md.render(note) + [""])
             with self.cv:
                 self.pending.append(None)
                 self.cv.notify_all()
