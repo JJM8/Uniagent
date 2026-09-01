@@ -6094,12 +6094,7 @@ function render(text, box = messages, vals = null, stamps = null, live = null,
   // the turn: a reply that merely quotes "[stopped by the user]" is a finished
   // reply. Before renderPending(), so the marker is still the box's last line.
   if (box === messages) {
-    const marker = isMarkerTurn(turns[turns.length - 1]) ? turns[turns.length - 1] : null;
-    continuable = marker ? box.lastElementChild : null;
-    // The pair it failed on rides on the marker itself, so it survives a
-    // reload the same way the marker does - see main.append_error().
-    continuableModel = marker && marker.provider && marker.model
-      ? { provider: marker.provider, model: marker.model } : null;
+    continuable = isMarkerTurn(turns[turns.length - 1]) ? box.lastElementChild : null;
     showContinue();
   }
 
