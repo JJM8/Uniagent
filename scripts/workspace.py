@@ -44,6 +44,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import filecache
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import provider
@@ -470,6 +472,9 @@ def get(wsid=None):
     return _cache[key]
 
 
+_described = {}
+
+
 def describe(wsid=None):
     """The workspace part of the system prompt: which device and directory this
     chat is working in, which others it can be moved to, and how to move.
@@ -485,6 +490,16 @@ def describe(wsid=None):
     was a choice. They cost a line each, and they are what turns "another
     device" from a thing the user has to explain into a thing the model can
     simply do."""
+    # This is built into the system prompt on every pass of every turn, and
+    # its answer only moves when the workspace list in .env does - which
+    # filecache's signature already tracks. Memoised on that rather than on a
+    # timer, so an edited workspace is described correctly on the very next
+    # turn and an unedited one costs a dict lookup.
+    stamp = filecache.signature()
+    held = _described.get(wsid)
+    if held is not None and held[0] == stamp:
+        return held[1]
+
     ws = get(wsid)
     lines = []
     if ws.is_remote:
@@ -514,4 +529,6 @@ def describe(wsid=None):
             "to that device's workspace with the workspace tool (its id as the "
             "`id` argument) and carry on there, rather than answering from "
             "where you happen to be. Only these exist; you cannot invent one.")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    _described[wsid] = (stamp, text)
+    return text
