@@ -131,7 +131,7 @@ _error = None        # whichever file last failed to parse, as a sentence
 # --- reading the two files --------------------------------------------------
 
 def _read(path):
-    """One JSON object off disk, cached on mtime, never raising.
+    """One JSON object off disk, cached on its bytes, never raising.
 
     Never raising is the point. This is asked for on every settings page load
     and on the way into every single request, and a stray comma in a file the
