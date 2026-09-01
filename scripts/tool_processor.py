@@ -4,6 +4,7 @@ import ast
 import importlib
 import inspect
 import json
+import os
 import pkgutil
 import re
 import shutil
@@ -242,27 +243,36 @@ def _fingerprint():
     A file that vanishes simply stops appearing here, so a deleted or disabled
     tool moves the fingerprint exactly as an edited one does."""
     marks = []
-    for d in tool_dirs():
-        try:
-            entries = sorted(d.glob("*.py"))
-        except OSError:
-            continue
-        for path in entries:
+    for root, keep in ((TOOLS_DIR, ".py"), (SKILLS_DIR, "SKILL.md")):
+        stack = [root]
+        while stack:
             try:
-                st = path.stat()
+                entries = list(os.scandir(stack.pop()))
             except OSError:
-                continue
-            marks.append((str(path), st.st_mtime_ns, st.st_size))
-    try:
-        skills = sorted(SKILLS_DIR.rglob("SKILL.md"))
-    except OSError:
-        skills = []
-    for path in skills:
-        try:
-            st = path.stat()
-        except OSError:
-            continue
-        marks.append((str(path), st.st_mtime_ns, st.st_size))
+                continue    # folder missing or unreadable - nothing to fingerprint
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        # __pycache__ holds a .pyc per tool that is rewritten
+                        # whenever one is imported, so walking it would make
+                        # the fingerprint change every time it was acted on -
+                        # and it is most of what is under tools/ by file count.
+                        if entry.name != "__pycache__":
+                            stack.append(entry.path)
+                        continue
+                    if keep == ".py":
+                        if not entry.name.endswith(".py"):
+                            continue
+                    elif entry.name != "SKILL.md":
+                        continue
+                    st = entry.stat()
+                except OSError:
+                    continue
+                marks.append((entry.path, st.st_mtime_ns, st.st_size))
+    # Sorted so the tuple is stable: scandir returns directory order, which is
+    # arbitrary and can change as files are added, and an unsorted fingerprint
+    # would read as "something moved" when nothing had.
+    marks.sort()
     return tuple(marks)
 
 
