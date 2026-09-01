@@ -5109,6 +5109,60 @@ function stampParts(at) {
           d.toLocaleString(), at];
 }
 
+// ---- what the transcript shows ------------------------------------------
+// The appearance tab's seven switches, mirrored here. Everything below is
+// always MEASURED and always BUILT - these only decide what gets painted -
+// which is what lets a switch move the conversation already on screen instead
+// of only the next one drawn, and what lets it be switched back with nothing
+// lost.
+//
+// Almost all of it is CSS (see the data-ui-* rules at the end of the
+// stylesheet): the flags go on <html> and the rules there do the hiding. The
+// two exceptions are the live counters, which repaint their own text ten times
+// a second and so read the flag directly, and the tool fold, which is a
+// different shape of DOM rather than the same shape with pieces hidden.
+//
+// Mirrored into localStorage for the same reason the theme is: the settings
+// fetch and the first transcript draw are two requests racing each other, and
+// a page that painted every timing figure and then took them away a moment
+// later would be worse than not offering the choice.
+const UI_KEYS = ["ui_timing", "ui_tokrate", "ui_stamps", "ui_waiting",
+                 "ui_thinking", "ui_gaps"];
+const chatUi = { ui_timing: true, ui_tokrate: true, ui_stamps: true,
+                 ui_waiting: true, ui_thinking: true, ui_gaps: true,
+                 ui_tools: "full" };
+
+// "off" is the only value ever set, and only ever for a switch that is
+// actually off - so a page whose settings have not landed, or one served by a
+// server that has never heard of any of this, draws the lot exactly as it
+// always did.
+function applyChatUi(values) {
+  const root = document.documentElement;
+  for (const key of UI_KEYS) {
+    // Absent means "on": an older server sends no such key, and the answer to
+    // "should I hide this" without an instruction is no.
+    if (values && key in values) chatUi[key] = values[key] !== false;
+    root.dataset[key.replace(/_(.)/g, (_, c) => c.toUpperCase())] =
+      chatUi[key] ? "on" : "off";
+  }
+  if (values && values.ui_tools) {
+    chatUi.ui_tools = values.ui_tools === "quiet" ? "quiet" : "full";
+  }
+  root.dataset.uiTools = chatUi.ui_tools;
+  try {
+    localStorage.setItem("uniagent-chat-ui", JSON.stringify(chatUi));
+  } catch (e) { /* private mode */ }
+  // The transcript on screen was built under the OLD answer to the tool
+  // question, which is the one thing here that CSS cannot restate - a fold is
+  // a different tree, not the same tree with things hidden. Everything else
+  // has already changed by the time this line runs.
+  refoldTools(messages);
+}
+
+try {
+  applyChatUi(JSON.parse(localStorage.getItem("uniagent-chat-ui") || "{}"));
+} catch (e) { applyChatUi(null); }
+
 // ---- timing -------------------------------------------------------------
 // The reading half of scripts/timing.py, which is where all of this is
 // measured and where what the numbers mean is written down at length. Kept as
