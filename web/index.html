@@ -1862,7 +1862,9 @@
   }
   #continue-btn:hover { background: var(--accent-a12); opacity: 1; }
   #continue-btn:disabled { opacity: 0.5; cursor: default; }
-  .user .msg-time { text-align: right; }
+  /* The row is a flex line now (see .msg-time), so it is justified rather
+     than text-aligned - text-align has nothing to act on here. */
+  .user .msg-time { justify-content: flex-end; }
 
   #status {
     display: flex;
