@@ -1708,6 +1708,13 @@ def continue_from(c):
     tail telling the model to wait for the user is swapped for the one telling
     it to go on, since the user asking to continue is that instruction arriving.
 
+    The retry runs on whatever the chat's model says NOW, not on whatever the
+    failed request went to: turn() re-reads the settings file at the top of
+    every turn, so a provider swapped in the corner after an overload is the
+    provider this picks up. Nothing here has to arrange that - but the change
+    is worth saying out loud, so call model_switch() BEFORE this and report its
+    answer; the marker holding it is one of the turns popped below.
+
     Refuses a chat that is mid-turn: the running turn holds the history in
     memory and rewrites the file after every step, so anything written here
     would be overwritten a moment later and the continue would silently do
