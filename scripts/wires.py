@@ -91,6 +91,8 @@ import re
 import threading
 from pathlib import Path
 
+import filecache
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # Shipped, tracked in git, replaced wholesale by an update. Never written to
@@ -136,16 +138,22 @@ def _read(path):
     user is editing must not take every provider down with it - it reports
     itself through error() and leaves the last good answer in place."""
     global _error
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
+    # The bytes come from filecache, which stats at most once a second rather
+    # than once per call. That matters because specs() is called from inside
+    # several loops - a single settings.load() reached here 126 times - and on
+    # a spinning disk each of those stats cost ~86us.
+    body = filecache.text(path, default=None)
+    if body is None:
         _cache.pop(path, None)
         return {}
     hit = _cache.get(path)
-    if hit and hit[0] == mtime:
+    # Keyed on the text itself rather than an mtime we no longer read. Python
+    # compares identical strings by identity first, so the usual case - the
+    # same object straight back out of filecache - costs a pointer compare.
+    if hit and hit[0] == body:
         return hit[1]
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(body)
     except (OSError, json.JSONDecodeError) as e:
         _error = path.name + " could not be read: " + str(e)
         return hit[1] if hit else {}
@@ -154,7 +162,7 @@ def _read(path):
         return hit[1] if hit else {}
     data = {k: v for k, v in data.items()
             if isinstance(v, dict) and not k.startswith("_")}
-    _cache[path] = (mtime, data)
+    _cache[path] = (body, data)
     _error = None
     return data
 
