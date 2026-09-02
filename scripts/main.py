@@ -2217,7 +2217,8 @@ def _log_validation(call, safe, reason, checked=True):
 # The assembled context, and the file list + mtimes it was built from. Rebuilt
 # only when something under context/ actually changes, so the tool loop can ask
 # for it on every iteration without re-reading the whole folder each time.
-_context_cache = {"key": None, "value": []}
+# profile id -> {"key": mtimes it was built from, "value": the parts}
+_context_cache = {}
 _context_lock = threading.Lock()
 
 
@@ -2305,8 +2306,8 @@ def context_pairs(profile=None):
     return out
 
 
-def context_text():
-    """One {"label", "text"} dict per context/ file, in context_files() order -
+def context_text(profile=None):
+    """One {"label", "text"} dict per context file this profile loads, in context_files() order -
     label is the file's own name (e.g. "1system.md"), so injection_breakdown()
     (and the panel it feeds) can show real file names instead of folding
     everything into one blob named after this function. Each file's text still
@@ -2320,32 +2321,45 @@ def context_text():
     # once a second - see filecache.due(). Everything after this point is
     # unchanged, so a file that HAS changed is still picked up exactly as it
     # was, just on the next check rather than this instant.
+    # Cached PER PROFILE, not once for the app. Two chats on two profiles run
+    # their turns in parallel (the turn slot is per agent - see Agent), so one
+    # shared slot here would have each of them evicting the other's context on
+    # every turn and rebuilding it from disk. The due() key is per profile for
+    # the same reason: the once-a-second gate has to be about "has THIS
+    # profile's context been rechecked recently", not about whether any
+    # profile has.
+    pid = profile or profiles.default_id()
     with _context_lock:
-        if _context_cache["key"] is not None and not filecache.due("context_text"):
-            return _context_cache["value"]
+        held = _context_cache.get(pid)
+    if held is not None and held["key"] is not None \
+            and not filecache.due("context_text:" + str(pid)):
+        return held["value"]
 
-    files = context_files()
+    pairs = context_pairs(profile)
     try:
-        key = tuple((str(p), p.stat().st_mtime_ns) for p in files)
+        key = tuple((str(p), p.stat().st_mtime_ns) for p, _ in pairs)
     except OSError:
         key = None  # a file vanished mid-scan - rebuild and let the read below skip it
 
     with _context_lock:
-        if key is not None and key == _context_cache["key"]:
-            return _context_cache["value"]
+        held = _context_cache.get(pid)
+        if key is not None and held is not None and key == held["key"]:
+            return held["value"]
 
         parts = []
-        for p in files:
+        for p, label_root in pairs:
             try:
                 body = p.read_text(encoding="utf-8").strip()
             except OSError:
                 continue  # unreadable or just deleted - the rest of the context still stands
             if body:
-                name = p.relative_to(CONTEXT).as_posix()
+                try:
+                    name = p.relative_to(label_root).as_posix()
+                except ValueError:
+                    name = p.name
                 parts.append({"label": name, "text": "--- " + name + " ---\n" + body})
 
-        _context_cache["key"] = key
-        _context_cache["value"] = parts
+        _context_cache[pid] = {"key": key, "value": parts}
         return parts
 
 
