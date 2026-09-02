@@ -995,15 +995,31 @@ def _run(call, chat_id=None, workspace_id=None, profile=None):
     but its result is discarded, because the context it would be reported
     through is already dead (see turnctx.guard)."""
     turnctx.check()
-    t = _find(call["tool"])
-    if t is None:
+    t = _find(call["tool"], profile)
+    if t is None and not denied(call["tool"], profile):
         # Might be one the agent just wrote seconds ago, so re-read the folder
         # and retry. force, because "the tool is missing" is exactly the case
         # the recheck window would get wrong: the file may have appeared since
         # the last fingerprint, and waiting out the window here would fail a
         # call for a tool that is sitting right there on disk.
+        #
+        # Skipped for a tool the PROFILE denied: that one is on disk, loaded
+        # and working, so rescanning would find it again and find it denied
+        # again - a full re-import of tools/ to reach the same answer.
         load_tools(force=True)
-        t = _find(call["tool"])
+        t = _find(call["tool"], profile)
+    if t is None and denied(call["tool"], profile):
+        # Named as a refusal, not as an absence. "There is no tool called
+        # terminal" would be a lie the model has every reason to argue with -
+        # it may well have used it earlier in this same chat, before the
+        # profile changed - and it would go looking for the file. Saying which
+        # profile stopped it, and that a person can change that, is the true
+        # answer and the one the model can do something useful with.
+        return ("ERROR: " + call["tool"] + " is not available in the \""
+                + profiles.label(profile) + "\" profile. This is a deliberate "
+                "restriction, not a missing tool - do not try to work around "
+                "it. Say what you would need it for, and that switching "
+                "profile (/profile) would allow it.")
     if t is None and call["tool"].startswith(getattr(mcp_client, "NAME_PREFIX", "mcp__")):
         # An MCP tool that was attached earlier in this conversation and isn't
         # now: its server has dropped out since. Say that, instead of listing
@@ -1016,7 +1032,9 @@ def _run(call, chat_id=None, workspace_id=None, profile=None):
                   "with action \"reconnect\" and server \"" + server
                 + "\", then try this again.")
     if t is None:
-        known = ", ".join(x["name"] for x in TOOLS)
+        # What THIS profile has, not what is loaded: listing tools the caller
+        # is not allowed would have the model immediately try one of them.
+        known = ", ".join(x["name"] for x in visible(profile))
         msg = "ERROR: there is no tool called " + call["tool"] + ". You have: " + known
         if BROKEN:
             msg += ". These tool files are broken and were skipped: " + "; ".join(BROKEN)
@@ -1037,6 +1055,11 @@ def _run(call, chat_id=None, workspace_id=None, profile=None):
         # have no business with the filesystem.
         if "workspace" in params:
             args["workspace"] = workspace.get(workspace_id)
+        # And the same again for the profile, which read_skill declares: a
+        # skill the profile denies must not be readable through the one tool
+        # whose whole job is handing back skill text.
+        if "profile" in params:
+            args["profile"] = profile
     except (TypeError, ValueError):
         pass  # can't read the signature - just call it the plain way
     try:
