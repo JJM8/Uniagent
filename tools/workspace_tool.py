@@ -34,6 +34,7 @@ if _SCRIPTS not in sys.path:
 
 import command_processor
 import main
+import workspace
 
 NAME = "workspace"
 
