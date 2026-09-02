@@ -3970,6 +3970,36 @@ def _piper_voices(setup):
     return out
 
 
+def _piper_warm(onnx, text):
+    """`text` read out by the warm piper server, or None if there isn't one.
+
+    None means "not available, use the CLI" and is the answer for every kind of
+    absence: nothing listening, a version that doesn't speak this, a socket that
+    dies mid-sentence. None of those is worth failing a reply over when the
+    one-shot path below still works, so this never raises - it declines.
+
+    A server that IS there and says no is different: a 4xx/5xx means the voice
+    file or the text was refused, and retrying the identical request through the
+    CLI would only produce the same refusal a second and a half later. That
+    comes back as a RuntimeError with whatever the server said.
+
+    The connect timeout is short because the only address tried is loopback: a
+    server on this machine either answers the SYN at once or is not running.
+    The read timeout is the ordinary TTS one - a cold voice really does take a
+    second or two to load, and that wait is the thing being paid once instead
+    of every time."""
+    port = os.environ.get("UNIAGENT_PIPER_PORT", "8322")
+    try:
+        r = requests.post("http://127.0.0.1:" + port + "/speak",
+                          json={"model": onnx, "text": text},
+                          timeout=(0.25, TTS_TIMEOUT))
+    except requests.RequestException:
+        return None
+    if r.status_code >= 400:
+        raise RuntimeError("piper failed: " + r.text[:300])
+    return r.content or None
+
+
 def _speak_piper(p, model, text, voice, instructions):
     """Piper's local neural TTS, run as a subprocess. No API key, no network -
     the audio is made on this machine by the piper binary.
