@@ -4607,7 +4607,7 @@ class Handler(BaseHTTPRequestHandler):
         create that id names nothing on disk, _chat_named returns None, and
         the picker 404s on every chat that has not been typed into yet - which
         is exactly the chat somebody is most likely to be setting up. The
-        folder appears here, from set_profile's own _write_settings.
+        folder appears here, from set_profile's own _write_settings."""
         c = _chat_of(self, create=True, mint=True)
         if c is None:
             self._send("no such chat", code=404)
