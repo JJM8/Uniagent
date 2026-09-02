@@ -22,6 +22,7 @@ import settings
 import timing
 import tokens
 import tool_processor
+import profiles
 import tool_validation
 import turnctx
 import usage as usage_log  # `usage` is a local in run()'s loop - see there
@@ -2242,18 +2243,66 @@ def _context_order(name):
     return (0, int(digits), name[len(digits):].lower()) if digits else (1, 0, name.lower())
 
 
-def context_files():
-    """Every context file, in the order they go into the prompt: by the number
-    each name starts with, then alphabetically. Numbering a file is how you say
-    where it goes - 1system.md, 2memory.md, 10tools.md - and anything
-    unnumbered follows them."""
-    if not CONTEXT.is_dir():
-        return []
-    found = [p for p in CONTEXT.rglob("*")
-             if p.is_file() and p.suffix.lower() in CONTEXT_SUFFIXES
-             and not p.name.startswith(".")]
-    return sorted(found, key=lambda p: [_context_order(s)
-                                        for s in p.relative_to(CONTEXT).parts])
+def _root_files(root):
+    """The context files one root contributes, with the root each is labelled
+    against. A FOLDER contributes every .md/.txt under it, in _context_order;
+    a FILE contributes just itself.
+
+    Both shapes are here because a profile may name either (see profiles.py):
+    a folder is the normal way to hold a prompt that has grown into several
+    numbered pieces, and a single file is the normal way to add one persona
+    page on top of a folder somebody else's profile also uses. Returned as
+    (path, label-root) pairs so the caller can name a file by its position
+    INSIDE its own root - "1system.md", not the whole path from the project
+    root - which is what keeps the injected "--- name ---" headers identical
+    to what they were before profiles existed."""
+    if root.is_dir():
+        found = [p for p in root.rglob("*")
+                 if p.is_file() and p.suffix.lower() in CONTEXT_SUFFIXES
+                 and not p.name.startswith(".")]
+        found.sort(key=lambda p: [_context_order(s)
+                                  for s in p.relative_to(root).parts])
+        return [(p, root) for p in found]
+    if root.is_file() and root.suffix.lower() in CONTEXT_SUFFIXES:
+        return [(root, root.parent)]
+    return []
+
+
+def context_files(profile=None):
+    """Every context file for `profile`, in the order they go into the prompt.
+
+    Within one folder: by the number each name starts with, then
+    alphabetically. Numbering a file is how you say where it goes -
+    1system.md, 2memory.md, 10tools.md - and anything unnumbered follows them.
+
+    ACROSS roots, the profile's own list order wins and the numbering does NOT
+    reach between them. Two roots each holding a 1system.md is a normal thing
+    to want (a shared base plus a profile's own additions), and merging their
+    numbers would interleave two prompts that were each written to be read in
+    order. So the roots concatenate; only inside one does the number sort.
+
+    profile=None means the default profile, which out of the box is context/ -
+    exactly what this returned before profiles existed."""
+    out = []
+    for root in profiles.roots(profile, "context"):
+        for pair in _root_files(root):
+            if pair[0] not in [p for p, _ in out]:
+                out.append(pair)
+    return [p for p, _ in out]
+
+
+def context_pairs(profile=None):
+    """context_files() with each file's label root alongside it - what
+    context_text() needs to name a file and what the /context editor needs to
+    know which folder to write an edit back into."""
+    out = []
+    seen = set()
+    for root in profiles.roots(profile, "context"):
+        for path, label_root in _root_files(root):
+            if path not in seen:
+                seen.add(path)
+                out.append((path, label_root))
+    return out
 
 
 def context_text():
