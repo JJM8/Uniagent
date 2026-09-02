@@ -43,9 +43,13 @@ NAME = "workspace"
 # tool_processor.tools_schema). The INSTRUCTIONS are only ever seen if something
 # goes and reads this file, which for a schema'd tool the model has no reason to
 # do. So everything it must know to move correctly - above all what a workspace
-# IS - has to be here, in the few hundred characters it is actually given. The
-# system prompt carries the other half: which workspaces exist right now, with
-# their devices and paths (see workspace.describe).
+# IS - has to be here, in the few hundred characters it is actually given.
+#
+# The other half - which workspaces exist right now, with their devices and
+# paths - is appended by live_description() below rather than living in the
+# system prompt as it used to. Same bytes for every chat, so it does not cost
+# the prompt cache anything; see workspace.catalogue for why that matters and
+# for how the model finds out which workspace it is actually in.
 #
 # It is long for a description and it earns that, because this is the one tool
 # whose effect lands on every OTHER tool. What was trimmed out of it was only
@@ -95,9 +99,12 @@ context/, skills/, tools/) is NOT reachable, because that folder is on the
 Uniagent machine. To read or write a memory from elsewhere, move to the Uniagent
 folder workspace, do it, and move back.
 
-You are told at the top of every turn which workspace this chat is in and which
-others exist - names, devices and paths. Read that before assuming where you
-are. If you are unsure, call this with no id and it lists them.
+Which workspaces EXIST is listed in this tool's own description, every turn.
+Which one this chat is in right now is NOT: you are told that when it changes -
+the user moving this chat says so in the conversation, and a move you make comes
+back as your own result - and a chat nobody has moved is in the default
+workspace, on the machine running Uniagent. If you are unsure where you are,
+call this with no id before you touch a file; it says which one you are in.
 
 WHEN TO MOVE. Whenever the user means another one of their devices, move there
 first and then do the work. "What's in my downloads on the phone", "check the
@@ -144,6 +151,22 @@ SCHEMA = {
     },
     "required": [],
 }
+
+
+def live_description():
+    """DESCRIPTION with the workspaces that currently exist appended.
+
+    A hook rather than a constant because DESCRIPTION is captured once, when
+    tool_processor scans this folder, and that scan only reruns when a file
+    under tools/ moves - so a workspace added on the settings page would not
+    show up here until something unrelated was edited. This is called per
+    request instead. See tool_processor._described.
+
+    workspace.catalogue() is memoised on the filecache signature, so the cost
+    per call is a dict lookup, and it deliberately says nothing about which
+    workspace THIS chat is in - that would make the schema differ per chat,
+    and the schemas are the head of the cached prefix."""
+    return DESCRIPTION + workspace.catalogue()
 
 
 def run(id=None):
