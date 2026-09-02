@@ -203,6 +203,20 @@ def _scan_files():
                     # tools_schema()'s native-calling list, same as it always
                     # was invisible to anything but the prose prompt.
                     "schema": getattr(m, "SCHEMA", None),
+                    # Optional too: a tool whose description has to be built
+                    # from something outside its own file declares
+                    # live_description(), and tools_schema() calls it instead
+                    # of reading DESCRIPTION. DESCRIPTION is captured HERE, at
+                    # scan time, and the scan only reruns when a file under
+                    # tools/ or skills/ moves - so a description that depends
+                    # on config elsewhere (.env, a settings file) would sit
+                    # stale until something unrelated was edited. The hook is
+                    # called per request instead, which is where "dynamic"
+                    # actually has to happen. It must return the same bytes
+                    # for every chat: schemas are the head of the cached
+                    # prefix, so a per-chat description would cost every chat
+                    # its cached prompt. workspace_tool is the one user.
+                    "live_description": getattr(m, "live_description", None),
                     # Also optional, and declared the same way - in the tool's
                     # own file, not in a config somewhere else. See
                     # parallel_safe() for what it means and who reads it.
@@ -803,6 +817,23 @@ def _gemini_schema(node):
     return out
 
 
+def _described(t):
+    """One tool's description as it goes on the wire - its live_description()
+    if it declared one, else the DESCRIPTION captured at scan time.
+
+    Failing back to the static text rather than raising: a hook that throws is
+    a bug in one tool file, and it must not be able to take down the schema
+    array that every OTHER tool is in. The tool still goes out, just with the
+    description it had before the hook was added."""
+    hook = t.get("live_description")
+    if hook is None:
+        return t["description"]
+    try:
+        return hook()
+    except Exception:
+        return t["description"]
+
+
 def tools_schema(shape="openai", profile=None):
     """Every tool that has a SCHEMA, as a provider-shaped `tools` array for
     native tool-calling - what a "tool_syntax": "native" turn sends alongside
@@ -829,18 +860,19 @@ def tools_schema(shape="openai", profile=None):
     Rescanned fresh via load_tools() every call, same as prompt_text() - a
     tool the agent just wrote shows up in the very next turn."""
     usable = [t for t in visible(profile) if t.get("schema")]
+    described = {t["name"]: _described(t) for t in usable}
     if shape == "anthropic":
-        return [{"name": t["name"], "description": t["description"],
+        return [{"name": t["name"], "description": described[t["name"]],
                   "input_schema": t["schema"]} for t in usable]
     if shape == "bedrock":
-        return [{"toolSpec": {"name": t["name"], "description": t["description"],
+        return [{"toolSpec": {"name": t["name"], "description": described[t["name"]],
                               "inputSchema": {"json": t["schema"]}}} for t in usable]
     if shape == "gemini":
         return [{"functionDeclarations": [
-            {"name": t["name"], "description": t["description"],
+            {"name": t["name"], "description": described[t["name"]],
              "parameters": _gemini_schema(t["schema"])} for t in usable]}]
     return [{"type": "function", "function": {"name": t["name"],
-              "description": t["description"], "parameters": t["schema"]}}
+              "description": described[t["name"]], "parameters": t["schema"]}}
             for t in usable]
 
 
