@@ -1389,6 +1389,20 @@ def _status(c):
                 "temperature": default["temperature"],
                 "pinned": False, "temperature_pinned": False,
                 "approval": None,
+                # Both sent as "" - "following the default" - rather than left
+                # out, and that difference is the whole fix. The page only
+                # writes a picker when the key is PRESENT and different
+                # (`s.profile !== undefined && ...` in pollStatus), so omitting
+                # them meant a brand-new chat never updated either picker: it
+                # kept showing whatever the chat you just left was on, and a
+                # new chat opened from a bare-profile chat claimed to be bare.
+                # A chat that does not exist cannot have pinned anything, so ""
+                # is not merely safe here, it is the true answer - and the
+                # picker already draws "" as the default profile's own name.
+                # switchChat awaits pollStatus, so this lands on the same round
+                # trip as the transcript rather than up to a poll later.
+                "profile": "",
+                "workspace": "",
                 "safety_threshold": tool_validation.threshold_for(chosen=default),
                 "safety_own": False}
     cur = c.id
