@@ -2267,6 +2267,59 @@ def _icon_url(path):
     return "/image?path=" + quote(path)
 
 
+def _profiles(chat=None):
+    """What the settings page's profiles tab draws: every profile, what each
+    one loads, and how many tools and skills it can actually reach.
+
+    The counts are resolved against the tools currently LOADED, not against
+    the names in the file, which is the useful direction: an allow list naming
+    a tool that has since been switched off (the tools tab moves those into
+    disabled/, so they are not loaded at all) contributes nothing, and saying
+    "4 of 13" makes that visible where echoing the list back would not.
+
+    `unknown` is the other half of the same problem - names listed that match
+    nothing loadable. A typo and a switched-off tool look identical from the
+    file, and both are worth a warning rather than silence."""
+    inventory = tool_processor.visible(None)
+    known = {"tool": {t["name"] for t in inventory
+                      if tool_processor.kind_of(t) == "tool"},
+             "skill": {t["name"] for t in inventory
+                       if tool_processor.kind_of(t) == "skill"}}
+    data = profiles.load()
+    out = []
+    for pid in profiles.ids():
+        resolved = profiles.resolve(pid)
+        allowed = tool_processor.visible(pid)
+        out.append({
+            "id": pid,
+            "label": profiles.label(pid),
+            "description": resolved.get("description", ""),
+            "context": [str(r.relative_to(profiles.ROOT)) for r
+                        in profiles.roots(pid, "context")],
+            "memories": [str(r.relative_to(profiles.ROOT)) for r
+                         in profiles.roots(pid, "memories")],
+            "tools": resolved.get("tools") or {},
+            "skills": resolved.get("skills") or {},
+            "counts": {
+                "tools": len([t for t in allowed
+                              if tool_processor.kind_of(t) == "tool"]),
+                "skills": len([t for t in allowed
+                               if tool_processor.kind_of(t) == "skill"]),
+            },
+            "unknown": [{"kind": k, "name": n} for k, n
+                        in profiles.unknown_names(pid, known)],
+        })
+    return {"default": data["default"],
+            "profiles": out,
+            "totals": {"tools": len(known["tool"]), "skills": len(known["skill"])},
+            # Which profile the chat that asked is on, and whether that is its
+            # own choice or the default it is merely following - the picker
+            # needs to tell "pinned to chat" from "following the default"
+            # apart, exactly as the model picker does.
+            "chat": (chat.route if chat else None),
+            "chat_profile": (chat.profile if chat else None)}
+
+
 def _context_path(rel, kind="context", profile=None):
     """The editable file `rel` names, or None if it points anywhere else.
     Resolved and re-checked against its own folder, so a name like
