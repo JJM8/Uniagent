@@ -515,19 +515,22 @@ def describe(wsid=None, tools=None):
     place = [t for t in ("read_file", "write_file", "edit_file", "ask_file")
              if tools is None or t in tools]
     has_terminal = tools is None or "terminal" in tools
+    named = ("the file tool (" if len(place) == 1 else "the file tools (") \
+        + ", ".join(place) + ")"
     if place and has_terminal:
-        which = "the file tools (" + ", ".join(place) + ") and the terminal"
+        which, plural = named + " and the terminal", True
     elif place:
-        which = "the file tools (" + ", ".join(place) + ")"
+        which, plural = named, len(place) > 1
     elif has_terminal:
-        which = "the terminal"
+        which, plural = "the terminal", False
     else:
-        which = "any tool that touches files"
-    verb = "work" if (place and has_terminal) or len(place) > 1 else "works"
+        which, plural = "any tool that touches files", False
+    verb = "work" if plural else "works"
+    runs = "RUN ON" if plural else "RUNS ON"
     if ws.is_remote:
         lines.append(
             "Workspace: this chat is working in " + ws.name + " - " + which
-            + " RUN ON "
+            + " " + runs + " "
             + ws.ssh + " over ssh, rooted at " + ws.root + ". Relative paths, and "
             "anything the terminal does, are on THAT device - not on the machine "
             "running Uniagent, and Uniagent's own folder (memories/, context/, "
