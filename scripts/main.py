@@ -2313,12 +2313,7 @@ def context_files(profile=None):
 
     profile=None means the default profile, which out of the box is context/ -
     exactly what this returned before profiles existed."""
-    out = []
-    for root in profiles.roots(profile, "context"):
-        for pair in _root_files(root):
-            if pair[0] not in [p for p, _ in out]:
-                out.append(pair)
-    return [p for p, _ in out]
+    return [p for p, _ in context_pairs(profile)]
 
 
 def context_pairs(profile=None):
