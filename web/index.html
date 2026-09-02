@@ -9788,26 +9788,46 @@ function sayCapture(samples, ms, loud) {
   if (sayMs >= SAY_MAX_CLIP_MS) sayFinish();
 }
 
-// The wake phrase off the front of a transcript, if it is there at all. The
-// model fires at the END of the phrase, so what gets recorded after it is
-// normally just the message - but a drawn-out "heeey computer" leaves a tail,
-// and a transcriber will write it down. Taken off when the whole phrase is
-// there and left alone when it is not: a half-matched phrase is a sentence with
-// its first word eaten, which is worse than a sentence with one word too many.
+// The wake phrase, and anything that came before it, off the front of a
+// transcript.
+//
+// This cuts THROUGH the phrase rather than merely off the front of it, and
+// that is a consequence of the backdating in wakeWoke: a session no longer
+// begins at the instant the phrase was noticed, it begins shortly BEFORE the
+// phrase was spoken. So the clip reliably opens with a moment of whatever the
+// room was doing first - a stray half-word, the tail of another sentence - and
+// a front-anchored match would find nothing behind it and send the lot.
+//
+// The EARLIEST match across all the configured phrases wins, not the first
+// phrase in the list that matches anywhere. Two reasons, and they pull the
+// same way. The phrase that woke it is by construction near the start, so the
+// earliest match is the real one; and a wake word said again inside the
+// message ("console, open the console tab") must not eat the message up to its
+// second mention, which is exactly what taking the last match would do.
+//
+// Nothing found is left alone, which is the one case that got worse rather
+// than better: a phrase the transcriber wrote down differently ("consul") now
+// leaves the run-up in front of it on the message instead of leaving nothing.
+// Better that than cutting at a guess - a half-matched phrase is a sentence
+// with its first word eaten, which is worse than one with a word too many.
 function withoutPhrase(text) {
   const phrases = wakeCfg.wake_provider === "stt"
     ? (wakeCfg.wake_words || [])
     : [wakeLabelOf(wakeCfg.wake_model || "")];
   const gap = "[\\s,.:;!?-]*";
+  let at = -1, end = -1;
   for (const phrase of phrases) {
     if (!phrase) continue;
     const words = phrase.trim().split(/\s+/)
       .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    const stripped = text.replace(
-      new RegExp("^" + gap + words.join(gap) + gap, "i"), "").trim();
-    if (stripped !== text.trim()) return stripped || text;
+    const m = new RegExp(words.join(gap) + gap, "i").exec(text);
+    if (m && (at < 0 || m.index < at)) { at = m.index; end = m.index + m[0].length; }
   }
-  return text;
+  // The phrase and nothing else is somebody who didn't get to the rest of it.
+  // That comes back as "", which is sayFinish's cue to send nothing at all -
+  // where returning the untouched text instead, as this used to, sent the wake
+  // word itself to the model as a message.
+  return at >= 0 ? text.slice(end).trim() : text;
 }
 
 // The phrase (or, in "stt" mode, list of phrases) the ear button is listening
