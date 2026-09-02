@@ -14640,6 +14640,244 @@ document.getElementById("ws-add").addEventListener("click", () => {
 // the list is never done casually - see ctxDirty, which is what stops a
 // background refresh from eating half-typed text.
 
+// ---- the profiles tab ------------------------------------------------------
+// Each profile is which Uniagent a chat is talking to: its context, its
+// memories, and which tools and skills it can reach. The tab edits the whole
+// of profiles.json and saves it in one go - whole-file rather than field by
+// field, because deleting a profile and removing one name from an allow list
+// are the two edits most likely to be made here and neither can be expressed
+// as a merge.
+//
+// The prompt files themselves are NOT edited here. They are ordinary context
+// files and the context tab already edits those properly, with the ordering
+// and the sizes; duplicating that here would be a second, worse editor for
+// the same files.
+
+const profList = document.getElementById("prof-list");
+const profDefaultSel = document.getElementById("prof-default");
+const profStatus = document.getElementById("prof-status");
+// What the server last told us, and what the boxes are editing. Kept apart so
+// "reload from disk" has something to go back to.
+let profState = { default: "", profiles: [], totals: { tools: 0, skills: 0 } };
+
+// A list field - context paths, allow lists - is one name per line in the box,
+// because that is the shape people actually type and it needs no punctuation
+// to be got right. "*" on its own stays the string "*", which is what the file
+// means by "everything".
+const profLines = (v) =>
+  v === "*" ? "*" : (Array.isArray(v) ? v.join("\n") : (v || ""));
+const profParse = (text) => {
+  const trimmed = (text || "").trim();
+  if (trimmed === "*") return "*";
+  const lines = trimmed.split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines;
+};
+
+async function loadProfiles() {
+  try {
+    profState = await (await fetch("/profiles" + chatQuery("?"))).json();
+  } catch (e) {
+    profStatus.textContent = "could not read the profiles (" + e + ").";
+    return;
+  }
+  drawProfiles();
+  // The chat bar's picker is drawn from the same data, so a rename or a new
+  // profile shows up there without waiting for a poll.
+  loadChatProfiles();
+  // And the context tab's "whose context" dropdown.
+  drawCtxProfileChoices();
+}
+
+function drawProfiles() {
+  profStatus.textContent = "";
+  profDefaultSel.innerHTML = "";
+  for (const p of profState.profiles) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.label + " (" + p.id + ")";
+    profDefaultSel.appendChild(o);
+  }
+  profDefaultSel.value = profState.default;
+
+  profList.innerHTML = "";
+  for (const p of profState.profiles) {
+    const card = document.createElement("div");
+    card.className = "prof-card" + (p.id === profState.default ? " is-default" : "");
+    card.dataset.id = p.id;
+
+    const head = document.createElement("div");
+    head.className = "prof-head";
+    const id = document.createElement("span");
+    id.className = "prof-id";
+    id.textContent = p.id;
+    const counts = document.createElement("span");
+    counts.className = "prof-counts";
+    counts.textContent = p.counts.tools + " of " + profState.totals.tools
+      + " tools, " + p.counts.skills + " of " + profState.totals.skills + " skills";
+    head.append(id, counts);
+
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.className = "ghost danger prof-drop";
+    drop.textContent = "delete";
+    // The default is not deletable from here. Deleting it would leave every
+    // chat that follows it pointing at nothing, and the fix - choose another
+    // default first - is one click away and says what it is doing.
+    drop.disabled = p.id === profState.default;
+    drop.title = drop.disabled
+      ? "this is the default - choose another default first"
+      : "remove this profile";
+    head.appendChild(drop);
+
+    const grid = document.createElement("div");
+    grid.className = "prof-grid";
+
+    const field = (labelText, value, hint, multiline) => {
+      const wrap = document.createElement("div");
+      const l = document.createElement("label");
+      l.textContent = labelText;
+      const box = document.createElement(multiline ? "textarea" : "input");
+      if (!multiline) box.type = "text";
+      box.value = value;
+      wrap.append(l, box);
+      if (hint) {
+        const h = document.createElement("div");
+        h.className = "prof-hint";
+        h.textContent = hint;
+        wrap.appendChild(h);
+      }
+      return [wrap, box];
+    };
+
+    const [labelWrap, labelBox] = field("name", p.label, "", false);
+    const [descWrap, descBox] = field("description", p.description, "", false);
+    const [ctxWrap, ctxBox] = field(
+      "context", profLines(p.context),
+      "folders or single .md/.txt files, one per line, relative to the "
+      + "Uniagent folder. A folder contributes everything in it, in number "
+      + "order.", true);
+    const [memWrap, memBox] = field(
+      "memories", profLines(p.memories),
+      "same again. New memories are written to the first folder listed.", true);
+    const [toolAllowWrap, toolAllowBox] = field(
+      "tools allowed", profLines(p.tools.allow === undefined ? "*" : p.tools.allow),
+      "* for all of them, or one name per line.", true);
+    const [toolDenyWrap, toolDenyBox] = field(
+      "tools denied", profLines(p.tools.deny || []),
+      "applied last - deny beats allow.", true);
+    const [skillAllowWrap, skillAllowBox] = field(
+      "skills allowed", profLines(p.skills.allow === undefined ? "*" : p.skills.allow),
+      "* for all of them, or one name per line.", true);
+    const [skillDenyWrap, skillDenyBox] = field(
+      "skills denied", profLines(p.skills.deny || []),
+      "applied last - deny beats allow.", true);
+
+    grid.append(labelWrap, descWrap, ctxWrap, memWrap,
+                toolAllowWrap, toolDenyWrap, skillAllowWrap, skillDenyWrap);
+    card.append(head, grid);
+
+    // read_skill is the only route to any skill at all, so a profile without
+    // it has no skills whatever its skill list says. Not forbidden - a
+    // deliberately tool-less profile is a real thing to want - but said out
+    // loud, because the symptom otherwise is a skills list that does nothing.
+    const allowNow = profParse(toolAllowBox.value);
+    const denyNow = profParse(toolDenyBox.value);
+    const hasReadSkill = (allowNow === "*" || allowNow.includes("read_skill"))
+      && !(Array.isArray(denyNow) && denyNow.includes("read_skill"));
+    if (!hasReadSkill) {
+      const warn = document.createElement("div");
+      warn.className = "prof-warn";
+      warn.textContent = "without read_skill this profile cannot open any "
+        + "skill, whatever its skills list says.";
+      card.appendChild(warn);
+    }
+
+    if (p.unknown.length) {
+      const warn = document.createElement("div");
+      warn.className = "prof-warn";
+      warn.textContent = "listed but not loadable: "
+        + p.unknown.map((u) => u.name + " (" + u.kind + ")").join(", ")
+        + " - a typo, or switched off on the tools tab.";
+      card.appendChild(warn);
+    }
+
+    // Read back off the boxes at save time rather than tracked per keystroke:
+    // the whole file goes at once, so there is nothing to keep in step.
+    card.collect = () => ({
+      label: labelBox.value.trim(),
+      description: descBox.value.trim(),
+      context: profParse(ctxBox.value),
+      memories: profParse(memBox.value),
+      tools: { allow: profParse(toolAllowBox.value),
+               deny: profParse(toolDenyBox.value) },
+      skills: { allow: profParse(skillAllowBox.value),
+                deny: profParse(skillDenyBox.value) },
+    });
+
+    drop.addEventListener("click", () => {
+      if (!confirm("Remove the \"" + p.id + "\" profile?\n\nIts context and "
+                   + "memories folders are left on disk untouched - only the "
+                   + "entry goes. Chats on it fall back to the default.")) return;
+      card.remove();
+      saveProfiles();
+    });
+
+    profList.appendChild(card);
+  }
+}
+
+async function saveProfiles() {
+  const out = {};
+  for (const card of profList.querySelectorAll(".prof-card")) {
+    out[card.dataset.id] = card.collect();
+  }
+  let chosen = profDefaultSel.value;
+  if (!(chosen in out)) chosen = Object.keys(out)[0] || "";
+  const r = await fetch("/profiles" + chatQuery("?"), {
+    method: "POST",
+    body: JSON.stringify({ default: chosen, profiles: out }),
+  });
+  if (!r.ok) {
+    profStatus.textContent = await r.text();
+    return;
+  }
+  profState = await r.json();
+  drawProfiles();
+  loadChatProfiles();
+  drawCtxProfileChoices();
+  profStatus.textContent = "saved.";
+  flash("profiles saved - each chat picks these up on its next turn.");
+}
+
+document.getElementById("prof-save").addEventListener("click", saveProfiles);
+document.getElementById("prof-reload").addEventListener("click", loadProfiles);
+document.getElementById("prof-default").addEventListener("change", saveProfiles);
+document.getElementById("prof-add").addEventListener("click", () => {
+  const id = (prompt("A short id for the new profile - letters, digits, "
+                     + "dashes. This is what /profile takes.") || "").trim();
+  if (!id) return;
+  if (profState.profiles.some((p) => p.id === id)) {
+    profStatus.textContent = "there is already a profile called " + id + ".";
+    return;
+  }
+  // Started from the CURRENT DEFAULT rather than from blank. A profile with no
+  // context loads no prompt at all, which is never what anyone wants from
+  // "add"; copying the default gives something that works and can then be
+  // narrowed.
+  const base = profState.profiles.find((p) => p.id === profState.default)
+    || { context: ["context"], memories: ["memories"],
+         tools: { allow: "*" }, skills: { allow: "*" } };
+  profState.profiles.push({
+    id, label: id, description: "",
+    context: base.context, memories: base.memories,
+    tools: JSON.parse(JSON.stringify(base.tools)),
+    skills: JSON.parse(JSON.stringify(base.skills)),
+    counts: { tools: 0, skills: 0 }, unknown: [],
+  });
+  drawProfiles();
+  saveProfiles();
+});
+
 const ctxList = document.getElementById("ctx-list");
 const ctxMemList = document.getElementById("ctx-mem-list");
 const ctxPresets = document.getElementById("ctx-presets");
