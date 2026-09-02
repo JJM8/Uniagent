@@ -7104,6 +7104,12 @@ async function pollStatus() {
     if (s.workspace !== undefined && (s.workspace || "") !== (lastWorkspace || "")) {
       setWorkspaceQuickValue(s.workspace || "");
     }
+    // And the profile, for the same reason again: it belongs to the loaded
+    // chat, so the picker has to follow a chat switch and not only a
+    // deliberate change here.
+    if (s.profile !== undefined && (s.profile || "") !== (lastProfile || "")) {
+      setProfileQuickValue(s.profile || "");
+    }
     // And the safety level, for the third time and the same reason: it
     // belongs to the loaded chat, so the corner has to follow a chat switch
     // and not only a deliberate change here.
@@ -12528,6 +12534,108 @@ function setWorkspaceQuickValue(id) {
   }
   drawWorkspaceBar();
 }
+
+// ---- the chat's profile picker ---------------------------------------------
+// Which named profile THIS chat runs on: which context files are injected, and
+// which tools and skills it may reach. Per chat, deliberately - two windows
+// side by side can be two different agents, which is the whole point of the
+// feature and the reason there is no global "current profile" anywhere.
+//
+// The list comes from /profiles (the same one the settings tab writes) and the
+// current value from /status, which the page already polls - so switching
+// chats moves this with it, exactly as the model and workspace pickers do.
+
+const profBar = document.getElementById("prof-bar");
+const profQuick = document.getElementById("prof-quick");
+
+// Every profile, by id, so the note beside the dropdown can be written with no
+// round trip.
+let profById = new Map();
+// What the loaded chat's profile is, last seen from /status ("" = following
+// the default).
+let lastProfile = "";
+// The default's id, so "" can be drawn as the name it actually resolves to
+// rather than as a blank.
+let profDefault = "";
+
+function drawProfileBar() {
+  const chosen = profById.get(profQuick.value);
+  // "Limited" means this profile cannot reach everything - which is the state
+  // worth colouring. A profile that allows the lot is the normal case and
+  // should look like nothing in particular.
+  const limited = !!(chosen && profTotals
+    && (chosen.counts.tools < profTotals.tools
+        || chosen.counts.skills < profTotals.skills));
+  profBar.classList.toggle("limited", limited);
+  profQuick.title = chosen
+    ? (chosen.description || "which context and which tools this chat has")
+      + " - " + chosen.counts.tools + " tools, " + chosen.counts.skills + " skills"
+    : "which context and which tools this chat has";
+}
+
+let profTotals = null;
+
+async function loadChatProfiles() {
+  let info;
+  try {
+    info = await (await fetch("/profiles?chat=" + encodeURIComponent(chatId || ""))).json();
+  } catch (e) {
+    return;  // server away - leave whatever is there
+  }
+  profById = new Map(info.profiles.map((p) => [p.id, p]));
+  profDefault = info.default;
+  profTotals = info.totals;
+  profQuick.innerHTML = "";
+  for (const p of info.profiles) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.label + (p.id === info.default ? " (default)" : "");
+    profQuick.appendChild(o);
+  }
+  setProfileQuickValue(lastProfile);
+}
+
+// Called from pollStatus with the loaded chat's profile ("" = default).
+function setProfileQuickValue(id) {
+  lastProfile = id || "";
+  if (document.activeElement === profQuick) return;  // don't yank it mid-choice
+  // Either the chat is pinned to one, or it follows the default - and a chat
+  // pointing at a profile since deleted also shows the default, because that
+  // is what its next turn will actually run on. The server falls back the
+  // same way (profiles.resolve), so the picker cannot claim otherwise.
+  profQuick.value = (id && profById.has(id)) ? id : profDefault;
+  drawProfileBar();
+}
+
+profQuick.addEventListener("change", async () => {
+  const id = profQuick.value;
+  const chosen = profById.get(id);
+  const previous = lastProfile;
+  // Pinning it explicitly even when the chosen one IS the default: "follow
+  // whatever the default becomes" and "be this one" are different intentions,
+  // and picking a name from a list is the second. /profile default is how you
+  // ask for the first.
+  try {
+    const r = await fetch("/profiles/select?chat=" + encodeURIComponent(await requireChat()), {
+      method: "POST",
+      body: JSON.stringify({ profile: id }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const info = await r.json();
+    profById = new Map(info.profiles.map((p) => [p.id, p]));
+    profTotals = info.totals;
+    setProfileQuickValue(info.chat_profile || "");
+    flash("this chat is now " + (chosen ? chosen.label : id)
+          + " - " + (chosen ? chosen.counts.tools : "?") + " tools, "
+          + (chosen ? chosen.counts.skills : "?") + " skills. "
+          + "Takes effect on the next turn.");
+  } catch (e) {
+    // Put it back to what the server still says it is, rather than leaving the
+    // box showing a switch that did not happen.
+    setProfileQuickValue(previous);
+    flash("could not switch profile (" + e + ").");
+  }
+});
 
 wsQuick.addEventListener("change", async () => {
   const id = wsQuick.value;
