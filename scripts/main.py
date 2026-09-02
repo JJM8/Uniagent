@@ -523,7 +523,13 @@ class Agent:
     # cron run's chat has one - it is what the chats panel labels the job's
     # older runs by, under its "history" toggle, since a run folder is numbered
     # and a number is not a thing anyone can pick a run out by.
+    # profile is which named profile this agent runs on (profiles.json) - its
+    # context, its memories, and which tools and skills it may reach. None
+    # means "follow profiles.json's own default", which is what every chat
+    # written before profiles existed says, so nothing on disk changes
+    # behaviour because the feature was added.
     SETTINGS_KEYS = ("provider", "model", "temperature", "name", "started", "safety",
+                     "profile",
                      "safety_threshold", "safety_extra",
                      "safety_prompt", "input_tokens",
                      "output_tokens", "tokens_model", "tokens_at",
@@ -559,6 +565,11 @@ class Agent:
         # provider/model string would.
         self.temperature = temperature if temperature is not None else cfg.get("temperature")
         self.name = cfg.get("name")
+        # Not resolved to a real profile here. None has to stay None on the
+        # way back out to save(), or every chat ever opened gets whatever the
+        # default was that day written permanently into its settings.json -
+        # the same phantom-pin bug the provider/model comment above describes.
+        self.profile = cfg.get("profile")
         self.started = cfg.get("started")
         # Not "or" either - False is a real value here ("never check this
         # agent's calls") and must not fall through to the global default the
