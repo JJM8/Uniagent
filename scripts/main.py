@@ -630,6 +630,11 @@ class Agent:
         self.model = cfg.get("model")
         self.temperature = cfg.get("temperature")
         self.name = cfg.get("name")
+        # Re-read for the same reason as the model: /profile writes the chat's
+        # .json, and the very next turn has to be assembled against the new
+        # profile - different context, different tools - with nothing
+        # restarted and without disturbing any other chat.
+        self.profile = cfg.get("profile")
         self.started = cfg.get("started")
         self.safety = cfg.get("safety")
         self.safety_threshold = cfg.get("safety_threshold")
@@ -665,6 +670,18 @@ class Agent:
         self.provider = None
         self.model = None
         self._write_settings()
+
+    def set_profile(self, pid):
+        """Put this chat on a named profile, or back on the default with None.
+
+        Per chat, deliberately, and NOT a module global: turns in different
+        chats run in parallel and two browser windows can be showing two of
+        them, so a global "current profile" would have one window silently
+        re-pointing the other mid-turn. Same reasoning as /model, which has
+        always acted on the one chat it was given."""
+        self.profile = pid or None
+        self._write_settings()
+        return self.profile
 
     def set_last_prompt_client(self, client_id):
         """Record which browser tab's prompt this chat is now answering, so
