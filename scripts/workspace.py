@@ -475,6 +475,54 @@ def get(wsid=None):
 _described = {}
 
 
+# Memo for catalogue() below, on the same filecache signature describe() uses.
+_catalogued = {}
+
+
+def catalogue():
+    """Every workspace that exists, with its device and path - and NOTHING
+    about which one any particular chat is in.
+
+    That omission is the entire point. This text goes into the workspace
+    TOOL'S schema description (see tools/workspace_tool.live_description), and
+    a tool schema is the first thing on the wire: provider.wire_segments
+    renders "the tool schemas first", and the cache breakpoint at the end of
+    the system message covers them, so caching is a prefix match starting
+    here. Text that varied per chat would give every chat a different prefix
+    and cost each of them the whole cached prompt on every turn. The list of
+    workspaces is the same for everybody, so it costs nothing to carry and
+    changes only when .env does - dynamic in that it is read live, frozen in
+    that every chat sees the identical bytes.
+
+    Which workspace a chat is in reaches the model the other way, through the
+    conversation rather than the prompt: main.workspace_note writes a turn
+    when the user moves it, and a move the model makes comes back as its own
+    tool result. A chat that has never moved is in the default workspace,
+    which is the machine Uniagent runs on - the safe assumption, and the one
+    the model would make anyway."""
+    stamp = filecache.signature()
+    held = _catalogued.get("text")
+    if held is not None and held[0] == stamp:
+        return held[1]
+    lines = []
+    for w in provider.workspaces():
+        lines.append("  " + w["id"] + " (" + w["name"] + " - "
+                     + (("on " + w["ssh"] + ", ") if w["ssh"] else "")
+                     + w["path"] + ")")
+    text = ("\n\nTHE WORKSPACES THAT EXIST (a workspace is a device and a "
+            "directory; only these exist and you cannot invent one):\n"
+            + "\n".join(lines)
+            + "\nThis list does NOT say which one this chat is in. You are "
+            "told that when it changes - the user moving this chat says so in "
+            "the conversation, and a move you make comes back as your own "
+            "result - and a chat that has never been moved is in the default "
+            "workspace, on the machine running Uniagent. If you are not sure "
+            "where you are, call this tool with no id and it will tell you "
+            "before you touch a file.")
+    _catalogued["text"] = (stamp, text)
+    return text
+
+
 def describe(wsid=None, tools=None):
     """The workspace part of the system prompt: which device and directory this
     chat is working in, which others it can be moved to, and how to move.
