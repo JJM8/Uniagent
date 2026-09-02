@@ -627,6 +627,17 @@ def _tools_text(profile=None):
     unreachable through dispatch (see its own comment); listing it would be
     advertising the wrong description for the tool that actually runs."""
     usable = visible(profile)
+    # Nothing reachable at all - a profile whose allow lists are empty. Every
+    # word below is instructions for using something ("load one with
+    # read_skill", "your TOOLS are attached as real schemas", "call several at
+    # once"), and none of it is true here: there are no skills to read, no
+    # schemas on the request, and nothing to batch. Sent anyway it was ~2KB
+    # per turn telling a deliberately empty profile how to use capabilities it
+    # was set up not to have, which is worse than useless - it invites the
+    # model to try them. injection_breakdown drops an empty part, so the
+    # section simply does not appear.
+    if not usable:
+        return ""
     named = {t["name"] for t in usable if t.get("schema")}
     listed = "Skills:\n"
     for t in usable:
