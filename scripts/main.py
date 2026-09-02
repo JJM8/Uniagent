@@ -4361,7 +4361,8 @@ def turn(c, text, on_text=None, approve=_approve, provider_name=None, model=None
                         on_call_delta=turnctx.guard(ctx, on_call_delta),
                         pinned=c.pinned, safety=safe_on, safety_prompt=safe_prompt,
                         safety_threshold=safe_level, safety_extra=safe_extra,
-                        inject=inject, workspace_id=c.workspace)
+                        inject=inject, workspace_id=c.workspace,
+                        profile=c.profile)
         # run() syncs as it goes, so the file is usually already this - but it
         # is the RETURNED history that's authoritative, and leaving the two to
         # agree by convention means anything run() adds after its last sync
