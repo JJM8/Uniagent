@@ -124,11 +124,19 @@ def _ask(agent, turns, prompt):
     message (this chat's pins included), same tools array -
     so the cached prefix is hit instead of rebuilt."""
     provider_name, model, temperature = agent.models()
+    # The agent's own profile, not the default: this request has to be
+    # byte-identical to a normal turn of this chat up to the last message, or
+    # the cached prefix this whole function is shaped around is missed. A chat
+    # on the "chat" profile compacted against the "assistant" one would send a
+    # different system message AND a different tools array, which is the
+    # entire prefix.
     messages = [{"role": "system",
-                 "content": main.system_text(provider_name, model, agent.pinned)}]
+                 "content": main.system_text(provider_name, model, agent.pinned,
+                                             profile=agent.profile)}]
     messages += turns
     messages.append({"role": "user", "content": prompt})
-    tools = tool_processor.tools_schema(tool_processor.shape_for(provider_name))
+    tools = tool_processor.tools_schema(tool_processor.shape_for(provider_name),
+                                        agent.profile)
     # tool_call is left None on purpose: with tools declared the model COULD
     # answer with a call instead of prose, and ignoring it means such a reply
     # comes back as empty text - which compact() below refuses to swap in,
