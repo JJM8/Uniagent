@@ -2653,10 +2653,25 @@ def injection_breakdown(provider_name, model, pinned=None, workspace_id=None,
     # profile that has no terminal must not be told its terminal runs in the
     # workspace root. A prompt that names tools the model cannot call is an
     # invitation to try them.
-    breakdown.append({"label": "workspace", "kind": "workspace",
-                      "text": workspace.describe(
-                          workspace_id,
-                          [t["name"] for t in tool_processor.visible(profile)])})
+    # NOT the workspace TOOL - that is already in the list above as "tool
+    # schema: workspace", gated by profile like every other tool, and it
+    # teaches what a workspace is and how to move. This is the other half,
+    # the half a static schema cannot carry: which workspace this chat is in
+    # RIGHT NOW and which others exist, read live from .env. Two rows,
+    # deliberately, and the label says which is which - "workspace" alone read
+    # like a tool row that had lost its prefix. See the comment at the top of
+    # tools/workspace_tool.py, which describes the same split from the other
+    # side.
+    #
+    # Dropped entirely when describe() has nothing true to say - a profile
+    # with no file tools, no terminal and no workspace tool has no location
+    # worth stating. Same rule as every other part here: empty contributes
+    # nothing rather than an empty heading.
+    where = workspace.describe(
+        workspace_id, [t["name"] for t in tool_processor.visible(profile)])
+    if where:
+        breakdown.append({"label": "workspace location", "kind": "workspace",
+                          "text": where})
     return breakdown
 
 
