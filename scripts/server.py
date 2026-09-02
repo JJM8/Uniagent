@@ -1421,6 +1421,12 @@ def _status(c):
             # the chat you just opened, and this is the request the page
             # already makes the instant you switch chats.
             "workspace": c.workspace or "",
+            # And this chat's profile, riding along for exactly the same
+            # reason: the chat bar's picker has to show the chat you just
+            # opened. "" means "following the default", which the picker draws
+            # as the default's own name rather than as a blank - the same
+            # distinction the workspace dropdown makes.
+            "profile": c.profile or "",
             # THIS chat's token count, read off its settings .json - no
             # injection resolved, no tokenizer run (see main.stored_usage).
             # It rides along here because this is the request the page already
