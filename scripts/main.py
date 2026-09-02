@@ -2438,7 +2438,16 @@ def memories_text(profile=None):
     # Where a NEW memory goes. Not MEMORIES: a profile with a memories folder
     # of its own must send the model to that one, or every fact it learns in
     # this profile lands in another profile's folder and is indexed nowhere.
+    # None when the profile lists no memories at all, and then there is no
+    # block to write: the whole text below is instructions for reading and
+    # writing files in `home`, so with nowhere to put one the honest output is
+    # nothing. injection_breakdown drops an empty part, so a bare profile's
+    # prompt simply has no memory section rather than an empty heading.
     home = profiles.write_root(profile, "memories")
+    if home is None:
+        with _memories_lock:
+            _memories_cache[pid] = {"key": (), "text": ""}
+        return ""
     try:
         key = tuple((str(p), p.stat().st_mtime_ns) for p in files)
     except OSError:
