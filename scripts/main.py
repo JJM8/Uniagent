@@ -2505,7 +2505,7 @@ INJECTION_CALLS = {
 }
 
 
-def _injection_call(name, provider_name, model):
+def _injection_call(name, provider_name, model, profile=None):
     fn = INJECTION_CALLS.get(name)
     if fn is None:
         return ""  # unknown name - skip it, don't crash the turn over a typo
@@ -2515,10 +2515,17 @@ def _injection_call(name, provider_name, model):
         kwargs["provider_name"] = provider_name
     if "model" in params:
         kwargs["model"] = model
+    # Same contract as the two above: a call that declares `profile` is handed
+    # this turn's one, a call that doesn't is invoked exactly as before. That
+    # is what let context_text, memories_text and prompt_text each become
+    # profile-aware without a registry of which ones are.
+    if "profile" in params:
+        kwargs["profile"] = profile
     return fn(**kwargs)
 
 
-def injection_breakdown(provider_name, model, pinned=None, workspace_id=None):
+def injection_breakdown(provider_name, model, pinned=None, workspace_id=None,
+                        profile=None):
     """This turn's injection list (the model's own from models_custom.json, or
     the shared default), resolved but kept as separate pieces - one
     {"label", "kind", "text"} dict per item, in order, kind/skipped-entries
@@ -2543,7 +2550,15 @@ def injection_breakdown(provider_name, model, pinned=None, workspace_id=None):
     this model gets, whereas a pin is scoped to the one chat it was made in,
     so it's appended here instead, straight from that chat's own settings
     .json, never written to context/ or anywhere shared."""
-    items = provider.model_config(provider_name, model).get("injection") \
+    # Which injection list wins, most specific first: the PROFILE's own, then
+    # this MODEL's, then the shared default. The two mean different things and
+    # that is why the profile is checked first - a model's list is about what
+    # that model can cope with (a 4k local one gets a stripped prompt), and a
+    # profile's is about who the agent is being. A profile that says nothing
+    # keeps whatever the model already had, so nothing changes for the models
+    # that have their own list today.
+    items = profiles.resolve(profile).get("injection") \
+        or provider.model_config(provider_name, model).get("injection") \
         or provider.default_injection()
     breakdown = []
     for item in items:
@@ -2564,7 +2579,7 @@ def injection_breakdown(provider_name, model, pinned=None, workspace_id=None):
                 text = rest.strip('"')  # not valid JSON quoting - take as-is
             label = text[:40] + ("..." if len(text) > 40 else "")
         elif kind == "call":
-            result = _injection_call(rest, provider_name, model)
+            result = _injection_call(rest, provider_name, model, profile)
             if isinstance(result, list):
                 for part in result:
                     if part.get("text"):
@@ -2590,7 +2605,7 @@ def injection_breakdown(provider_name, model, pinned=None, workspace_id=None):
     # really sent, and re-indenting it would inflate every count taken off it
     # (context_segments feeds these straight to the tokenizer).
     for name, text in tool_processor.schema_entries(
-            tool_processor.shape_for(provider_name)):
+            tool_processor.shape_for(provider_name), profile):
         breakdown.append({"label": "tool schema: " + name, "kind": "schema",
                           "text": text})
     for p in (pinned or []):
@@ -2606,7 +2621,8 @@ def injection_breakdown(provider_name, model, pinned=None, workspace_id=None):
     return breakdown
 
 
-def system_text(provider_name, model, pinned=None, workspace_id=None):
+def system_text(provider_name, model, pinned=None, workspace_id=None,
+                profile=None):
     """The system message for this turn - injection_breakdown()'s pieces
     joined into one string. This is what every model actually sees in place
     of the old hardcoded context_text() + memories_text() +
@@ -2620,7 +2636,7 @@ def system_text(provider_name, model, pinned=None, workspace_id=None):
     really are sent - but they travel as the request's own `tools` array, so
     pasting them in here as well would send every schema twice, once in a
     shape no provider parses."""
-    parts = injection_breakdown(provider_name, model, pinned, workspace_id)
+    parts = injection_breakdown(provider_name, model, pinned, workspace_id, profile)
     return "\n\n".join(p["text"] for p in parts
                        if p["text"] and p["kind"] != "schema")
 
