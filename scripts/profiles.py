@@ -183,7 +183,15 @@ def write_root(pid=None, kind="memories"):
     """Where something NEW of this kind gets written - the first entry that is
     a directory, or the first entry at all. A profile can list several places
     to READ from; it has to name exactly one to write to, or the model is left
-    guessing which of them a new memory belongs in."""
+    guessing which of them a new memory belongs in.
+
+    None when the profile lists NOTHING of this kind, which is the whole point
+    of an empty list: a profile with no memories has nowhere to put one, and
+    the caller drops the memory instructions entirely rather than writing them
+    somewhere. This used to fall back to ROOT/kind, and that quietly undid the
+    empty list - a deliberately bare profile was still told to save its
+    memories into the default profile's folder, so the one thing it was set up
+    not to touch was the one thing it wrote to."""
     found = roots(pid, kind)
     for path in found:
         if path.is_dir():
@@ -191,7 +199,7 @@ def write_root(pid=None, kind="memories"):
     for path in found:
         if path.suffix.lower() not in SUFFIXES:
             return path
-    return found[0] if found else (ROOT / kind)
+    return found[0] if found else None
 
 
 def _list(spec, key):
