@@ -1,0 +1,21 @@
+[Unit]
+Description=Uniagent local text-to-speech (piper, voices held in memory)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Unbuffered, so the load lines reach the journal live rather than sitting in a
+# block buffer until the process exits.
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/path/to/Uniagent/scripts
+# NOT the python running Uniagent: piper is normally a pipx install with a venv
+# of its own, and this needs the one that can import it. Find it with
+#   readlink -f "$(which piper)"
+# and use the python3 beside it in that venv's bin/.
+ExecStart=/home/you/.local/share/pipx/venvs/piper-tts/bin/python3 /path/to/Uniagent/scripts/piper_server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
