@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+import profiles
 import provider
 import tool_results
 import turnctx
@@ -343,6 +344,36 @@ def load_tools(force=False):
     # Published only now that both lists are complete.
     TOOLS = tools
     BROKEN = broken
+
+
+def kind_of(entry):
+    """"skill" or "tool" for one loaded entry. Skills carry a "skill" flag
+    (see _read_skill); everything else is a .py tool or an MCP one."""
+    return "skill" if entry.get("skill") else "tool"
+
+
+def visible(profile=None):
+    """The loaded tools and skills `profile` may actually use.
+
+    EVERY reader of TOOLS goes through here - the prompt's skills list, the
+    provider's tools array, the token panel and dispatch - so there is one
+    answer to "what does this profile have" and four views of it rather than
+    four chances to disagree.
+
+    Deliberately returns a FILTERED COPY and never touches TOOLS itself. The
+    obvious implementation - narrow the global at the top of the turn - is a
+    race: the turn slot is per agent (main.Agent), so two chats on two
+    profiles run their turns at the same time, and each would be rewriting the
+    list the other is mid-way through reading. The symptom would be a tool
+    intermittently missing, with nothing in the logs to say why.
+
+    profile=None means the default profile, which out of the box allows
+    everything - so a caller that knows nothing about profiles sees exactly
+    the list it always saw."""
+    load_tools()
+    if profile is None:
+        return list(TOOLS)
+    return [t for t in TOOLS if profiles.allows(profile, kind_of(t), t["name"])]
 
 
 def parallel_safe(name):
