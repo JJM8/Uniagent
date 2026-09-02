@@ -915,7 +915,8 @@ def _profile(arg, chat, by_user=True):
     skills = len(allowed) - tools
     return ("this chat is now on " + profiles.label(want) + " - "
             + str(tools) + " tools, " + str(skills) + " skills"
-            + (", " + resolved["description"] if resolved.get("description") else "")
+            + (", " + resolved["description"].rstrip(".")
+               if resolved.get("description") else "")
             + ". Takes effect on the next turn.")
 
 
