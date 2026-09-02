@@ -14860,18 +14860,23 @@ document.getElementById("prof-add").addEventListener("click", () => {
     profStatus.textContent = "there is already a profile called " + id + ".";
     return;
   }
-  // Started from the CURRENT DEFAULT rather than from blank. A profile with no
-  // context loads no prompt at all, which is never what anyone wants from
-  // "add"; copying the default gives something that works and can then be
-  // narrowed.
-  const base = profState.profiles.find((p) => p.id === profState.default)
-    || { context: ["context"], memories: ["memories"],
-         tools: { allow: "*" }, skills: { allow: "*" } };
+  // Started BLANK, not from the current default. Every box empty is the one
+  // starting point you can only get to by hand otherwise: emptying eight
+  // fields is work, and filling in the two or three a narrow profile actually
+  // wants is not. Copying the default made "add" mean "another full-access
+  // agent", which is the opposite of the reason most profiles get made.
+  //
+  // Blank means blank all the way down - no context, no memories, no tools,
+  // no skills - because that is what an empty list means everywhere else
+  // here: profiles.roots() over an empty list yields no files, and
+  // profiles.allows() against an empty allow list is False for every name.
+  // Nothing needs adding to make a bare profile bare; it just needs the seed
+  // to stop being generous.
   profState.profiles.push({
     id, label: id, description: "",
-    context: base.context, memories: base.memories,
-    tools: JSON.parse(JSON.stringify(base.tools)),
-    skills: JSON.parse(JSON.stringify(base.skills)),
+    context: [], memories: [],
+    tools: { allow: [], deny: [] },
+    skills: { allow: [], deny: [] },
     counts: { tools: 0, skills: 0 }, unknown: [],
   });
   drawProfiles();
