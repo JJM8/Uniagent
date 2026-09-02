@@ -36,14 +36,37 @@ import wave
 import voice_input
 
 # How much trailing audio to keep and run past the transcriber. Long enough to
-# say a short phrase in, short enough that a pass isn't chewing on a minute of
-# room noise every time.
-WINDOW_SECONDS = 3.0
+# hold the whole phrase however it happens to fall, short enough that a pass
+# isn't chewing on a minute of room noise every time.
+#
+# Longer than it looks like it needs to be, deliberately. The obvious move is
+# to shrink this until a pass gets cheap, and it does nothing: Whisper pads
+# every input to a fixed 30-second window before the encoder sees it, so the
+# encoder - which is nearly all of the cost - does identical work either way.
+# Measured on this machine's GTX 1660, one clip cut to different lengths:
+#
+#     0.5s window -> 2.30s        2.0s window -> 2.35s
+#     1.0s window -> 2.31s        3.0s window -> 2.36s
+#     1.5s window -> 2.34s
+#
+# Six times the audio for sixty milliseconds. So the window is chosen for
+# whether it can HOLD the phrase, never for what it costs: a two-word wake word
+# takes the best part of a second to say, and one that straddles the boundary
+# between two windows is in neither of them whole. 1.5s leaves room for it
+# wherever it lands.
+WINDOW_SECONDS = 1.5
 
-# How often to actually spend a transcription pass. Every chunk would mean a
-# real STT call several times a second - cheap for openWakeWord's one
-# multiply-add per frame, not cheap for a transcription model, local or not.
-RETRY_SECONDS = 1.0
+# The floor on how often a pass may run. Zero: passes go back to back, the next
+# starting as soon as the last one finished, so consecutive windows overlap by
+# however much of the window the pass didn't take. That is as fast as this can
+# notice you, and on small.en (see stt_server.py, which is the model this
+# expects) it is what the GPU can afford - roughly 0.35s a pass, so a 1.5s
+# window overlaps the one before it by about 1.15s.
+#
+# It was 1.0 while large-v3-turbo was the transcriber, where it never actually
+# bound: a pass took 1.15s, already slower than the throttle. On a model with
+# 0.35s passes it would have thrown away two thirds of the speed.
+RETRY_SECONDS = 0.0
 
 # Same idle/debounce shape as wake_word.py, and the same reasons: a page left
 # open on an unwatched tab shouldn't hold a session open forever, and one
