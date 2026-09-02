@@ -4029,6 +4029,14 @@ def _speak_piper(p, model, text, voice, instructions):
             rate = int(audio["sample_rate"])
     except (OSError, ValueError, TypeError):
         pass
+    # The warm server first, when one is running: piper's CLI reloads the voice
+    # on every call, which is ~1.7s before a single word is spoken (see
+    # scripts/piper_server.py). Falls through to the one-shot below when it
+    # isn't there, so an install that never starts it behaves exactly as it did.
+    warm = _piper_warm(str(onnx), text)
+    if warm is not None:
+        return warm, "audio/wav"
+
     try:
         proc = subprocess.run(
             [binary, "--model", str(onnx), "--output_raw"],
