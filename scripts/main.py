@@ -2645,8 +2645,14 @@ def injection_breakdown(provider_name, model, pinned=None, workspace_id=None,
     # hand back paths from the wrong computer, and a model that does not know
     # its root will keep guessing at relative paths. One line, and the context
     # panel shows it alongside everything else the model was told.
+    # The tool names go with it: this line says which tools work where, and a
+    # profile that has no terminal must not be told its terminal runs in the
+    # workspace root. A prompt that names tools the model cannot call is an
+    # invitation to try them.
     breakdown.append({"label": "workspace", "kind": "workspace",
-                      "text": workspace.describe(workspace_id)})
+                      "text": workspace.describe(
+                          workspace_id,
+                          [t["name"] for t in tool_processor.visible(profile)])})
     return breakdown
 
 

@@ -475,7 +475,7 @@ def get(wsid=None):
 _described = {}
 
 
-def describe(wsid=None):
+def describe(wsid=None, tools=None):
     """The workspace part of the system prompt: which device and directory this
     chat is working in, which others it can be moved to, and how to move.
 
@@ -495,25 +495,47 @@ def describe(wsid=None):
     # filecache's signature already tracks. Memoised on that rather than on a
     # timer, so an edited workspace is described correctly on the very next
     # turn and an unedited one costs a dict lookup.
+    # Keyed on the tool list as well as the workspace, because that list is
+    # now part of the sentence: two profiles in the same workspace get two
+    # different descriptions, and one memo slot would hand each of them the
+    # other's.
+    key = (wsid, tuple(tools) if tools is not None else None)
     stamp = filecache.signature()
-    held = _described.get(wsid)
+    held = _described.get(key)
     if held is not None and held[0] == stamp:
         return held[1]
 
     ws = get(wsid)
     lines = []
+    # Which of the place-sensitive tools this chat ACTUALLY has. Passed in
+    # rather than looked up, because the module that knows the answer
+    # (tool_processor) already imports this one and asking it back would close
+    # the loop. None means "don't know" - every caller that has not been
+    # taught about profiles - and keeps the original wording.
+    place = [t for t in ("read_file", "write_file", "edit_file", "ask_file")
+             if tools is None or t in tools]
+    has_terminal = tools is None or "terminal" in tools
+    if place and has_terminal:
+        which = "the file tools (" + ", ".join(place) + ") and the terminal"
+    elif place:
+        which = "the file tools (" + ", ".join(place) + ")"
+    elif has_terminal:
+        which = "the terminal"
+    else:
+        which = "any tool that touches files"
+    verb = "work" if (place and has_terminal) or len(place) > 1 else "works"
     if ws.is_remote:
         lines.append(
-            "Workspace: this chat is working in " + ws.name + " - the file tools "
-            "(read_file, write_file, edit_file, ask_file) and the terminal RUN ON "
+            "Workspace: this chat is working in " + ws.name + " - " + which
+            + " RUN ON "
             + ws.ssh + " over ssh, rooted at " + ws.root + ". Relative paths, and "
             "anything the terminal does, are on THAT device - not on the machine "
             "running Uniagent, and Uniagent's own folder (memories/, context/, "
             "skills/, tools/) is not there either.")
     else:
         lines.append(
-            "Workspace: this chat is working in " + ws.name + " - the file tools "
-            "(read_file, write_file, edit_file, ask_file) and the terminal work in "
+            "Workspace: this chat is working in " + ws.name + " - " + which
+            + " " + verb + " in "
             + ws.root + ", on the machine running Uniagent. Relative paths are "
             "resolved from there.")
     others = [w for w in provider.workspaces() if w["id"] != ws.id]
@@ -530,5 +552,5 @@ def describe(wsid=None):
             "`id` argument) and carry on there, rather than answering from "
             "where you happen to be. Only these exist; you cannot invent one.")
     text = "\n".join(lines)
-    _described[wsid] = (stamp, text)
+    _described[key] = (stamp, text)
     return text
