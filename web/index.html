@@ -10147,6 +10147,12 @@ function audioClose(who) {
   if (audioStream) audioStream.getTracks().forEach((t) => t.stop());
   if (audioCtx) { try { audioCtx.close(); } catch (e) { /* already closed */ } }
   audioNode = audioStream = audioCtx = null;
+  // The history ring goes with the microphone. It is a few seconds of "just
+  // now", and once the microphone has been shut the next thing it holds is a
+  // few seconds of some earlier sitting entirely - which a wake an hour later
+  // would otherwise reach back into and staple to the front of the message.
+  sayHistory = [];
+  sayHistorySamples = 0;
 }
 
 // ---- one listener per browser -----------------------------------------------
