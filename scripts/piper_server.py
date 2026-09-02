@@ -93,8 +93,15 @@ def _voice(path):
 def _say(voice, text):
     """`text` as WAV bytes. synthesize_wav writes the header itself from the
     model's own sample rate, which is the same thing provider.py's _wav() does
-    by hand for the CLI path - so both paths produce the identical file and the
-    browser cannot tell which one made it."""
+    by hand for the CLI path, so both produce the same FORMAT - 16-bit mono at
+    the voice's rate.
+
+    Not the same bytes, though, and not because of anything here: piper's
+    voices are VITS models with a stochastic duration predictor, so the same
+    sentence synthesised twice differs either way. Two calls through the CLI
+    disagree with each other by as much as a CLI call and a warm one do. There
+    is nothing to reconcile - it is the same model doing the same job, and only
+    the loading is skipped."""
     buf = io.BytesIO()
     with wave.open(buf, "wb") as out:
         voice.synthesize_wav(text, out)
