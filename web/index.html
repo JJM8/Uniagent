@@ -353,6 +353,41 @@
   #ws-bar.remote > label { color: var(--accent-pop); opacity: 1; }
   #ws-bar.remote #ws-quick { color: var(--accent-pop); border-color: var(--accent-pop); }
 
+  /* ---- the chat's profile ------------------------------------------------
+     Which named profile this chat runs on: its context, and which tools and
+     skills it can reach. Styled as the workspace picker's twin because it is
+     the same kind of thing - one per-chat choice, changed in one click - and
+     two controls that behave alike should not look different. */
+  #prof-bar { display: flex; align-items: center; gap: 6px; }
+  #prof-bar[hidden] { display: none; }
+  #prof-bar > label {
+    font-size: 10px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: var(--dim);
+    opacity: 0.8;
+    padding-left: 2px;
+    user-select: none;
+  }
+  #prof-quick {
+    width: auto;
+    max-width: 160px;
+    text-overflow: ellipsis;
+    min-height: 29px;
+    font-size: 12px;
+    padding: 5px 8px;
+    border-radius: 4px;
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  #prof-quick:hover { border-color: var(--accent-pop); }
+  /* A profile that HOLDS TOOLS BACK is worth colouring, for the same reason a
+     remote workspace is: it is easy to forget you are in it, and the symptom
+     is the agent refusing something it can normally do. */
+  #prof-bar.limited > label { color: var(--accent-pop); opacity: 1; }
+  #prof-bar.limited #prof-quick { color: var(--accent-pop); border-color: var(--accent-pop); }
+
   /* ---- the chat's safety number -----------------------------------------
      One number, 0 to 10: the highest danger rating a tool call can be given
      and still run without asking. The control is a slider over a green-to-red
@@ -3520,6 +3555,10 @@
   <div id="ws-bar">
     <label for="ws-quick">workspace</label>
     <select id="ws-quick" title="where this chat's files and terminal work"></select>
+  </div>
+  <div id="prof-bar">
+    <label for="prof-quick">profile</label>
+    <select id="prof-quick" title="which context and which tools this chat has"></select>
   </div>
   <!-- Infinite chat, per chat (scripts/infini.py). Its own control rather
        than a line inside the safety dropdown: it is not a safety setting, and
