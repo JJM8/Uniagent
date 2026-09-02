@@ -529,9 +529,11 @@ def describe(wsid=None, tools=None):
     # drops the section. A bare profile gets no workspace line rather than one
     # saying "any tool that touches files works in ..." when it has none.
     if not place and not has_terminal and not has_move:
+        _described[key] = (stamp, "")
         return ""
     named = ("the file tool (" if len(place) == 1 else "the file tools (") \
         + ", ".join(place) + ")"
+    plural = False
     if place and has_terminal:
         which, plural = named + " and the terminal", True
     elif place:
@@ -539,10 +541,21 @@ def describe(wsid=None, tools=None):
     elif has_terminal:
         which, plural = "the terminal", False
     else:
-        which, plural = "any tool that touches files", False
+        # No file tool and no terminal, but it can still move - the only way
+        # to reach this now. There is no tool here for a location to be the
+        # location OF, so the sentence names the place and stops rather than
+        # claiming "any tool that touches files works in ..." to a profile
+        # that has none.
+        which = None
     verb = "work" if plural else "works"
     runs = "RUN ON" if plural else "RUNS ON"
-    if ws.is_remote:
+    if which is None:
+        lines.append(
+            "Workspace: this chat is working in " + ws.name + " - "
+            + (ws.ssh + " over ssh, rooted at " if ws.is_remote else "")
+            + ws.root + ("." if ws.is_remote
+                         else ", on the machine running Uniagent."))
+    elif ws.is_remote:
         lines.append(
             "Workspace: this chat is working in " + ws.name + " - " + which
             + " " + runs + " "
