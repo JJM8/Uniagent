@@ -2273,6 +2273,17 @@ def _icon_url(path):
     return "/image?path=" + quote(path)
 
 
+def _warm_profiles():
+    """Rebuild every profile's context and memory blocks on the refresher's
+    thread, so no turn ever pays for the read. Registered as a filecache hook -
+    see start(). Each profile's own cache decides whether there is actually
+    anything to rebuild, so this costs a stat per file per profile per second
+    and nothing else."""
+    for pid in profiles.ids():
+        main.context_text(pid)
+        main.memories_text(pid)
+
+
 def _profiles(chat=None):
     """What the settings page's profiles tab draws: every profile, what each
     one loads, and how many tools and skills it can actually reach.
@@ -5514,8 +5525,13 @@ def serve():
     # The hooks are the state that is derived from disk without being a file
     # itself. Each re-checks cheaply and rebuilds only when something moved.
     filecache.on_poll(tool_processor.refresh_tools)
-    filecache.on_poll(main.context_text)
-    filecache.on_poll(main.memories_text)
+    # EVERY profile, not just the default one. These caches are per profile
+    # (two chats on two profiles run their turns at the same time and each
+    # needs its own), so warming only the default would leave a chat on any
+    # other profile rebuilding its context on the request path - which is the
+    # exact I/O this hook exists to have already done. There are a handful of
+    # profiles and each rebuild is skipped when nothing under it moved.
+    filecache.on_poll(_warm_profiles)
     filecache.start()
     # The only thing left watching anything on a timer, and it watches with
     # stat() rather than by reading - see _watch_chats.
