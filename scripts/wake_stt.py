@@ -80,6 +80,12 @@ SAMPLE_RATE = 16000   # what the browser sends, same as wake_word.py
 SAMPLE_WIDTH = 2       # bytes per sample, int16
 CHANNELS = 1
 
+# What the page sends in one POST, mirroring WAKE_CHUNK_MS in web/index.html.
+# Only used to account for the audio in flight when working out how far back a
+# hit reaches - see _backdate_ms - so it being a little out costs a little
+# accuracy there and nothing else.
+CHUNK_MS = 320
+
 _WORD_RE = re.compile(r"[^a-z0-9]+")
 
 _lock = threading.Lock()
