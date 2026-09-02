@@ -31,8 +31,10 @@ import compaction
 import claude_session
 import cron
 import main
+import profiles
 import provider
 import settings
+import tool_processor
 import tool_validation
 import usage
 import workspace as workspace_mod
@@ -46,6 +48,9 @@ HELP = """commands:
 /compact - shorten this chat's history (the full one is kept in chat_archive)
 /model - show the main agent's provider/model, and the usable providers
 /model <provider> <model> - switch the main agent (any model that provider has)
+/profile - show this chat's profile, and the others available
+/profile <name> - move this chat onto that profile (its context and its tools)
+/profile default - unpin, follow the default profile from profiles.json
 /name - show this chat's title
 /name <text> - set this chat's title (shown instead of its first message)
 /name default - clear it, go back to showing the first message
@@ -864,6 +869,56 @@ def _restart(arg, chat):
     return "restarting - reconnect in a moment."
 
 
+def _profile(arg, chat, by_user=True):
+    """Show or change which profile this chat runs on.
+
+    ACTOR_AWARE, and that is the point of it being in this list rather than
+    being a plain handler: the model can run commands on itself through the
+    uniagent_command tool, and a profile is partly a RESTRICTION - which tools
+    and skills it may reach. A model that could type /profile assistant could
+    lift its own restrictions, which would make the whole feature advisory.
+    So reading is allowed either way and changing is the user's alone."""
+    current = chat.profile
+    listed = profiles.ids()
+    if not arg:
+        lines = []
+        for pid in listed:
+            resolved = profiles.resolve(pid)
+            mark = " (this chat)" if pid == current else \
+                   " (default)" if pid == profiles.default_id() else ""
+            desc = resolved.get("description", "")
+            lines.append("  " + pid + mark + (" - " + desc if desc else ""))
+        head = ("this chat is on " + current) if current else \
+               ("this chat follows the default, " + profiles.default_id())
+        return head + "\n" + "\n".join(lines)
+
+    if not by_user:
+        return ("only a person can change the profile. It decides which tools "
+                "and skills you may use, so lifting it is not yours to do - "
+                "ask, and say what you need.")
+
+    want = arg.strip()
+    if want.lower() == "default":
+        chat.set_profile(None)
+        return ("unpinned - this chat follows the default profile, "
+                + profiles.default_id() + ".")
+    if not profiles.exists(want):
+        return ("no profile called " + want + ". You have: "
+                + ", ".join(listed) + ".")
+    chat.set_profile(want)
+    resolved = profiles.resolve(want)
+    # What actually changed, not just the name: a profile swaps the context
+    # AND the tool list, and the second one is the half somebody is about to
+    # be surprised by.
+    allowed = tool_processor.visible(want)
+    tools = len([t for t in allowed if tool_processor.kind_of(t) == "tool"])
+    skills = len(allowed) - tools
+    return ("this chat is now on " + profiles.label(want) + " - "
+            + str(tools) + " tools, " + str(skills) + " skills"
+            + (", " + resolved["description"] if resolved.get("description") else "")
+            + ". Takes effect on the next turn.")
+
+
 def _approve(arg, chat):
     p = _pending.get(chat.id)
     if p is None:
@@ -883,6 +938,7 @@ COMMANDS = {
     "new": _new,
     "compact": _compact,
     "model": _model,
+    "profile": _profile,
     "name": _name,
     "temperature": _temperature,
     "usage": _usage,
@@ -904,12 +960,14 @@ COMMANDS = {
 NAVIGATION = {"load", "new", "delete"}
 
 # The commands that care WHO ran them, and so take a third argument - the
-# `by_user` process() was given. Only /workspace does today: a move the user
-# made has to be written into the history for the model to read, and a move the
-# model made itself already comes back to it as its own tool result. Kept as a
+# `by_user` process() was given. /workspace does because a move the user made
+# has to be written into the history for the model to read, while a move the
+# model made itself already comes back to it as its own tool result.
+# /profile does for a different reason: it is partly a restriction, so the
+# model may READ it but must not be able to lift it off itself. Kept as a
 # set for the same reason as NAVIGATION - one place normalises the shapes, and
 # every other handler stays a plain function of (arg, chat) -> str.
-ACTOR_AWARE = {"workspace"}
+ACTOR_AWARE = {"workspace", "profile"}
 
 
 def process(text, chat=None, by_user=True):
