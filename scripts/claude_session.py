@@ -116,13 +116,19 @@ class Session:
     get()). The client is only ever touched from its own loop, through
     _call() - every public method here is safe to call from a worker thread."""
 
-    def __init__(self, chat_id, model, system, key, cwd, remote):
+    def __init__(self, chat_id, model, system, key, cwd, remote, profile=None):
         self.chat_id = chat_id
         self.model = model
         self.system = system
         self.key = key
         self.cwd = cwd
         self.remote = remote
+        # Which profile's tools this session was built with. Baked in at
+        # connect time like the system text is, and part of `key` through the
+        # tool names - so switching a chat's profile drops the session and
+        # builds one holding the right tools, rather than leaving a live
+        # session offering tools the profile has since denied.
+        self.profile = profile
         self.session_id = None
         self.started = time.time()
         self._in_call = None         # name of the tool_use block being written
@@ -222,7 +228,8 @@ class Session:
                         entry.get("input_schema", {"type": "object"}))(handler)
 
         return create_sdk_mcp_server(
-            MCP_SERVER, tools=[make(e) for e in tool_processor.tools_schema("anthropic")])
+            MCP_SERVER, tools=[make(e) for e
+                               in tool_processor.tools_schema("anthropic", self.profile)])
 
     async def _connect(self):
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
@@ -477,7 +484,7 @@ def _gist(description):
     return text[:200].rstrip()
 
 
-def tools_note():
+def tools_note(profile=None):
     """Uniagent's own tools, named and described for the system prompt.
 
     Needed because of two things that are each reasonable alone and unhelpful
@@ -499,7 +506,7 @@ def tools_note():
     context. See _gist(), which also keeps this section from CHANGING under a
     live session."""
     lines = []
-    for entry in tool_processor.tools_schema("anthropic"):
+    for entry in tool_processor.tools_schema("anthropic", profile):
         lines.append("  " + PREFIX + entry["name"] + " - " + _gist(entry.get("description")))
     if not lines:
         return ""
@@ -526,7 +533,7 @@ _sessions = {}
 _lock = threading.Lock()
 
 
-def get(chat_id, model, system, key, cwd, remote):
+def get(chat_id, model, system, key, cwd, remote, profile=None):
     """This chat's live session, building one if it hasn't got a usable one.
 
     A session is REUSED whenever it can be, because reuse is the feature. It is
