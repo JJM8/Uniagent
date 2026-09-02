@@ -2966,7 +2966,7 @@ def _ledger_later(chat_id, provider_name, model, messages, tools):
 
 def _stream(messages, provider_name, model, temperature, on_text, should_stop=None, usage=None,
             chat_id=None, native_call=None, reasoning=None, phases=None, on_request=None,
-            on_thought=None, on_reclassify=None, on_call_delta=None):
+            on_thought=None, on_reclassify=None, on_call_delta=None, profile=None):
     """One model response, read as it's written. Returns everything received.
 
     Shows each piece the moment it arrives - printed here, or handed to on_text
@@ -3081,7 +3081,14 @@ def _stream(messages, provider_name, model, temperature, on_text, should_stop=No
 
     tools = None
     if native_call is not None:
-        tools = tool_processor.tools_schema(tool_processor.shape_for(provider_name))
+        # Filtered to what this turn's profile may use, so a tool a profile
+        # denies is not merely hidden from the prose - it never reaches the
+        # provider's own tools array, which is what the model actually calls
+        # from. Enforcement still happens again at dispatch (see
+        # tool_processor._find): a model can name a tool it remembers from
+        # earlier in the history, and only the dispatch check catches that.
+        tools = tool_processor.tools_schema(
+            tool_processor.shape_for(provider_name), profile)
 
     # What this exact request looks like on the wire, written down so the NEXT
     # one can be told how much of itself the provider will have to read fresh
@@ -3290,7 +3297,7 @@ def _batches(calls):
     return groups
 
 
-def _run_calls(calls, chat_id, here, ctx):
+def _run_calls(calls, chat_id, here, ctx, profile=None):
     """Run every call in `calls`, writing each one's output onto it as
     "result" and how long it took as "took".
 
@@ -3321,7 +3328,8 @@ def _run_calls(calls, chat_id, here, ctx):
         if len(group) == 1:
             one = group[0]
             ran = timing.now()
-            one["result"] = tool_processor.process(one, chat_id, workspace_id=here)
+            one["result"] = tool_processor.process(one, chat_id, workspace_id=here,
+                                                   profile=profile)
             one["took"] = {"ms": timing.ms(ran)}
             continue
 
@@ -3331,7 +3339,8 @@ def _run_calls(calls, chat_id, here, ctx):
             turnctx.bind(ctx)
             ran = timing.now()
             try:
-                one["result"] = tool_processor.process(one, chat_id, workspace_id=here)
+                one["result"] = tool_processor.process(one, chat_id, workspace_id=here,
+                                                       profile=profile)
             except turnctx.Stopped as e:
                 stopped.append(e)
                 one["result"] = STOPPED
@@ -3823,7 +3832,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         try:
             response = _stream(messages, provider_name, model, temperature, on_text, should_stop,
                                usage, chat_id, native_call, reasoning, phases, on_request,
-                               on_thought, on_reclassify, on_call_delta)
+                               on_thought, on_reclassify, on_call_delta, profile)
         except BaseException as e:
             # Written down before it unwinds. A request that died part-way -
             # the provider 500'd, the key is spent, the turn was stopped - had
@@ -4204,7 +4213,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         # machine and which root a file tool works in is the chat's business,
         # not something the model gets to put in its arguments.
         _run_calls(to_run, chat_id, live_workspace(chat_id, workspace_id),
-                   turnctx.current())
+                   turnctx.current(), profile)
 
         # One "tool" turn per call, in the order the model asked for them -
         # never the order they happened to finish in. A batch that ran
