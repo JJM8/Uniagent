@@ -9694,7 +9694,7 @@ async function wakeScan(frames) {
     const answer = await r.json();
     wakeScore = answer.score || 0;
     drawWakeScore();
-    if (answer.wake) wakeWoke();
+    if (answer.wake) wakeWoke(answer.backdate_ms);
   } catch (e) {
     wakeStop();
     line("error", "voice: lost the server, so the wake word has stopped listening.");
@@ -9707,13 +9707,51 @@ async function wakeScan(frames) {
 // is captured whole - see sayCapture - and, only when voice_captions is on,
 // re-transcribed as it grows so a caption can follow along. The silence that
 // ends the session is judged separately, by loudness, and never waits on this.
-function wakeWoke() {
+function wakeWoke(backdateMs) {
   scanOut = [];
   scanRing = [];
   sayBegin("wake");
+  // Everything said while the server was still making up its mind is still
+  // here, in sayHistory, and this is where it comes back. The server says how
+  // far back the window it matched began (see _backdate_ms in
+  // scripts/wake_stt.py) and the session opens there instead of here.
+  //
+  // Without this the session started at the instant of the answer, so the
+  // phrase AND whatever followed it during the pass were thrown away - which
+  // is why it used to need "console... do this" with a pause in the middle,
+  // and why "console do this" said in one breath arrived as "do this" at best
+  // and "this" more often. The clip now opens shortly before the phrase; the
+  // phrase and the run-up in front of it are taken off the text at the other
+  // end, by withoutPhrase.
+  //
+  // Clamped rather than trusted: a number bigger than the ring is a bug
+  // somewhere, and the worst it can do here is seed a session with silence.
+  const back = Math.min(Math.max(backdateMs || 0, 0), SAY_HISTORY_MS);
+  if (back > 0) {
+    for (const f of sayHistoryTail(back)) {
+      sayFrames.push(f);
+      sayMs += (f.length / 16000) * 1000;
+    }
+    sayGrew = sayFrames.length > 0;
+  }
   // The only thing the wake word adds to a session: a clock that ends it. Hold-
   // to-talk has a finger on a button instead and needs none.
   wakeArmSilence();
+}
+
+// The last `ms` of sayHistory, oldest first. Cut at a frame boundary rather
+// than a sample one: a frame is a few milliseconds, and one either way is not
+// a thing anybody can hear - where walking the ring twice to be exact would
+// cost more than it bought.
+function sayHistoryTail(ms) {
+  const want = (ms / 1000) * 16000;
+  const out = [];
+  let have = 0;
+  for (let i = sayHistory.length - 1; i >= 0 && have < want; i--) {
+    out.unshift(sayHistory[i]);
+    have += sayHistory[i].length;
+  }
+  return out;
 }
 
 // A session opens. Everything from here to sayFinish() is the same whichever
