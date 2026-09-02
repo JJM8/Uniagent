@@ -47,19 +47,15 @@
     },
     "bare": {
       "label": "bare",
-      "description": "",
-      "context": [
-        "context"
-      ],
-      "memories": [
-        "memories"
-      ],
+      "description": "Nothing loaded, nothing reachable - a blank slate.",
+      "context": [],
+      "memories": [],
       "tools": {
-        "allow": "*",
+        "allow": [],
         "deny": []
       },
       "skills": {
-        "allow": "*",
+        "allow": [],
         "deny": []
       }
     }
