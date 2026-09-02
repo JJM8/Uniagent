@@ -127,6 +127,35 @@ def _matches(text, words):
     return False
 
 
+def _backdate_ms(clip, started):
+    """How far back from the page's "now" the window we just matched began.
+
+    The page keeps a few seconds of the room in a ring buffer and throws
+    nothing away, so on a hit it can start the message where the phrase STARTED
+    rather than where we finished noticing it. That is the whole difference
+    between "console... do this" and "console do this", and this number is what
+    tells it how far to reach back.
+
+    Two pieces, both measured rather than assumed:
+
+        the window   the audio we just transcribed, however long it really was
+        the pass     how long the transcription itself took
+
+    The pass counts because the page went on recording throughout it. The
+    newest sample in the window was current when the buffer was snapshotted;
+    by the time this answer lands the page is a whole pass further on. One
+    chunk is added for the audio that was in flight on its way here.
+
+    Overshooting is cheap and undershooting is not - anything before the phrase
+    is cut off along WITH the phrase at the other end (see withoutPhrase in
+    web/index.html), while a word lost off the front is simply lost - but it
+    isn't free either, because that cutting relies on the phrase being
+    transcribed recognisably. So this stays an honest estimate rather than a
+    generous one."""
+    window_ms = len(clip) / float(SAMPLE_RATE * SAMPLE_WIDTH) * 1000.0
+    return int(window_ms + (time.time() - started) * 1000.0 + CHUNK_MS)
+
+
 def _wav(pcm):
     """Raw PCM wrapped in a WAV container, in memory - transcribe_audio wants
     a real file, same as voice_input._wav."""
