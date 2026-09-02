@@ -609,7 +609,7 @@ def set_enabled(kind, rel, enable):
                   + Path(rel).stem)
 
 
-def _tools_text():
+def _tools_text(profile=None):
     """The tool section as prose, built from whatever load_tools() last found.
 
     Every tool that HAS a SCHEMA is deliberately left out: it goes over the
@@ -626,9 +626,10 @@ def _tools_text():
     edit_file_improved.py, which shares edit_file.py's NAME and is already
     unreachable through dispatch (see its own comment); listing it would be
     advertising the wrong description for the tool that actually runs."""
-    named = {t["name"] for t in TOOLS if t.get("schema")}
+    usable = visible(profile)
+    named = {t["name"] for t in usable if t.get("schema")}
     listed = "Skills:\n"
-    for t in TOOLS:
+    for t in usable:
         if t["name"] in INJECTED or t.get("schema") or t["name"] in named:
             continue
         listed += t["name"] + ": " + t["description"] + "\n"
@@ -699,7 +700,7 @@ def _tools_text():
         "picture is the answer. That shows it to them, not to you.\n")
 
 
-def prompt_text():
+def prompt_text(profile=None):
     """The tool section for this turn's prompt, rebuilt from the folder.
 
     There is no call syntax to teach: every turn is native, so the provider
@@ -712,7 +713,7 @@ def prompt_text():
     agent just wrote shows up in the very next turn - which is the whole point of
     it being able to write skills mid-task."""
     load_tools()
-    return _tools_text()
+    return _tools_text(profile)
 
 
 # Which wire shape a provider's `tools` array wants, keyed by WIRE rather than
@@ -791,7 +792,7 @@ def _gemini_schema(node):
     return out
 
 
-def tools_schema(shape="openai"):
+def tools_schema(shape="openai", profile=None):
     """Every tool that has a SCHEMA, as a provider-shaped `tools` array for
     native tool-calling - what a "tool_syntax": "native" turn sends alongside
     the prompt instead of (or as well as) prompt_text()'s prose. A tool with
@@ -816,8 +817,7 @@ def tools_schema(shape="openai"):
 
     Rescanned fresh via load_tools() every call, same as prompt_text() - a
     tool the agent just wrote shows up in the very next turn."""
-    load_tools()
-    usable = [t for t in TOOLS if t.get("schema")]
+    usable = [t for t in visible(profile) if t.get("schema")]
     if shape == "anthropic":
         return [{"name": t["name"], "description": t["description"],
                   "input_schema": t["schema"]} for t in usable]
@@ -833,7 +833,7 @@ def tools_schema(shape="openai"):
             for t in usable]
 
 
-def schema_entries(shape="openai"):
+def schema_entries(shape="openai", profile=None):
     """tools_schema(shape) as [(tool name, the exact JSON sent for it)] - one
     entry per TOOL, whatever the shape nests it in.
 
@@ -843,7 +843,7 @@ def schema_entries(shape="openai"):
     every declaration, so there is no per-tool entry to read a name off. The
     text is the real wire JSON, never re-indented - the panel's counts are
     taken straight off it (see main.py's injection_breakdown)."""
-    array = tools_schema(shape)
+    array = tools_schema(shape, profile)
     if shape == "gemini":
         decls = array[0]["functionDeclarations"] if array else []
         return [(d["name"], json.dumps(d)) for d in decls]
