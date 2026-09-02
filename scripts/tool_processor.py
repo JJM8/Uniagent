@@ -929,14 +929,38 @@ def _args_shaped(after):
     return bool(_ARGS_SHAPED.match(after))
 
 
-def _find(name):
+def _find(name, profile=None):
+    """The loaded tool called `name`, as this profile sees it - so a tool the
+    profile denies is not found, and the call fails the same way a call to a
+    tool that does not exist fails.
+
+    This second check is the one that makes a deny list mean anything. The
+    prompt and the schema array are already filtered (see visible()), but a
+    model can still name a tool it saw earlier in the same conversation, or
+    one carried in on a /continue, and filtering the prompt alone would hide
+    those tools while leaving them perfectly runnable."""
     for t in TOOLS:
         if t["name"] == name:
+            if profile is not None and not profiles.allows(profile, kind_of(t), name):
+                return None
             return t
     return None
 
 
-def process(call, chat_id=None, workspace_id=None):
+def denied(name, profile=None):
+    """Whether `name` exists but this profile is not allowed it - the
+    difference between "no such tool" and "not in this profile", which are
+    worth saying differently: the first is the model's mistake to correct, the
+    second is the user's setting to explain."""
+    if profile is None:
+        return False
+    for t in TOOLS:
+        if t["name"] == name:
+            return not profiles.allows(profile, kind_of(t), name)
+    return False
+
+
+def process(call, chat_id=None, workspace_id=None, profile=None):
     """Run the tool the call asks for and return its output as text, clipped
     to a size a conversation can afford to carry.
 
@@ -946,11 +970,11 @@ def process(call, chat_id=None, workspace_id=None):
     third place to append one gets written eventually; a third place to
     forget the limit should not exist. See tool_results.clamp() for what
     "clipped" means and where the full copy is kept."""
-    return tool_results.clamp(_run(call, chat_id, workspace_id),
+    return tool_results.clamp(_run(call, chat_id, workspace_id, profile),
                               call.get("tool"), chat_id)
 
 
-def _run(call, chat_id=None, workspace_id=None):
+def _run(call, chat_id=None, workspace_id=None, profile=None):
     """Run the tool the call asks for and return its output as text.
 
     chat_id is the conversation the call came from, and is handed to any tool
