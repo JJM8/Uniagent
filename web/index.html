@@ -3798,6 +3798,7 @@
       <button class="set-tab" data-tab="workspaces">workspaces</button>
       <button class="set-tab" data-tab="appearance">appearance</button>
       <button class="set-tab" data-tab="voice">voice</button>
+      <button class="set-tab" data-tab="profiles">profiles</button>
       <button class="set-tab" data-tab="context">context</button>
       <button class="set-tab" data-tab="tools">tools/skills</button>
       <button class="set-tab" data-tab="compaction">compaction</button>
@@ -4189,7 +4190,34 @@
       </div>
 
       <!-- context -->
+      <!-- profiles -->
+      <div class="tab-panel" data-panel="profiles" hidden>
+        <p class="note">
+          A profile is which Uniagent a chat is talking to: the context it
+          loads, the memories it indexes, and which tools and skills it can
+          reach. Chats pick one each - the picker above the conversation, or
+          <code>/profile</code> - so two windows can be two different agents at
+          once. Edit a profile's actual prompt files on the context tab.
+        </p>
+        <div class="field">
+          <label for="prof-default">the profile a new chat starts on</label>
+          <select id="prof-default"></select>
+        </div>
+        <div id="prof-list"></div>
+        <div class="row">
+          <button type="button" id="prof-add" class="ghost">+ add a profile</button>
+          <button type="button" id="prof-save">save profiles</button>
+          <button type="button" id="prof-reload" class="ghost">reload from disk</button>
+        </div>
+        <div id="prof-status"></div>
+      </div>
+
       <div class="tab-panel" data-panel="context" hidden>
+        <div class="field">
+          <label for="ctx-profile">whose context these are</label>
+          <select id="ctx-profile"
+                  title="each profile has its own context and memories"></select>
+        </div>
         <div class="ctx-group-head">context/ <span>injected in full, every turn</span></div>
         <div id="ctx-list"></div>
 
@@ -12557,6 +12585,9 @@ let lastProfile = "";
 // The default's id, so "" can be drawn as the name it actually resolves to
 // rather than as a blank.
 let profDefault = "";
+// How many tools and skills exist in total, so "limited" can mean "fewer than
+// everything" rather than a number nobody can compare against.
+let profTotals = null;
 
 function drawProfileBar() {
   const chosen = profById.get(profQuick.value);
@@ -12573,12 +12604,10 @@ function drawProfileBar() {
     : "which context and which tools this chat has";
 }
 
-let profTotals = null;
-
 async function loadChatProfiles() {
   let info;
   try {
-    info = await (await fetch("/profiles?chat=" + encodeURIComponent(chatId || ""))).json();
+    info = await (await fetch("/profiles" + chatQuery("?"))).json();
   } catch (e) {
     return;  // server away - leave whatever is there
   }
@@ -12616,7 +12645,11 @@ profQuick.addEventListener("change", async () => {
   // and picking a name from a list is the second. /profile default is how you
   // ask for the first.
   try {
-    const r = await fetch("/profiles/select?chat=" + encodeURIComponent(await requireChat()), {
+    // requireChat, like a message, a pin and a model switch: putting a chat
+    // on a profile is setting it up, and it needs a real id to be written
+    // against.
+    requireChat();
+    const r = await fetch("/profiles/select" + chatQuery("?"), {
       method: "POST",
       body: JSON.stringify({ profile: id }),
     });
@@ -16363,6 +16396,7 @@ if (window.visualViewport) {
                      loadModelQuick(settings)]);
 
   loadChatWorkspaces();
+  loadChatProfiles();
   // The panel's first and only unprompted draw. From here on it moves when the
   // server says something moved, or when it's opened having missed some.
   syncContextPanel();
