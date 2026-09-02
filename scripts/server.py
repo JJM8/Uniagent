@@ -60,6 +60,7 @@ import cron
 import filecache
 import infini
 import main
+import profiles
 import market
 import provider
 import provider_refs
@@ -2266,23 +2267,50 @@ def _icon_url(path):
     return "/image?path=" + quote(path)
 
 
-def _context_path(rel, kind="context"):
+def _context_path(rel, kind="context", profile=None):
     """The editable file `rel` names, or None if it points anywhere else.
     Resolved and re-checked against its own folder, so a name like
     ../../.bashrc can't be read or written through this - and the suffix must
     be one main.py actually loads, so this can't be used to drop a file the
     agent will never see.
 
-    `kind` picks the folder: the always-injected context/, or memories/, whose
-    files the settings page edits through the same box even though only their
-    one-line descriptions are ever injected."""
-    root = main.MEMORIES if kind == "memories" else main.CONTEXT
+    `kind` picks which of the profile's two sets of roots to look in: the
+    always-injected context, or memories, whose files the settings page edits
+    through the same box even though only their one-line descriptions are ever
+    injected.
+
+    `profile` is which profile's roots those are. Every root it lists is
+    tried, because a profile may name several and the page hands back a name
+    relative to whichever one the file was listed under - so "1system.md" is
+    resolved against each in turn and the first real file wins. A profile root
+    that is a single FILE rather than a folder matches on its own name.
+
+    Each candidate is still checked to be genuinely under the root it was
+    built from, so no amount of "../" in `rel` reaches out of every one of
+    them."""
     if not rel or rel.startswith("/") or "\x00" in rel:
         return None
-    path = (root / rel).resolve()
-    if root.resolve() not in path.parents or path.suffix.lower() not in main.CONTEXT_SUFFIXES:
+    if Path(rel).suffix.lower() not in main.CONTEXT_SUFFIXES:
         return None
-    return path
+    fallback = None
+    for root in profiles.roots(profile, "memories" if kind == "memories" else "context"):
+        if root.is_file():
+            # A root that IS a file: it answers to its own name and nothing
+            # else, and there is no folder here to write a new file into.
+            if rel == root.name:
+                return root
+            continue
+        path = (root / rel).resolve()
+        if root.resolve() not in path.parents:
+            continue
+        if path.is_file():
+            return path
+        # A name that resolves safely but doesn't exist yet is a NEW file.
+        # Remembered rather than returned, so an existing file under a later
+        # root still wins over creating one under an earlier root.
+        if fallback is None:
+            fallback = path
+    return fallback
 
 
 def _pin_path(rel):
