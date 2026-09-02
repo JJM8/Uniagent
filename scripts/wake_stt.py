@@ -214,6 +214,7 @@ def listen(session, pcm, words):
     if not words or not clip:
         return {"wake": False, "score": 0.0}
 
+    started = time.time()
     try:
         text = voice_input.transcribe_audio(_wav(clip), "wake.wav")
     except voice_input.VoiceError as e:
@@ -227,7 +228,8 @@ def listen(session, pcm, words):
         # Cleared so the phrase that just fired cannot contribute to the next
         # pass - same reason wake_word.listen resets its model after firing.
         s["buf"] = bytearray()
-    return {"wake": True, "score": 1.0}
+    return {"wake": True, "score": 1.0,
+            "backdate_ms": _backdate_ms(clip, started)}
 
 
 def forget(session):
