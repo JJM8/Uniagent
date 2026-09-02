@@ -1191,7 +1191,8 @@ class App:
             try:
                 chat = main.current
                 prov, model, _ = chat.models()
-                injected = main.injection_breakdown(prov, model, chat.pinned)
+                injected = main.injection_breakdown(prov, model, chat.pinned,
+                                                    profile=chat.profile)
                 self.info = dict(main.context_usage(chat, prov, model, injected),
                                  provider=prov, model=model)
                 self.console.refresh()

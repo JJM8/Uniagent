@@ -1526,7 +1526,7 @@ def _injection(c, record=True):
     # Built once and handed to both readers - resolving it re-reads every
     # context file, so doing it twice per request would double the cost of
     # the most expensive thing this endpoint does.
-    injected = main.injection_breakdown(prov, mod, c.pinned)
+    injected = main.injection_breakdown(prov, mod, c.pinned, profile=c.profile)
     return {
         "provider": prov, "model": mod,
         "injected": injected,
