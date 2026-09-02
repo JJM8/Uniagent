@@ -1,0 +1,21 @@
+{
+  "default": "assistant",
+  "profiles": {
+    "assistant": {
+      "label": "Assistant",
+      "description": "Full access - the Uniagent that does things to the machine.",
+      "context": ["context"],
+      "memories": ["memories"],
+      "tools": { "allow": "*" },
+      "skills": { "allow": "*" }
+    },
+    "chat": {
+      "label": "Chat",
+      "description": "Conversation only - reads and searches, never writes or runs.",
+      "context": ["profiles/chat/context"],
+      "memories": ["profiles/chat/memories"],
+      "tools": { "allow": ["read_skill", "read_file", "web_search", "web_fetch"] },
+      "skills": { "allow": "*", "deny": ["pcb-design", "claude-code-remote"] }
+    }
+  }
+}
