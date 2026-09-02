@@ -3775,7 +3775,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
                 safety=safety, safety_prompt=safety_prompt,
                 safety_threshold=safety_threshold, safety_extra=safety_extra,
                 on_reasoning=on_reasoning, on_timing=on_timing,
-                on_request=on_request, on_thought=on_thought)
+                on_request=on_request, on_thought=on_thought, profile=profile)
         except BaseException as e:
             stopped = isinstance(e, turnctx.Stopped)
             usage_log.record("turn", provider_name, model, chat=chat_id, usage=usage,

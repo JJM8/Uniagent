@@ -570,7 +570,7 @@ def get(chat_id, model, system, key, cwd, remote, profile=None):
             live = None
             _sessions.pop(chat_id, None)
         if live is None:
-            live = Session(chat_id, model, system, key, cwd, remote)
+            live = Session(chat_id, model, system, key, cwd, remote, profile)
             _sessions[chat_id] = live
             return live, True
         live.retarget(model)
@@ -647,7 +647,8 @@ def run_turn(turns, sync, text, chat_id, provider_name, model, system,
              on_tool_result=None, on_safety=None, on_message=None,
              should_stop=None, usage=None, safety=None, safety_prompt=None,
              safety_threshold=None, safety_extra=None,
-             on_reasoning=None, on_timing=None, on_request=None, on_thought=None):
+             on_reasoning=None, on_timing=None, on_request=None, on_thought=None,
+             profile=None):
     """One turn against this chat's Claude Code session, mirrored into `turns`.
 
     Called by main.run() INSTEAD of its own tool loop, and it deliberately
@@ -671,9 +672,10 @@ def run_turn(turns, sync, text, chat_id, provider_name, model, system,
 
     # What the session is TOLD, and what decides whether it is still the right
     # session, are two different strings - see get().
-    names = [e["name"] for e in tool_processor.tools_schema("anthropic")]
-    session, fresh = get(chat_id, model, system + tools_note(),
-                         system + "\n" + "\n".join(sorted(names)), cwd, remote)
+    names = [e["name"] for e in tool_processor.tools_schema("anthropic", profile)]
+    session, fresh = get(chat_id, model, system + tools_note(profile),
+                         system + "\n" + "\n".join(sorted(names)), cwd, remote,
+                         profile)
     # turns already carries this turn's own user message (run() appends it
     # before calling here), so the history to replay is everything before it.
     opening = _replay(turns[:-1]) if fresh else ""
@@ -843,7 +845,8 @@ def run_turn(turns, sync, text, chat_id, provider_name, model, system,
                 # thread so it gets the chat and the workspace it expects.
                 result = tool_processor.process(
                     {"tool": data["name"], "args": data["args"]},
-                    chat_id, workspace_id=main.live_workspace(chat_id, workspace_id))
+                    chat_id, workspace_id=main.live_workspace(chat_id, workspace_id),
+                    profile=profile)
                 req.reply(result)
 
             elif kind == "call":
