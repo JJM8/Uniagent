@@ -2644,34 +2644,22 @@ def injection_breakdown(provider_name, model, pinned=None, workspace_id=None,
     for p in (pinned or []):
         if p.get("text"):
             breakdown.append({"label": p["label"], "kind": "pinned", "text": p["text"]})
-    # Where this chat's tools actually work. Last, and always present: a model
-    # that does not know it is operating on another machine will confidently
-    # hand back paths from the wrong computer, and a model that does not know
-    # its root will keep guessing at relative paths. One line, and the context
-    # panel shows it alongside everything else the model was told.
-    # The tool names go with it: this line says which tools work where, and a
-    # profile that has no terminal must not be told its terminal runs in the
-    # workspace root. A prompt that names tools the model cannot call is an
-    # invitation to try them.
-    # NOT the workspace TOOL - that is already in the list above as "tool
-    # schema: workspace", gated by profile like every other tool, and it
-    # teaches what a workspace is and how to move. This is the other half,
-    # the half a static schema cannot carry: which workspace this chat is in
-    # RIGHT NOW and which others exist, read live from .env. Two rows,
-    # deliberately, and the label says which is which - "workspace" alone read
-    # like a tool row that had lost its prefix. See the comment at the top of
-    # tools/workspace_tool.py, which describes the same split from the other
-    # side.
+    # There is deliberately no workspace section here any more. It used to be
+    # a part of its own, always present, naming this chat's workspace and
+    # every other one - and it was the only row in the panel that looked like
+    # a tool but was not one ("workspace", sitting next to "tool schema:
+    # workspace", which is the actual tool).
     #
-    # Dropped entirely when describe() has nothing true to say - a profile
-    # with no file tools, no terminal and no workspace tool has no location
-    # worth stating. Same rule as every other part here: empty contributes
-    # nothing rather than an empty heading.
-    where = workspace.describe(
-        workspace_id, [t["name"] for t in tool_processor.visible(profile)])
-    if where:
-        breakdown.append({"label": "workspace location", "kind": "workspace",
-                          "text": where})
+    # The catalogue half now rides in the workspace TOOL'S description, built
+    # per request by tools/workspace_tool.live_description(), so it is gated
+    # by profile exactly like every other tool: a profile that cannot move
+    # this chat is no longer told how to. The chat-specific half - which
+    # workspace this one is in - is not in the prompt at all: it arrives
+    # through the conversation, from main.workspace_note when the user moves
+    # the chat and from the tool's own result when the model does, and a chat
+    # nobody has moved is in the default workspace. See workspace.catalogue
+    # for why the split falls exactly there (the schemas are the head of the
+    # cached prefix, so anything per-chat in them costs every chat its cache).
     return breakdown
 
 
