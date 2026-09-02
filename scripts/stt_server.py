@@ -30,6 +30,23 @@ headroom to spare, and the English-only variant is both a little faster and a
 little more accurate than plain "small" for an install that only ever hears
 English. Swap MODEL below (or pass a different one as argv[1]) if that
 changes.
+
+Read that table with care, though, because RTF is a flattering measure and it
+is measured on an 11s clip. Whisper pads every input to a fixed 30-second
+window before the encoder runs, so what a pass costs barely depends on how
+much audio went into it - the number that matters for a spoken command is the
+FLOOR, not the ratio. Measured here, same clips through this server:
+
+    clip length     large-v3-turbo      small.en
+    1.3s            2.45s               0.33s
+    4.6s            3.71s               0.38s
+    9.7s            2.82s               0.51s
+    15.3s           2.99s               0.60s
+
+Turbo costs about two and a half seconds to hear "open the browser", and so
+would have cost that on every pass of the wake word too - which is what
+scripts/wake_stt.py runs back to back while anybody is talking. That floor,
+not the RTF, is why this serves small.en.
 """
 
 import email
