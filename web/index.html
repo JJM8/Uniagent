@@ -4300,7 +4300,7 @@
         <div class="ctx-group-head">memories/ <span>one topic per file; only the names are injected, and the agent opens one when it looks relevant</span></div>
         <div id="ctx-mem-list"></div>
 
-        <div class="ctx-group-head">presets <span>a saved copy of both folders together</span></div>
+        <div class="ctx-group-head">presets <span>a saved copy of the default profile's two folders together - these predate profiles and still act on context/ and memories/ only</span></div>
         <div id="ctx-presets"></div>
         <div class="row">
           <button id="ctx-revert" class="ghost danger">reset to default</button>
@@ -14882,6 +14882,30 @@ const ctxList = document.getElementById("ctx-list");
 const ctxMemList = document.getElementById("ctx-mem-list");
 const ctxPresets = document.getElementById("ctx-presets");
 let ctxState = { context: [], memories: [], presets: [], is_default: true };
+// Whose context the tab is showing. "" means the default profile, which is
+// what it opens on - so an install that never touches profiles sees exactly
+// the files it always did.
+const ctxProfileSel = document.getElementById("ctx-profile");
+let ctxProfile = "";
+
+function drawCtxProfileChoices() {
+  const keep = ctxProfileSel.value;
+  ctxProfileSel.innerHTML = "";
+  for (const p of profState.profiles) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.label + (p.id === profState.default ? " (default)" : "");
+    ctxProfileSel.appendChild(o);
+  }
+  ctxProfileSel.value = (keep && profState.profiles.some((p) => p.id === keep))
+    ? keep : profState.default;
+  ctxProfile = ctxProfileSel.value;
+}
+
+ctxProfileSel.addEventListener("change", () => {
+  ctxProfile = ctxProfileSel.value;
+  loadContext();
+});
 // Rows the user has expanded, as "kind/path", so a redraw puts back what was
 // open instead of collapsing everything under them.
 const ctxOpenRows = new Set();
@@ -14896,7 +14920,17 @@ async function loadContext() {
     + ".\n\nReload from disk and lose them?"
   )) return;
   ctxDirty.clear();
-  ctxState = await (await fetch("/context")).json();
+  // The dropdown may not have been filled in yet - the tab can be opened
+  // before the profiles tab ever is - so ask for the list first if it is
+  // empty. Asking for "" is still valid; it means the default profile.
+  if (!ctxProfileSel.options.length) {
+    try {
+      profState = await (await fetch("/profiles" + chatQuery("?"))).json();
+      drawCtxProfileChoices();
+    } catch (e) { /* server away - fall through and ask for the default */ }
+  }
+  ctxState = await (await fetch(
+    "/context?profile=" + encodeURIComponent(ctxProfile || ""))).json();
   drawContext();
 }
 
@@ -14975,7 +15009,8 @@ function drawCtxFiles(host, files, emptyNote) {
     save.addEventListener("click", async () => {
       const r = await fetch("/context", {
         method: "POST",
-        body: JSON.stringify({ path: f.path, kind: f.kind, text: area.value }),
+        body: JSON.stringify({ path: f.path, kind: f.kind, text: area.value,
+                               profile: ctxState.profile }),
       });
       if (!r.ok) { flash("could not save " + f.path); return; }
       // The saved text becomes this row's baseline, so the row stops reading
@@ -16560,6 +16595,7 @@ for (const tab of document.querySelectorAll(".set-tab")) {
     // that belongs to every other tab would be an offer it cannot honour.
     document.getElementById("set-foot").hidden = tab.dataset.tab === "usage";
     if (tab.dataset.tab === "context") loadContext();
+    if (tab.dataset.tab === "profiles") loadProfiles();
     // Cheap and local (it scans two folders), so it is re-read every time the
     // tab is opened rather than cached - a tool the agent has just written
     // itself is in the list the moment you look. The marketplace inside it is
