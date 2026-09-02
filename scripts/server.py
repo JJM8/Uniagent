@@ -2333,7 +2333,7 @@ def _pin_path(rel):
     return None
 
 
-def _context():
+def _context(profile=None):
     """What the settings page's context tab draws and edits: the context files
     in the exact order they are fed to the model, the memory files alphabetically
     beside them, and the archived presets that can be swapped back in.
@@ -2342,19 +2342,31 @@ def _context():
     by one button - see main.preset_parts for why they are still two folders on
     disk. Each carries `kind`, which is what POST /context needs back to know
     which folder a save belongs to."""
-    def read(paths, root, kind):
+    def read(pairs, kind):
         out = []
-        for p in paths:
+        for p, root in pairs:
             try:
                 text = p.read_text(encoding="utf-8")
             except OSError:
                 continue
-            out.append({"path": p.relative_to(root).as_posix(),
-                        "kind": kind, "text": text})
+            try:
+                rel = p.relative_to(root).as_posix()
+            except ValueError:
+                rel = p.name
+            out.append({"path": rel, "kind": kind, "text": text})
         return out
 
-    return {"context": read(main.context_files(), main.CONTEXT, "context"),
-            "memories": read(main.memory_files(), main.MEMORIES, "memories"),
+    # Named against the root each file was listed under, not against the
+    # project root, so a file still calls itself "1system.md" whichever
+    # profile's folder it came out of - which is what POST /context hands back
+    # and what _context_path resolves again.
+    mem_roots = profiles.roots(profile, "memories")
+    memories = [(p, next((r for r in mem_roots if r == p or r in p.parents),
+                         p.parent))
+                for p in main.memory_files(profile)]
+    return {"profile": profile or profiles.default_id(),
+            "context": read(main.context_pairs(profile), "context"),
+            "memories": read(memories, "memories"),
             "presets": main.presets(),
             # Greys out a reset that would do nothing but archive a copy of the
             # defaults next to the defaults.
@@ -3456,8 +3468,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(_email_accounts()), "application/json")
         elif self.path == "/workspaces":
             self._send(json.dumps(_workspaces()), "application/json")
-        elif self.path == "/context":
-            self._send(json.dumps(_context()), "application/json")
+        elif self.path == "/context" or self.path.startswith("/context?"):
+            # ?profile= picks whose context is being edited. Absent means the
+            # default profile, which is what the tab asks for until somebody
+            # switches it - so an install that never touches profiles sees
+            # exactly the files it always did.
+            want = parse_qs(urlparse(self.path).query).get("profile", [None])[0]
+            self._send(json.dumps(_context(want)), "application/json")
         elif self.path == "/tools" or self.path.startswith("/tools?"):
             # ?type=skill is the sidebar's list, which is skills and nothing
             # else - answered without importing anything, and streamed like
@@ -4452,7 +4469,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send("expected a JSON object", code=400)
             return
         kind = body.get("kind", "context")
-        path = _context_path(body.get("path", ""), kind)
+        path = _context_path(body.get("path", ""), kind, body.get("profile"))
         text = body.get("text")
         if path is None or not isinstance(text, str):
             self._send("bad path or text", code=400)
@@ -4463,7 +4480,8 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             self._send("could not save: " + str(e), code=500)
             return
-        self._send(json.dumps({"saved": body.get("path"), "kind": kind}),
+        self._send(json.dumps({"saved": body.get("path"), "kind": kind,
+                               "profile": body.get("profile")}),
                    "application/json")
         _broadcast_context()  # that file is injected - the panel draws it
 
