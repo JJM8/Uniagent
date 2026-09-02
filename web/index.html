@@ -9449,6 +9449,15 @@ const SAY_MAX_CLIP_MS = 30000;     // a clip that never ends is a stuck door
 // instead of being turned on for one of them by surprise.
 const SAY_POLL_MS = 1000;
 
+// How much of the room to keep behind us at all times, so a session can start
+// BEFORE the moment it was opened - see wakeWoke, which is the whole reason
+// this exists. It has to cover the furthest back the server can ask us to
+// reach (the window it judged, plus the pass it spent judging it, plus the
+// chunk in flight) with room to spare. Five seconds of 16k mono floats is
+// 320KB held forever while the ear is on, which is nothing, and the ceiling
+// also stops a malformed answer from reaching back into last week.
+const SAY_HISTORY_MS = 5000;
+
 // The voice tab's answers. Fetched once on load rather than waiting for
 // somebody to open the settings overlay - most windows never do, and a window
 // that has not read the settings cannot know whether it is meant to listen at
@@ -9493,6 +9502,10 @@ let sayPolling = false;  // a poll's request is in flight right now
 let sayPollSeq = 0;      // guards a slow poll from clobbering a newer one's answer
 let sayApplied = 0;      // the seq of the last result actually shown
 let sayPollTimer = null;
+// The room as it was a moment ago, newest frame last - fed by audioFrame no
+// matter what else is happening, and read only by wakeWoke.
+let sayHistory = [];
+let sayHistorySamples = 0;  // its length in samples, so it can be trimmed
 
 // Waiting to go past the wake model.
 let scanRing = [];       // the run-up, kept while the room is quiet
