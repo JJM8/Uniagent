@@ -3521,6 +3521,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(_email_accounts()), "application/json")
         elif self.path == "/workspaces":
             self._send(json.dumps(_workspaces()), "application/json")
+        elif self.path == "/profiles" or self.path.startswith("/profiles?"):
+            # create=True for the same reason /safety uses it: opening the
+            # picker in a window that has not sent anything yet is reading,
+            # and reading must not bring a chat folder into existence.
+            self._send(json.dumps(_profiles(_chat_of(self, create=True))),
+                       "application/json")
         elif self.path == "/context" or self.path.startswith("/context?"):
             # ?profile= picks whose context is being edited. Absent means the
             # default profile, which is what the tab asks for until somebody
@@ -3643,6 +3649,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/env":
             self._post_env()
+            return
+        if self.path == "/profiles" or self.path.startswith("/profiles?"):
+            self._post_profiles()
+            return
+        if self.path == "/profiles/select" or self.path.startswith("/profiles/select?"):
+            self._post_profile_select()
             return
         if self.path == "/context":
             self._post_context()
@@ -4513,6 +4525,87 @@ class Handler(BaseHTTPRequestHandler):
         # that resolved differently from what was asked (cleared back to the
         # default, say) shows what it actually is.
         self._send(json.dumps(_safety(c)), "application/json")
+
+    def _post_profiles(self):
+        """Replace profiles.json with what the tab is holding.
+
+        Whole-file rather than key-merged: the page edits a tree, and a
+        key-by-key merge cannot say "this profile is gone" or "this name is no
+        longer in the allow list" - the two edits most likely to be made here.
+
+        Validated before it lands, because this file decides what an agent can
+        reach and a half-written one must never be the thing that decides it.
+        A rejected save leaves the file exactly as it was."""
+        body = self._body()
+        if not isinstance(body, dict) or not isinstance(body.get("profiles"), dict):
+            self._send("expected {\"default\": id, \"profiles\": {...}}", code=400)
+            return
+        found = body["profiles"]
+        if not found:
+            self._send("keep at least one profile - there has to be something "
+                       "for a chat to run on.", code=400)
+            return
+        for pid, entry in found.items():
+            if not isinstance(pid, str) or not pid.strip():
+                self._send("every profile needs an id", code=400)
+                return
+            if not isinstance(entry, dict):
+                self._send("profile " + str(pid) + " is not an object", code=400)
+                return
+            for key in ("context", "memories"):
+                value = entry.get(key)
+                if value is not None and not isinstance(value, (str, list)):
+                    self._send(pid + "'s " + key + " must be a path or a list "
+                               "of paths", code=400)
+                    return
+            for key in ("tools", "skills"):
+                value = entry.get(key)
+                if value is not None and not isinstance(value, dict):
+                    self._send(pid + "'s " + key + " must be an object with "
+                               "\"allow\" and/or \"deny\"", code=400)
+                    return
+        if body.get("default") not in found:
+            self._send("the default has to be one of the profiles listed", code=400)
+            return
+        try:
+            profiles.save({"default": body["default"], "profiles": found})
+        except OSError as e:
+            self._send("could not save: " + str(e), code=500)
+            return
+        self._send(json.dumps(_profiles(_chat_of(self, create=True))),
+                   "application/json")
+        # Every open chat's next turn is assembled differently now, and the
+        # context panel is drawn from exactly that.
+        _broadcast_context()
+
+    def _post_profile_select(self):
+        """Put one chat on a profile. Per chat, never global - see
+        main.Agent.set_profile for why."""
+        c = _chat_of(self, mint=True)
+        if c is None:
+            self._send("no such chat", code=404)
+            return
+        body = self._body()
+        if not isinstance(body, dict):
+            self._send("expected a JSON object", code=400)
+            return
+        want = body.get("profile")
+        # "" and null both mean "stop pinning, follow the default" - the same
+        # thing /model's unpin does, and the same thing the picker's own
+        # "default" entry sends.
+        if want is not None and not isinstance(want, str):
+            self._send("profile must be a name", code=400)
+            return
+        if want and not profiles.exists(want):
+            self._send("no profile called " + want, code=400)
+            return
+        try:
+            c.set_profile(want or None)
+        except OSError as e:
+            self._send("could not save: " + str(e), code=500)
+            return
+        self._send(json.dumps(_profiles(c)), "application/json")
+        _broadcast_context()
 
     def _post_context(self):
         """Write one context or memory file. The next turn picks it up on its
