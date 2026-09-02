@@ -18,9 +18,13 @@ an install running this listens with the SAME transcriber loaded for the SAME
 reason, not a second one loaded alongside it.
 
 The trade is cost per chunk: a real transcription pass instead of one
-openWakeWord frame. So this doesn't transcribe on every chunk that arrives -
-it keeps a rolling window of recent audio per session and only spends a
-transcription pass on it once every RETRY_SECONDS.
+openWakeWord frame. It keeps a rolling window of recent audio per session and
+runs passes over it back to back - one starting as soon as the last finished,
+so the windows overlap by whatever the pass didn't use. That saturates the
+transcriber for as long as somebody is talking near the microphone, which is
+affordable only because the model is a small one and because nothing is sent
+at all while the room is quiet (the page's own loudness gate, see
+wakeScanFrame in web/index.html).
 
     the room  ->  [buffer, here]  ->  nothing, most passes
                                   ->  [local transcriber]  ->  "computer, ..."
@@ -182,7 +186,11 @@ def listen(session, pcm, words):
     buffer of recent audio and a clock for when to next spend a transcription
     pass on it. Answers {"wake": bool, "score": float} to match the shape the
     page already reads; there's no confidence number a transcript can honestly
-    give, so score is 1.0 on a hit and 0.0 otherwise.
+    give, so score is 1.0 on a hit and 0.0 otherwise. A hit carries one field
+    more than wake_word.listen's - "backdate_ms", how far back the page should
+    reach into its own history to find where the phrase began - which the page
+    treats as optional, so the openWakeWord engine not having it is not a
+    difference either side has to know about.
 
     Raises WakeError when the configured transcriber can't be reached or none
     is chosen, which the caller turns into a message on the page - the same
