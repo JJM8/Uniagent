@@ -7,6 +7,7 @@ every tool arrives with a real argument schema, so there is nothing left to
 look up. read_tool.py now sits in unused/ - see TODO.md.
 """
 
+import profiles
 import tool_processor
 
 NAME = "read_skill"
@@ -36,11 +37,18 @@ SCHEMA = {
 }
 
 
-def run(name):
+def run(name, profile=None):
+    # `profile` is filled in by tool_processor._run for any tool that declares
+    # it, the same way chat_id and workspace are - the model never supplies
+    # it. Without it this tool would be the hole in the profile's skill list:
+    # every other route to a skill is filtered, and this one hands back the
+    # full text of whatever it is asked for.
+    #
     # Straight from the folder every time, never a cached copy, so a skill
     # just written or edited is served as it is NOW - same reason _discovery
     # reloads rather than reusing an import.
-    skills = tool_processor.find_skills()
+    skills = [s for s in tool_processor.find_skills()
+              if profile is None or profiles.allows(profile, "skill", s["name"])]
     for skill in skills:
         if skill["name"] == name:
             return skill["instructions"]
