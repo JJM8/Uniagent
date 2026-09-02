@@ -2365,19 +2365,35 @@ def context_text(profile=None):
 
 # Same caching trick as context_text(), for the memory-file INDEX (names +
 # one-line descriptions only - never the bodies, that's the whole point).
-_memories_cache = {"key": None, "text": ""}
+# profile id -> {"key": mtimes it was built from, "text": the index}. Per
+# profile for the same reason _context_cache is - see there.
+_memories_cache = {}
 _memories_lock = threading.Lock()
 
 
-def memory_files():
-    """Every individual memory file, alphabetical by name."""
-    if not MEMORIES.is_dir():
-        return []
-    return sorted(p for p in MEMORIES.glob("*.md")
-                  if p.is_file() and not p.name.startswith("."))
+def memory_files(profile=None):
+    """Every individual memory file this profile indexes, alphabetical by name
+    within each root and in the profile's own root order across them.
+
+    A root that is a FILE contributes just that file, the same way it does for
+    context - which is how one memory page can be shared into a profile that
+    otherwise keeps its own folder."""
+    out = []
+    for root in profiles.roots(profile, "memories"):
+        if root.is_dir():
+            found = sorted(p for p in root.glob("*.md")
+                           if p.is_file() and not p.name.startswith("."))
+        elif root.is_file() and root.suffix.lower() in CONTEXT_SUFFIXES:
+            found = [root]
+        else:
+            continue
+        for p in found:
+            if p not in out:
+                out.append(p)
+    return out
 
 
-def memories_text():
+def memories_text(profile=None):
     """The memory INDEX for this turn's prompt: each memory file's name and a
     one-line description (its first line), never its full body - same idea as
     the tool list, which names every tool without paying for its instructions
@@ -2387,19 +2403,27 @@ def memories_text():
     # Rebuilt at most once a second, same as context_text() above and for the
     # same reason: the mtime key costs a stat per memory file, and there are
     # far more of these than there are context files.
+    pid = profile or profiles.default_id()
     with _memories_lock:
-        if _memories_cache["key"] is not None and not filecache.due("memories_text"):
-            return _memories_cache["text"]
+        held = _memories_cache.get(pid)
+    if held is not None and held["key"] is not None \
+            and not filecache.due("memories_text:" + str(pid)):
+        return held["text"]
 
-    files = memory_files()
+    files = memory_files(profile)
+    # Where a NEW memory goes. Not MEMORIES: a profile with a memories folder
+    # of its own must send the model to that one, or every fact it learns in
+    # this profile lands in another profile's folder and is indexed nowhere.
+    home = profiles.write_root(profile, "memories")
     try:
         key = tuple((str(p), p.stat().st_mtime_ns) for p in files)
     except OSError:
         key = None
 
     with _memories_lock:
-        if key is not None and key == _memories_cache["key"]:
-            return _memories_cache["text"]
+        held = _memories_cache.get(pid)
+        if key is not None and held is not None and key == held["key"]:
+            return held["text"]
 
         lines = []
         for p in files:
@@ -2426,7 +2450,7 @@ def memories_text():
         text = (
             "Memories: individual topic files, one per file, kept with Uniagent "
             "itself - in the '" + provider.BUILTIN_WORKSPACE_ID + "' workspace, at "
-            + str(MEMORIES) + " on the machine running Uniagent. That is NOT "
+            + str(home) + " on the machine running Uniagent. That is NOT "
             "necessarily the workspace this chat is in: if it is working "
             "somewhere else - another folder, or another device - that path does "
             "not exist there, so move this chat to '"
@@ -2442,15 +2466,14 @@ def memories_text():
             "specific to a project, person, or topic none of these cover - not "
             "a general fact about the user, their computer or this environment, "
             "which belongs in the memory file in context/ - create a new "
-            "file with write_file, in that same workspace: " + str(MEMORIES)
+            "file with write_file, in that same workspace: " + str(home)
             + "/<topic>.md, first line a short one-line description, so it's "
             "listed here next turn."
         )
         text += ("\n" + "\n".join(lines)) if lines \
             else "\nThere are no memory files yet - write the first one when a " \
                  "fact worth keeping turns up."
-        _memories_cache["key"] = key
-        _memories_cache["text"] = text
+        _memories_cache[pid] = {"key": key, "text": text}
         return text
 
 
