@@ -515,6 +515,21 @@ def describe(wsid=None, tools=None):
     place = [t for t in ("read_file", "write_file", "edit_file", "ask_file")
              if tools is None or t in tools]
     has_terminal = tools is None or "terminal" in tools
+    # Whether this profile can MOVE, which is a different question from
+    # whether it can touch files. The paragraph below tells the model to use
+    # the workspace tool by name, and a profile that cannot call it must not
+    # be told to - see the "invitation to try them" note at the call site in
+    # main.injection_breakdown. The "chat" profile is exactly this case:
+    # read_file and three others, no workspace tool, and it was still being
+    # handed the move instructions every turn.
+    has_move = tools is None or "workspace" in tools
+    # Nothing here is about anywhere: no file tool, no terminal, and no way to
+    # move. There is no place-sensitive capability left for a location to be
+    # the location OF, so the honest output is nothing at all and the caller
+    # drops the section. A bare profile gets no workspace line rather than one
+    # saying "any tool that touches files works in ..." when it has none.
+    if not place and not has_terminal and not has_move:
+        return ""
     named = ("the file tool (" if len(place) == 1 else "the file tools (") \
         + ", ".join(place) + ")"
     if place and has_terminal:
@@ -542,7 +557,8 @@ def describe(wsid=None, tools=None):
             + ws.root + ", on the machine running Uniagent. Relative paths are "
             "resolved from there.")
     others = [w for w in provider.workspaces() if w["id"] != ws.id]
-    if others:
+    # Only if this profile can actually make the move - see has_move above.
+    if others and has_move:
         lines.append(
             "Other workspaces this chat can be moved to: "
             + "; ".join(w["id"] + " (" + w["name"] + " - "
