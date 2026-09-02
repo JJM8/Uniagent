@@ -2000,7 +2000,8 @@ def context_segments(agent, provider_name, model, breakdown=None):
     it - the context panel does, and building it again would re-read every
     context file on a poll that happens every two seconds."""
     if breakdown is None:
-        breakdown = injection_breakdown(provider_name, model, agent.pinned)
+        breakdown = injection_breakdown(provider_name, model, agent.pinned,
+                                        profile=agent.profile)
     parts = [p["text"] for p in breakdown if p["text"]]
     try:
         turns = json.loads(agent.history) if agent.history else []
@@ -2122,10 +2123,10 @@ def cache_outlook(agent, provider_name, model, breakdown=None):
         if not isinstance(turns, list):
             turns = []
         here = live_workspace(agent.id, agent.workspace)
-        system = system_text(provider_name, model, agent.pinned, here)
+        system = system_text(provider_name, model, agent.pinned, here, agent.profile)
         messages = [{"role": "system", "content": system}] + turns
         tools = tool_processor.tools_schema(
-            tool_processor.shape_for(provider_name))
+            tool_processor.shape_for(provider_name), agent.profile)
         segments = provider.wire_segments(provider_name, model, messages, tools)
         counted = tokens.measure(provider_name, model, segments)
         return cache_ledger.predict(agent.id, chat_dir(agent.id),
@@ -3585,7 +3586,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         safety=None, safety_prompt=None, inject=None, workspace_id=None,
         safety_threshold=None, safety_extra=None, on_message=None,
         on_reasoning=None, on_timing=None, on_request=None, on_thought=None,
-        on_reclassify=None, on_call_delta=None):
+        on_reclassify=None, on_call_delta=None, profile=None):
     """Run one turn over `history` and return the updated history: reply to text,
     and work through any tool calls it makes.
 
@@ -3687,6 +3688,12 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
     of pinning (there isn't one today, but nothing requires every call site to
     pass it).
 
+    `profile`, if given, is the named profile this turn runs on (profiles.json)
+    - which context it loads, which memories it indexes, and which tools and
+    skills it may reach. None means the default profile, which out of the box
+    is today's context/, memories/ and every tool, so a caller that knows
+    nothing about profiles behaves exactly as it did.
+
     `safety` and `safety_prompt` are this ONE turn's answer to the safety gate,
     both None (the default) meaning "follow the settings page" - so every caller
     that doesn't care behaves exactly as before. True/False forces the check on
@@ -3750,7 +3757,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         try:
             claude_session.run_turn(
                 turns, sync, said, chat_id, provider_name, model,
-                system_text(provider_name, model, pinned, here),
+                system_text(provider_name, model, pinned, here, profile),
                 workspace_id, chosen, approve,
                 on_text=on_text, on_tool_call=on_tool_call,
                 on_tool_result=on_tool_result, on_safety=on_safety,
@@ -3803,7 +3810,7 @@ def run(text, history, provider_name=None, model=None, temperature=0, approve=_a
         # Read fresh every pass, so the line telling the model where it is
         # working is right on the pass after a move rather than a turn later.
         here = live_workspace(chat_id, workspace_id)
-        system = system_text(provider_name, model, pinned, here)
+        system = system_text(provider_name, model, pinned, here, profile)
         messages = [{"role": "system", "content": system}] + turns
         usage = {}
         native_call = {}
