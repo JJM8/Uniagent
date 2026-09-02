@@ -9621,6 +9621,20 @@ function audioFrame(samples, rate) {
   if (!sayLive) vadFloor = vadFloor * 0.95 + rms * 0.05;
   const loud = rms > Math.max(vadFloor * 3, 0.008);
 
+  // Kept whatever happens next, and before the fork below decides anything:
+  // the point of this buffer is to still have the audio from BEFORE a wake,
+  // which is exactly the audio no branch below wanted at the time. It never
+  // leaves the page - the wake word still only ever sees the chunks the fork
+  // sends it, and a session still only ever sends what wakeWoke seeded it
+  // with plus what came after.
+  sayHistory.push(samples);
+  sayHistorySamples += samples.length;
+  const historyKeep = (SAY_HISTORY_MS / 1000) * rate;
+  while (sayHistory.length &&
+         sayHistorySamples - sayHistory[0].length >= historyKeep) {
+    sayHistorySamples -= sayHistory.shift().length;
+  }
+
   if (sayLive) sayCapture(samples, ms, loud);
   else if (wakeOn) wakeScanFrame(samples, rate, loud, ms);
   else { scanOut = []; scanRing = []; }
