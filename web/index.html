@@ -2325,28 +2325,42 @@
        included: this is a mode, not a panel inside the chat. */
     z-index: 39;
     background: var(--bg);
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 34px;
-    padding: 24px;
+    display: grid;
+    place-items: center;
+    overflow: hidden;
   }
   /* display:flex would otherwise beat the attribute and leave it on screen. */
   #stage[hidden] { display: none; }
 
+  /* As big as the window will take. There is one thing on this screen and it
+     should be readable from the other side of the room, which is the whole
+     reason the screen exists. */
   #stage-orb {
     position: relative;
-    width: clamp(220px, 46vmin, 400px);
-    height: clamp(220px, 46vmin, 400px);
+    width: min(88vmin, 96vw);
+    height: min(88vmin, 96vw);
     display: grid;
     place-items: center;
   }
+  /* Lit only while you are talking. Nothing else on the screen changes
+     brightness, so this is what carries "it is hearing you" at a glance from
+     far enough away that the towers are a texture rather than bars. */
+  #stage-orb::before {
+    content: "";
+    position: absolute;
+    inset: 10%;
+    border-radius: 50%;
+    background: radial-gradient(circle, var(--accent-a12), transparent 68%);
+    opacity: 0;
+    transition: opacity 0.25s ease;
+    pointer-events: none;
+  }
+  #stage.st-live #stage-orb::before { opacity: 1; }
   #stage-ring { position: absolute; inset: 0; width: 100%; height: 100%; }
   /* Square ends and no join: a tower is a tower, not a lozenge. */
   #stage-ring .tick {
     stroke: var(--accent);
-    stroke-width: 3;
+    stroke-width: 2.4;
     stroke-linecap: butt;
   }
   /* The sweep. It is the only thing moving while it works, because working is
@@ -2363,33 +2377,38 @@
   }
   @keyframes stage-spin { to { transform: rotate(360deg); } }
   #stage-mark {
-    width: 30%;
-    height: 30%;
+    width: 26%;
+    height: 26%;
     background: var(--mark) center / contain no-repeat;
   }
 
-  /* The same treatment as the UNIAGENT splash on an empty chat - 700 weight,
-     uppercase, 7px of tracking with the trailing space cancelled - because it
-     is the same word in the same voice, one screen further in. */
-  #stage-state {
-    font-size: clamp(20px, 3.4vw, 30px);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 7px;
-    text-indent: 7px;
-    color: var(--accent);
-    text-align: center;
-  }
-  /* What it has heard so far. Given a height it always occupies, so the state
-     above it doesn't jump up the screen the moment you stop talking. */
+  /* Subtitles, and the only words on the screen. Pinned to the bottom and
+     grown upward, so a long sentence never moves the circle; the weight is
+     the splash's 700, because it is meant to be read at the distance the
+     circle is meant to be seen at.
+
+     The scrim under them is doing real work rather than decoration: the
+     circle is nearly the height of the window, so the bottom of the ring
+     passes right behind this text, and unreadable subtitles over your own
+     towers would be the one way this screen could fail. */
   #stage-said {
-    max-width: min(680px, 88vw);
-    min-height: 2.6em;
-    font-size: clamp(17px, 2.4vw, 24px);
-    line-height: 1.3;
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding: 14vh 6vw 6vh;
+    font-size: clamp(22px, 3.6vw, 46px);
+    font-weight: 700;
+    line-height: 1.25;
     text-align: center;
     color: var(--text);
+    background: linear-gradient(to top, var(--bg) 46%, transparent);
+    pointer-events: none;
   }
+  /* Empty is empty: no plate, no placeholder, nothing to read when nothing
+     has been said. :empty is why the scrim is on this element and not on a
+     wrapper - it takes the gradient away with the text. */
+  #stage-said:empty { display: none; }
 
   /* The four states. Only two things change between them: how the towers are
      lit, and whether the sweep is running. */
@@ -3856,7 +3875,6 @@
     </svg>
     <span id="stage-mark" aria-hidden="true"></span>
   </div>
-  <div id="stage-state">listening</div>
   <div id="stage-said"></div>
 </div>
 
@@ -10156,13 +10174,15 @@ function drawHeard() {
 // ends, sayFinish() sets sayBusy on its way to sending, so it drops straight
 // back to the sweep without flashing through the listening look on the way.
 const stage = document.getElementById("stage");
-const stageState = document.getElementById("stage-state");
 const stageSaid = document.getElementById("stage-said");
 
-const STAGE_TICKS = 56;   // towers around the ring
-const STAGE_R = 76;       // where one starts, in the 200-wide viewBox
-const STAGE_BASE = 7;     // how tall it is with nothing being said
-const STAGE_RISE = 26;    // and how much taller the loudest moment makes it
+const STAGE_TICKS = 64;   // towers around the ring
+// All three in the 200-wide viewBox, and they have to add up to less than the
+// 100 from its centre to its edge: an svg clips at its own box, so a tower
+// taller than that is a tower with its top cut off at the loudest moment.
+const STAGE_R = 56;       // where a tower starts
+const STAGE_BASE = 5;     // how tall it is with nothing being said
+const STAGE_RISE = 36;    // and how much taller the loudest moment makes it
 
 let stageOn = false;
 let stageWokeEar = false; // the stage turned the ear on, so the stage turns it off
@@ -10190,14 +10210,11 @@ function stageDraw() {
               : (sayBusy || turnBusy) ? "working"
               : wakeOn ? "listening"
               : "off";
+  // The state is never spelled out in words - the ring says it. Still or
+  // moving is you; the sweep is it; grey is neither.
   if (state !== stageWas) {
     stageWas = state;
     stage.className = "st-" + state;
-    stageState.textContent =
-        state === "live" ? "listening"
-      : state === "working" ? (sayBusy ? "sending" : "working")
-      : state === "listening" ? "say \u201c" + wakeLabel() + "\u201d"
-      : "not listening";
   }
   // Set as text, not markup: this came off a microphone by way of a speech
   // model, exactly as in drawHeard(), and has no business being parsed.
