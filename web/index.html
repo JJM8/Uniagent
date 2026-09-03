@@ -2409,13 +2409,16 @@
     left: 0;
     right: 0;
     bottom: 0;
-    padding: 14vh 6vw 6vh;
+    padding: 20vh 6vw 6vh;
     font-size: clamp(22px, 3.6vw, 46px);
     font-weight: 700;
     line-height: 1.25;
     text-align: center;
     color: var(--text);
-    background: linear-gradient(to top, var(--bg) 46%, transparent);
+    /* Ramped over the whole of that padding rather than reaching the
+       background colour early: a scrim that goes fully opaque part way up
+       leaves a visible horizontal seam across the glow behind it. */
+    background: linear-gradient(to top, var(--bg) 22%, transparent 92%);
     pointer-events: none;
     /* They come up with the circle's move, a touch faster, so the two read as
        one gesture: the circle gets out of the way and the words take the
