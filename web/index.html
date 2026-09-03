@@ -26,6 +26,11 @@
      re-lit or made translucent. Retinting the whole app is three numbers. */
   :root, :root[data-theme="dark"] {
     --bg: #0d1117;
+    /* The same colour at zero alpha. A gradient written "to transparent"
+       interpolates towards transparent BLACK, which shows up as a grey band
+       over any ground that is not black - see #stage-said, which fades one
+       of these out over the circle behind it. */
+    --bg-a0: rgba(13, 17, 23, 0);
     --panel: #161b22;
     --border: #21262d;
     --text: #c9d1d9;
@@ -59,6 +64,7 @@
   }
   :root[data-theme="light"] {
     --bg: #ffffff;
+    --bg-a0: rgba(255, 255, 255, 0);
     --panel: #f6f8fa;
     --border: #d0d7de;
     --text: #1f2328;
@@ -2418,7 +2424,7 @@
     /* Ramped over the whole of that padding rather than reaching the
        background colour early: a scrim that goes fully opaque part way up
        leaves a visible horizontal seam across the glow behind it. */
-    background: linear-gradient(to top, var(--bg) 22%, transparent 92%);
+    background: linear-gradient(to top, var(--bg) 22%, var(--bg-a0) 92%);
     pointer-events: none;
     /* They come up with the circle's move, a touch faster, so the two read as
        one gesture: the circle gets out of the way and the words take the
