@@ -2341,7 +2341,16 @@
     height: min(88vmin, 96vw);
     display: grid;
     place-items: center;
+    /* The move. Big and centred is the resting state - there is nothing to
+       read, so the circle gets the whole window. The moment there are
+       subtitles it stands up out of their way, and it drops back the moment
+       there aren't. One transform rather than a height and a margin, so the
+       rise and the shrink happen as a single movement and the browser can do
+       the whole thing on the compositor. */
+    transition: transform 0.55s cubic-bezier(0.16, 1, 0.3, 1);
+    will-change: transform;
   }
+  #stage.has-subs #stage-orb { transform: translateY(-7vh) scale(0.58); }
   /* Lit only while you are talking. Nothing else on the screen changes
      brightness, so this is what carries "it is hearing you" at a glance from
      far enough away that the towers are a texture rather than bars. */
@@ -2355,7 +2364,7 @@
     transition: opacity 0.25s ease;
     pointer-events: none;
   }
-  #stage.st-live #stage-orb::before { opacity: 1; }
+  #stage[data-state="live"] #stage-orb::before { opacity: 1; }
   #stage-ring { position: absolute; inset: 0; width: 100%; height: 100%; }
   /* Square ends and no join: a tower is a tower, not a lozenge. */
   #stage-ring .tick {
@@ -2376,10 +2385,14 @@
     animation: stage-spin 1.5s linear infinite;
   }
   @keyframes stage-spin { to { transform: rotate(360deg); } }
+  /* The mark leans into the loud parts. Four percent is deliberately almost
+     nothing - it should read as the thing being alive, not as a bouncing
+     logo, and --stage-lvl is 0 whenever there is no session open. */
   #stage-mark {
     width: 26%;
     height: 26%;
     background: var(--mark) center / contain no-repeat;
+    transform: scale(calc(1 + var(--stage-lvl, 0) * 0.04));
   }
 
   /* Subtitles, and the only words on the screen. Pinned to the bottom and
@@ -2404,18 +2417,28 @@
     color: var(--text);
     background: linear-gradient(to top, var(--bg) 46%, transparent);
     pointer-events: none;
+    /* They come up with the circle's move, a touch faster, so the two read as
+       one gesture: the circle gets out of the way and the words take the
+       space it left. */
+    opacity: 0;
+    transform: translateY(16px);
+    transition: opacity 0.3s ease, transform 0.45s cubic-bezier(0.16, 1, 0.3, 1);
   }
-  /* Empty is empty: no plate, no placeholder, nothing to read when nothing
-     has been said. :empty is why the scrim is on this element and not on a
-     wrapper - it takes the gradient away with the text. */
-  #stage-said:empty { display: none; }
+  #stage.has-subs #stage-said { opacity: 1; transform: none; }
+
+  /* The movement is the only thing turned off here. The sweep stays: it is
+     the sole indication that it is working at all, which makes it
+     information rather than motion for its own sake. */
+  @media (prefers-reduced-motion: reduce) {
+    #stage-orb, #stage-said { transition: none; }
+  }
 
   /* The four states. Only two things change between them: how the towers are
      lit, and whether the sweep is running. */
-  #stage.st-off .tick,
-  #stage.st-working .tick { opacity: 0.16; }
-  #stage.st-working #stage-arc { opacity: 1; }
-  #stage.st-off #stage-mark { opacity: 0.3; }
+  #stage[data-state="off"] .tick,
+  #stage[data-state="working"] .tick { opacity: 0.16; }
+  #stage[data-state="working"] #stage-arc { opacity: 1; }
+  #stage[data-state="off"] #stage-mark { opacity: 0.3; }
   #stage.st-off #stage-state { color: var(--dim); }
 
   #stage-exit {
@@ -10187,7 +10210,8 @@ const STAGE_RISE = 36;    // and how much taller the loudest moment makes it
 let stageOn = false;
 let stageWokeEar = false; // the stage turned the ear on, so the stage turns it off
 let stageRaf = 0;
-let stageWas = "";        // the last state drawn, so the text isn't rewritten 60x a second
+let stageWas = "";        // the last state drawn, so nothing is rewritten 60x a second
+let stageSubs = "";       // the subtitle on screen, and what the circle moves for
 let stageTicks = [];      // {el, cos, sin} per tower, built once
 
 // The towers, once. Their angle never changes - only their length does - so
@@ -10214,15 +10238,25 @@ function stageDraw() {
   // moving is you; the sweep is it; grey is neither.
   if (state !== stageWas) {
     stageWas = state;
-    stage.className = "st-" + state;
+    stage.dataset.state = state;
   }
+
+  // What the subtitle says, and with it whether the circle is up out of the
+  // way or back down filling the window. It holds through "working": the
+  // words you just said are the most useful thing on the screen right up
+  // until the answer arrives, and clearing them the instant the clip went off
+  // would drop the circle back down for the half second before the reply.
+  if (sayLive || sayBusy) stageSubs = sayHeardText;
+  else if (state !== "working") stageSubs = "";
   // Set as text, not markup: this came off a microphone by way of a speech
   // model, exactly as in drawHeard(), and has no business being parsed.
-  stageSaid.textContent = (sayLive || sayBusy) ? sayHeardText : "";
+  if (stageSaid.textContent !== stageSubs) stageSaid.textContent = stageSubs;
+  stage.classList.toggle("has-subs", stageSubs !== "");
 
   // Nothing but a live session moves anything. With lvl at 0 the whole term
   // below it is 0, every tower sits at STAGE_BASE, and the ring is still.
   const lvl = state === "live" ? voiceLevel : 0;
+  stage.style.setProperty("--stage-lvl", lvl.toFixed(3));
   const t = performance.now() / 600;
   for (let i = 0; i < stageTicks.length; i++) {
     const k = stageTicks[i];
@@ -10244,7 +10278,13 @@ function stageOpen() {
   if (stageOn) return;
   stageOn = true;
   stage.hidden = false;
+  // Opened fresh every time: no subtitle left over from the last visit, and
+  // the circle starts big and centred rather than animating down from
+  // wherever it was when it was last closed.
   stageWas = "";
+  stageSubs = "";
+  stageSaid.textContent = "";
+  stage.classList.remove("has-subs");
   // A screen for talking to it that isn't listening is a poster. If the ear
   // is configured and off, opening the stage turns it on - and leaving turns
   // it back off, but only if the stage was what turned it on.
